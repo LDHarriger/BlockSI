@@ -1,0 +1,268 @@
+1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_� Partition Table:
+[0;32mI (51) boot: ## Label            Usage          Type ST Offset  ets Jul 29 2019 12:21:46[0m
+
+rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:2
+load:0x3fff0030,len:6276
+load:0x40078000,len:15736
+load:0x40080400,len:4
+load:0x40080404,len:3860
+entry 0x4008063c
+[0;32mI (29) boot: ESP-IDF v5.4.3 2nd stage bootloader[0m
+[0;32mI (29) boot: compile time Dec 13 2025 16:34:42[0m
+[0;32mI (30) boot: Multicore bootloader[0m
+[0;32mI (31) boot: chip revision: v3.0[0m
+[0;32mI (34) boot.esp32: SPI Speed      : 40MHz[0m
+[0;32mI (37) boot.esp32: SPI Mode       : DIO[0m
+[0;32mI (41) boot.esp32: SPI Flash Size : 4MB[0m
+[0;32mI (44) boot: Enabling RNG early entropy source...[0m
+[0;32mI (49) boot: Partition Table:[0m
+[0;32mI (51) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (58) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (71) boot:  2 factory          factory app      00 00 00010000 00100000[0m
+[0;32mI (77) boot:  3 storage          Unknown data     01 82 00110000 00080000[0m
+[0;32mI (84) boot: End of partition table[0m
+[0;32mI (87) esp_image: segment 0: paddr=00010020 vaddr=3f400020 size=260cch (155852) map[0m
+[0;32mI (148) esp_image: segment 1: paddr=000360f4 vaddr=3ffb0000 size=04170h ( 16752) load[0m
+[0;32mI (154) esp_image: segment 2: paddr=0003a26c vaddr=40080000 size=05dach ( 23980) load[0m
+[0;32mI (164) esp_image: segment 3: paddr=00040020 vaddr=400d0020 size=a0a2ch (657964) map[0m
+[0;32mI (389) esp_image: segment 4: paddr=000e0a54 vaddr=40085dac size=11034h ( 69684) load[0m
+[0;32mI (416) esp_image: segment 5: paddr=000f1a90 vaddr=50000000 size=0001ch (    28) load[0m
+[0;32mI (427) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (428) boot: Disabling RNG early entropy source...[0m
+[0;32mI (438) cpu_start: Multicore app[0m
+[0;32mI (446) cpu_start: Pro cpu start user code[0m
+[0;32mI (446) cpu_start: cpu freq: 160000000 Hz[0m
+[0;32mI (446) app_init: Application information:[0m
+[0;32mI (446) app_init: Project name:     blocksi_control[0m
+[0;32mI (451) app_init: App version:      1[0m
+[0;32mI (454) app_init: Compile time:     Dec 13 2025 16:34:28[0m
+[0;32mI (459) app_init: ELF file SHA256:  3886b6a14...[0m
+[0;32mI (464) app_init: ESP-IDF:          v5.4.3[0m
+[0;32mI (468) efuse_init: Min chip rev:     v0.0[0m
+I (471) efuse_init: Max chip rev:     v3.99 
+[0;32mI (475) efuse_init: Chip rev:         v3.0[0m
+[0;32mI (480) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (486) heap_init: At 3FFAE6E0 len 00001920 (6 KiB): DRAM[0m
+[0;32mI (491) heap_init: At 3FFBB8B8 len 00024748 (145 KiB): DRAM[0m
+[0;32mI (496) heap_init: At 3FFE0440 len 00003AE0 (14 KiB): D/IRAM[0m
+[0;32mI (501) heap_init: At 3FFE4350 len 0001BCB0 (111 KiB): D/IRAM[0m
+[0;32mI (507) heap_init: At 40096DE0 len 00009220 (36 KiB): IRAM[0m
+[0;32mI (513) spi_flash: detected chip: generic[0m
+[0;32mI (516) spi_flash: flash io: dio[0m
+[0;32mI (520) main_task: Started on CPU0[0m
+[0;32mI (530) main_task: Calling app_main()[0m
+[0;32mI (530) BLOCKSI: === BlockSI Control System ===[0m
+[0;32mI (530) BLOCKSI: Firmware version: 1.4.0[0m
+[0;32mI (530) BLOCKSI: ESP-IDF version: v5.4.3[0m
+[0;32mI (550) BLOCKSI: Initializing relay control...[0m
+[0;32mI (550) RELAY: Initializing relay control[0m
+[0;32mI (550) RELAY:   Ozone Generator: GPIO12[0m
+[0;32mI (550) RELAY:   O2 Concentrator: GPIO13[0m
+[0;32mI (560) RELAY:   Active: HIGH[0m
+[0;32mI (560) gpio: GPIO[12]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (570) gpio: GPIO[13]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (580) RELAY: Relay control initialized - all relays OFF[0m
+[0;32mI (580) BLOCKSI: Initializing backup storage...[0m
+[0;32mI (590) BACKUP: Initializing backup storage[0m
+[0;32mI (630) BACKUP: Storage: 474641 total, 502 used, 474139 free[0m
+[0;32mI (640) BACKUP: Existing backup files: 1[0m
+[0;32mI (640) BLOCKSI: Initializing WiFi...[0m
+[0;32mI (660) wifi:wifi driver task: 3ffc4cf0, prio:23, stack:6656, core=0[0m
+[0;32mI (670) wifi:wifi firmware version: e8ce6e2[0m
+[0;32mI (670) wifi:wifi certification version: v7.0[0m
+[0;32mI (670) wifi:config NVS flash: enabled[0m
+[0;32mI (670) wifi:config nano formatting: disabled[0m
+[0;32mI (670) wifi:Init data frame dynamic rx buffer num: 32[0m
+[0;32mI (680) wifi:Init static rx mgmt buffer num: 5[0m
+[0;32mI (680) wifi:Init management short buffer num: 32[0m
+[0;32mI (690) wifi:Init dynamic tx buffer num: 32[0m
+[0;32mI (690) wifi:Init static rx buffer size: 1600[0m
+[0;32mI (700) wifi:Init static rx buffer num: 10[0m
+[0;32mI (700) wifi:Init dynamic rx buffer num: 32[0m
+[0;32mI (700) wifi_init: rx ba win: 6[0m
+[0;32mI (710) wifi_init: accept mbox: 6[0m
+[0;32mI (710) wifi_init: tcpip mbox: 32[0m
+[0;32mI (710) wifi_init: udp mbox: 6[0m
+[0;32mI (710) wifi_init: tcp mbox: 6[0m
+[0;32mI (720) wifi_init: tcp tx win: 5760[0m
+[0;32mI (720) wifi_init: tcp rx win: 5760[0m
+[0;32mI (720) wifi_init: tcp mss: 1440[0m
+[0;32mI (730) wifi_init: WiFi IRAM OP enabled[0m
+[0;32mI (730) wifi_init: WiFi RX IRAM OP enabled[0m
+[0;32mI (740) phy_init: phy_version 4861,b71b5ad,Aug  5 2025,11:16:06[0m
+[0;32mI (820) wifi:mode : sta (b8:d6:1a:57:72:e8)[0m
+[0;32mI (820) wifi:enable tsf[0m
+[0;32mI (830) BLOCKSI: WiFi initialization complete, SSID: Goldrush1[0m
+[0;32mI (830) BLOCKSI: WiFi station started, connecting...[0m
+[0;32mI (850) wifi:new:<4,1>, old:<1,0>, ap:<255,255>, sta:<4,1>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (850) wifi:state: init -> auth (0xb0)[0m
+[0;32mI (880) wifi:state: auth -> assoc (0x0)[0m
+[0;32mI (1040) wifi:state: assoc -> run (0x10)[0m
+[0;32mI (1160) wifi:connected with Goldrush1, aid = 1, channel 4, 40U, bssid = 0e:36:c9:88:b3:57[0m
+[0;32mI (1160) wifi:security: WPA2-PSK, phy: bgn, rssi: -73[0m
+[0;32mI (1160) wifi:pm start, type: 1[0m
+
+[0;32mI (1160) wifi:dp: 1, bi: 108544, li: 2, scale listen interval from 307200 us to 217088 us[0m
+[0;32mI (1320) wifi:<ba-add>idx:0 (ifx:0, 0e:36:c9:88:b3:57), tid:0, ssn:1, winSize:64[0m
+[0;32mI (1340) wifi:dp: 3, bi: 108544, li: 3, scale listen interval from 307200 us to 325632 us[0m
+[0;32mI (1340) wifi:AP's beacon interval = 108544 us, DTIM period = 3[0m
+[0;32mI (2380) esp_netif_handlers: sta ip: 192.168.1.119, mask: 255.255.255.0, gw: 192.168.1.1[0m
+[0;32mI (2380) BLOCKSI: WiFi connected, IP: 192.168.1.119[0m
+[0;32mI (2380) BLOCKSI: WiFi connected successfully[0m
+[0;32mI (2380) BLOCKSI: Initializing Golioth...[0m
+[0;32mI (2390) BLOCKSI: Initializing Golioth client[0m
+[0;32mI (2390) BLOCKSI: PSK-ID: BlockSIControl@blocksi[0m
+[0;32mI (2390) golioth_mbox: Mbox created, bufsize: 2688, num_items: 20, item_size: 128[0m
+[0;32mI (2400) BLOCKSI: Golioth client created, waiting for connection...[0m
+[0;32mI (2410) BLOCKSI: Waiting for Golioth connection...[0m
+[0;32mI (2660) golioth_coap_client_libcoap: Start CoAP session with host: coaps://coap.golioth.io[0m
+[0;32mI (2660) golioth_coap_client_libcoap: Session PSK-ID: BlockSIControl@blocksi[0m
+[0;32mI (2670) libcoap: Setting PSK key[0m
+
+[0;32mI (2680) golioth_coap_client_libcoap: Entering CoAP I/O loop[0m
+[0;32mI (4070) golioth_coap_client_libcoap: Golioth CoAP client connected[0m
+[0;32mI (4070) BLOCKSI: Golioth client connected[0m
+[0;32mI (4070) BLOCKSI: Golioth connected successfully[0m
+[0;32mI (4070) BLOCKSI: Registering RPC handlers...[0m
+[0;32mI (4080) RELAY: Registered RPC methods: relay_set, relay_get, relay_all_off[0m
+[0;32mI (4080) BLOCKSI: RPC handlers registered[0m
+[0;32mI (4090) BLOCKSI: Initializing LAN client...[0m
+[0;32mI (4090) LAN: Initializing LAN client[0m
+[0;32mI (4090) LAN: LAN client task started[0m
+[0;32mI (4100) LAN: Server: 192.168.1.8:5000[0m
+[0;32mI (4100) LAN: Connecting to 192.168.1.8:5000...[0m
+[0;32mI (4110) LAN: LAN client initialized[0m
+[0;32mI (4110) BLOCKSI: LAN client started, connecting to 192.168.1.8:5000[0m
+[0;32mI (4110) BLOCKSI: Initializing 106-H interface...[0m
+[0;32mI (4120) 106H: Initializing 106-H interface[0m
+[0;32mI (4120) 106H: UART2, TX=17, RX=16, 19200 baud[0m
+[0;32mI (4130) 106H: RX task started[0m
+[0;32mI (4130) 106H: 106-H interface initialized[0m
+[0;32mI (4130) BLOCKSI: === System Ready ===[0m
+[0;32mI (4140) BLOCKSI: Streaming to: Golioth Cloud[0m
+[0;32mI (4140) LAN: Connected to PC server[0m
+[0;32mI (4150) BLOCKSI: Streaming to: LAN PC (192.168.1.8:5000)[0m
+[0;32mI (4150) BLOCKSI: Backup storage: SPIFFS (sequence recording)[0m
+[0;32mI (4150) BLOCKSI: RPC commands: relay_set, relay_get, relay_all_off[0m
+[0;32mI (4160) BLOCKSI: LAN commands: backup_*, relay_*, 106h_avg, 106h_log_*[0m
+[0;32mI (4650) LAN: RX: CMD,relay_get[0m
+[0;32mI (4650) BLOCKSI: LAN command: relay_get, args: (none)[0m
+[0;32mI (4700) LAN: RX: CMD,status[0m
+[0;32mI (4700) BLOCKSI: LAN command: status, args: (none)[0m
+[0;32mI (4700) LAN: RX: CMD,106h_avg_get[0m
+[0;32mI (4700) BLOCKSI: LAN command: 106h_avg_get, args: (none)[0m
+[0;32mI (4700) LAN: RX: CMD,106h_log_status[0m
+[0;32mI (4700) BLOCKSI: LAN command: 106h_log_status, args: (none)[0m
+[0;32mI (5260) golioth_rpc: RPC observation established[0m
+[0;32mI (10750) BLOCKSI: Queued: O3=0.14 wt%, T=33.2°C, P=1019.9 mbar[0m
+[0;32mI (20750) BLOCKSI: Queued: O3=0.14 wt%, T=33.2°C, P=1020.0 mbar[0m
+[0;32mI (30750) BLOCKSI: Queued: O3=0.14 wt%, T=33.2°C, P=1020.0 mbar[0m
+[0;32mI (37210) LAN: RX: CMD,106h_avg,1[0m
+[0;32mI (37210) BLOCKSI: LAN command: 106h_avg, args: 1[0m
+[0;32mI (37210) 106H: Setting averaging time to 2 sec[0m
+[0;33mW (37210) 106H: Entering menu (measurements will stop)[0m
+[0;32mI (37210) 106H: TX: 'm' (0x6D) -> UART2[0m
+[0;32mI (39220) 106H: Requesting averaging submenu[0m
+[0;32mI (39220) 106H: TX: 'a' (0x61) -> UART2[0m
+[0;32mI (40220) 106H: Selecting option 1[0m
+[0;32mI (40220) 106H: TX: '1' (0x31) -> UART2[0m
+[0;32mI (40320) 106H: TX: '' (0x0D) -> UART2[0m
+[0;32mI (40750) BLOCKSI: Queued: O3=0.14 wt%, T=33.3°C, P=1019.9 mbar[0m
+[0;32mI (41320) 106H: Exiting menu (resuming measurements)[0m
+[0;32mI (41320) 106H: TX: 'x' (0x78) -> UART2[0m
+[0;32mI (41370) LAN: RX: CMD,106h_avg_get[0m
+[0;32mI (41370) BLOCKSI: LAN command: 106h_avg_get, args: (none)[0m
+[0;32mI (50750) BLOCKSI: Queued: O3=0.14 wt%, T=33.3°C, P=1020.0 mbar[0m
+[0;32mI (60750) BLOCKSI: Queued: O3=0.14 wt%, T=33.4°C, P=1020.1 mbar[0m
+[0;32mI (64130) BLOCKSI: === Status ===[0m
+[0;32mI (64130) BLOCKSI: WiFi: Connected[0m
+[0;32mI (64130) BLOCKSI: Golioth: Connected[0m
+[0;32mI (64130) BLOCKSI: LAN: Connected (TX:6 RX:6 reconn:0)[0m
+[0;32mI (64130) BLOCKSI: 106-H Samples: 6 total, 0 errors[0m
+[0;32mI (64130) BLOCKSI: Relays: O3_Gen=OFF, O2_Conc=OFF[0m
+[0;32mI (64150) BLOCKSI: Backup: 502/474641 bytes, 1 files, idle[0m
+[0;32mI (64150) BLOCKSI: Free heap: 151272 bytes[0m
+[0;32mI (70750) BLOCKSI: Queued: O3=0.14 wt%, T=33.4°C, P=1020.1 mbar[0m
+[0;32mI (80750) BLOCKSI: Queued: O3=0.14 wt%, T=33.5°C, P=1020.3 mbar[0m
+[0;32mI (90750) BLOCKSI: Queued: O3=0.14 wt%, T=33.5°C, P=1020.3 mbar[0m
+[0;32mI (100750) BLOCKSI: Queued: O3=0.14 wt%, T=33.3°C, P=1020.0 mbar[0m
+[0;33mW (102550) golioth_coap_client_libcoap: CoAP message retransmitted[0m
+[0;32mI (110750) BLOCKSI: Queued: O3=0.14 wt%, T=33.5°C, P=1020.3 mbar[0m
+[0;32mI (120750) BLOCKSI: Queued: O3=0.14 wt%, T=33.4°C, P=1020.5 mbar[0m
+[0;33mW (123530) golioth_coap_client_libcoap: CoAP message retransmitted[0m
+[0;32mI (124150) BLOCKSI: === Status ===[0m
+[0;32mI (124150) BLOCKSI: WiFi: Connected[0m
+[0;32mI (124150) BLOCKSI: Golioth: Connected[0m
+[0;32mI (124150) BLOCKSI: LAN: Connected (TX:12 RX:6 reconn:0)[0m
+[0;32mI (124150) BLOCKSI: 106-H Samples: 12 total, 0 errors[0m
+[0;32mI (124150) BLOCKSI: Relays: O3_Gen=OFF, O2_Conc=OFF[0m
+[0;32mI (124180) BLOCKSI: Backup: 502/474641 bytes, 1 files, idle[0m
+[0;32mI (124180) BLOCKSI: Free heap: 149144 bytes[0m
+[0;32mI (130750) BLOCKSI: Queued: O3=0.14 wt%, T=33.5°C, P=1020.0 mbar[0m
+[0;32mI (140750) BLOCKSI: Queued: O3=0.14 wt%, T=33.5°C, P=1020.0 mbar[0m
+[0;32mI (150750) BLOCKSI: Queued: O3=0.14 wt%, T=33.5°C, P=1020.4 mbar[0m
+[0;32mI (152920) LAN: RX: CMD,106h_avg,2[0m
+[0;32mI (152920) BLOCKSI: LAN command: 106h_avg, args: 2[0m
+[0;32mI (152920) 106H: Setting averaging time to 10 sec[0m
+[0;33mW (152920) 106H: Entering menu (measurements will stop)[0m
+[0;32mI (152920) 106H: TX: 'm' (0x6D) -> UART2[0m
+[0;32mI (154930) 106H: Requesting averaging submenu[0m
+[0;32mI (154930) 106H: TX: 'a' (0x61) -> UART2[0m
+[0;32mI (155930) 106H: Selecting option 2[0m
+[0;32mI (155930) 106H: TX: '2' (0x32) -> UART2[0m
+[0;32mI (156030) 106H: TX: '[0m' (0x0D) -> UART2
+[0;32mI (157030) 106H: Exiting menu (resuming measurements)[0m
+[0;32mI (157030) 106H: TX: 'x' (0x78) -> UART2[0m
+[0;32mI (157080) LAN: RX: CMD,106h_avg_get[0m
+[0;32mI (157080) BLOCKSI: LAN command: 106h_avg_get, args: (none)[0m
+[0;32mI (160750) BLOCKSI: Queued: O3=0.14 wt%, T=33.5°C, P=1019.9 mbar[0m
+[0;32mI (170750) BLOCKSI: Queued: O3=0.14 wt%, T=33.6°C, P=1020.1 mbar[0m
+[0;32mI (180750) BLOCKSI: Queued: O3=0.14 wt%, T=33.6°C, P=1020.1 mbar[0m
+[0;33mW (182410) golioth_coap_client_libcoap: CoAP message retransmitted[0m
+[0;32mI (184180) BLOCKSI: === Status ===[0m
+[0;32mI (184180) BLOCKSI: WiFi: Connected[0m
+[0;32mI (184180) BLOCKSI: Golioth: Connected[0m
+[0;32mI (184180) BLOCKSI: LAN: Connected (TX:18 RX:8 reconn:0)[0m
+[0;32mI (184180) BLOCKSI: 106-H Samples: 18 total, 0 errors[0m
+[0;32mI (184180) BLOCKSI: Relays: O3_Gen=OFF, O2_Conc=OFF[0m
+[0;32mI (184210) BLOCKSI: Backup: 502/474641 bytes, 1 files, idle[0m
+[0;32mI (184210) BLOCKSI: Free heap: 151176 bytes[0m
+[0;32mI (190750) BLOCKSI: Queued: O3=0.14 wt%, T=33.6°C, P=1020.3 mbar[0m
+[0;32mI (193080) LAN: RX: CMD,106h_avg,1[0m
+[0;32mI (193080) BLOCKSI: LAN command: 106h_avg, args: 1[0m
+[0;32mI (193080) 106H: Setting averaging time to 2 sec[0m
+[0;33mW (193080) 106H: Entering menu (measurements will stop)[0m
+[0;32mI (193080) 106H: TX: 'm' (0x6D) -> UART2[0m
+[0;32mI (195090) 106H: Requesting averaging submenu[0m
+[0;32mI (195090) 106H: TX: 'a' (0x61) -> UART2[0m
+[0;32mI (196090) 106H: Selecting option 1[0m
+[0;32mI (196090) 106H: TX: '1' (0x31) -> UART2[0m
+[0;32mI (196190) 106H: TX: '[0m' (0x0D) -> UART2
+[0;32mI (197190) 106H: Exiting menu (resuming measurements)[0m
+[0;32mI (197190) 106H: TX: 'x' (0x78) -> UART2[0m
+[0;32mI (197240) LAN: RX: CMD,106h_avg_get[0m
+[0;32mI (197240) BLOCKSI: LAN command: 106h_avg_get, args: (none)[0m
+[0;32mI (200750) BLOCKSI: Queued: O3=0.14 wt%, T=33.6°C, P=1020.1 mbar[0m
+[0;32mI (210750) BLOCKSI: Queued: O3=0.14 wt%, T=33.6°C, P=1020.1 mbar[0m
+[0;32mI (220750) BLOCKSI: Queued: O3=0.14 wt%, T=33.6°C, P=1020.1 mbar[0m
+[0;32mI (230750) BLOCKSI: Queued: O3=0.14 wt%, T=33.6°C, P=1020.0 mbar[0m
+[0;32mI (240750) BLOCKSI: Queued: O3=0.14 wt%, T=33.6°C, P=1020.0 mbar[0m
+[0;32mI (244210) BLOCKSI: === Status ===[0m
+[0;32mI (244210) BLOCKSI: WiFi: Connected[0m
+[0;32mI (244210) BLOCKSI: Golioth: Connected[0m
+[0;32mI (244210) BLOCKSI: LAN: Connected (TX:24 RX:10 reconn:0)[0m
+[0;32mI (244210) BLOCKSI: 106-H Samples: 24 total, 0 errors[0m
+[0;32mI (244210) BLOCKSI: Relays: O3_Gen=OFF, O2_Conc=OFF[0m
+[0;32mI (244240) BLOCKSI: Backup: 502/474641 bytes, 1 files, idle[0m
+[0;32mI (244240) BLOCKSI: Free heap: 151300 bytes[0m
+[0;32mI (250750) BLOCKSI: Queued: O3=0.14 wt%, T=33.6°C, P=1020.0 mbar[0m
+[0;32mI (260760) BLOCKSI: Queued: O3=0.14 wt%, T=33.6°C, P=1020.3 mbar[0m
+[0;32mI (270760) BLOCKSI: Queued: O3=0.14 wt%, T=33.6°C, P=1019.9 mbar[0m
+[0;32mI (280760) BLOCKSI: Queued: O3=0.14 wt%, T=33.6°C, P=1020.0 mbar[0m
+[0;32mI (290760) BLOCKSI: Queued: O3=0.14 wt%, T=33.6°C, P=1019.9 mbar[0m

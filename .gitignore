@@ -1,0 +1,27 @@
+# ESP-IDF build artifacts
+ControlSystem/build/
+ControlSystem/sdkconfig
+ControlSystem/sdkconfig.old
+ControlSystem/dependencies.lock
+
+# Keep sdkconfig.defaults (safe template) but not sdkconfig (has credentials)
+
+# Python
+PC/__pycache__/
+PC/*.pyc
+PC/.streamlit/
+
+# Data files (don't commit recorded data)
+PC/*.csv
+PC/data/
+
+# IDE
+.vscode/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

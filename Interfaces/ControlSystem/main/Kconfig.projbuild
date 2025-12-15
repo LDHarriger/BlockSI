@@ -1,0 +1,108 @@
+menu "BlockSI Configuration"
+
+    menu "WiFi Configuration"
+        config WIFI_SSID
+            string "WiFi SSID"
+            default "myssid"
+            help
+                SSID (network name) to connect to.
+
+        config WIFI_PASSWORD
+            string "WiFi Password"
+            default "mypassword"
+            help
+                WiFi password (WPA or WPA2) to use.
+    endmenu
+
+    menu "Golioth Configuration"
+        config GOLIOTH_PSK_ID
+            string "Golioth PSK-ID"
+            default "device@project"
+            help
+                PSK-ID for Golioth authentication (device@project format).
+
+        config GOLIOTH_PSK
+            string "Golioth PSK"
+            default ""
+            help
+                Pre-shared key (hex string) for Golioth authentication.
+    endmenu
+
+    menu "Model 106-H Ozone Monitor"
+        config M106H_UART_NUM
+            int "UART Port Number"
+            default 2
+            range 0 2
+            help
+                UART port number for 106-H communication (0, 1, or 2).
+
+        config M106H_TX_GPIO
+            int "TX GPIO Pin"
+            default 17
+            help
+                GPIO pin for UART TX to 106-H.
+
+        config M106H_RX_GPIO
+            int "RX GPIO Pin"
+            default 16
+            help
+                GPIO pin for UART RX from 106-H.
+    endmenu
+
+    menu "Relay Control"
+        config RELAY_OZONE_GEN_GPIO
+            int "Ozone Generator SSR GPIO"
+            default 12
+            help
+                GPIO pin connected to ozone generator SSR input.
+                Default: GPIO12 (Kerwinn KG1-1DA25, 3-32VDC input).
+
+        config RELAY_O2_CONC_GPIO
+            int "Oxygen Concentrator SSR GPIO"
+            default 13
+            help
+                GPIO pin connected to oxygen concentrator SSR input.
+                Default: GPIO13 (Kerwinn KG1-1DA25, 3-32VDC input).
+
+        config RELAY_ACTIVE_HIGH
+            bool "SSR Active High"
+            default y
+            help
+                Enable if SSR activates (closes) when GPIO is HIGH.
+                Disable if SSR activates when GPIO is LOW.
+                Kerwinn KG1-1DA25 is active-high.
+    endmenu
+
+    menu "LAN Client Configuration"
+        config LAN_SERVER_IP
+            string "PC Server IP Address"
+            default "192.168.1.100"
+            help
+                IP address of the PC running the data receiver.
+                Must be a valid IPv4 address on the local network.
+
+        config LAN_SERVER_PORT
+            int "PC Server Port"
+            default 5000
+            range 1024 65535
+            help
+                TCP port the PC server is listening on.
+                Default: 5000
+
+        config LAN_RECONNECT_INTERVAL_MS
+            int "Reconnect Interval (ms)"
+            default 5000
+            range 1000 60000
+            help
+                Time to wait between reconnection attempts if connection lost.
+                Default: 5000ms (5 seconds)
+
+        config LAN_CLIENT_ENABLED
+            bool "Enable LAN Client"
+            default y
+            help
+                Enable local network data streaming to PC.
+                Disable if only using Golioth cloud.
+    endmenu
+
+endmenu

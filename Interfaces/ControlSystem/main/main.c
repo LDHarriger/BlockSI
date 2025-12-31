@@ -1,16 +1,21 @@
 /**
  * @file main.c
- * @brief BlockSI Control System - Main Application
+ * @brief BlockSI Control System - Main Application v2.0
  * 
  * Integrates:
  * - 106-H ozone monitor interface (RS232/UART)
+ * - MCP4725 DAC for O3 generator power control
+ * - DFRobot lab O3 sensor for safety monitoring
+ * - MAX31855 thermocouple for vessel temperature
  * - WiFi connectivity
  * - Golioth cloud connection (PSK authentication)
  * - LightDB Stream for telemetry data
+ * - LAN streaming to PC dashboard
  */
 
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -31,8 +36,19 @@
 #include "relay_control.h"
 #include "lan_client.h"
 #include "backup_storage.h"
+#include "peripherals.h"
+#include "blocksi_pins.h"
+#include "dosimetry.h"
+#include "o3_power_control.h"
+#include "sensor_aggregator.h"
+#include "mcp4725_dac.h"
+#include "dfrobot_ozone.h"
+#include "max31855_thermocouple.h"
 
 static const char *TAG = "BLOCKSI";
+
+// Firmware version
+#define FIRMWARE_VERSION    "2.0.0"
 
 // Configuration from menuconfig
 #define WIFI_SSID               CONFIG_WIFI_SSID
@@ -57,6 +73,9 @@ static const char *TAG = "BLOCKSI";
 #define LAN_RECONNECT_MS        CONFIG_LAN_RECONNECT_INTERVAL_MS
 #endif
 
+// Secondary sensor sample interval (faster than 106-H)
+#define SENSOR_SAMPLE_INTERVAL_MS   500
+
 // WiFi event bits
 #define WIFI_CONNECTED_BIT      BIT0
 #define WIFI_FAIL_BIT           BIT1
@@ -68,6 +87,9 @@ static volatile bool s_golioth_connected = false;
 // Synchronization primitives
 static EventGroupHandle_t s_wifi_event_group;
 static SemaphoreHandle_t s_golioth_connected_sem = NULL;
+
+// Current process settings
+static float s_current_flow_lpm = 5.0f;
 
 /**
  * @brief WiFi event handler
@@ -99,7 +121,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 }
 
 /**
- * @brief Initialize WiFi in station mode
+ * @brief Initialize WiFi station
  */
 static esp_err_t wifi_init(void)
 {
@@ -112,21 +134,11 @@ static esp_err_t wifi_init(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     
-    // Register event handlers
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                         ESP_EVENT_ANY_ID,
-                                                         &wifi_event_handler,
-                                                         NULL,
-                                                         &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                         IP_EVENT_STA_GOT_IP,
-                                                         &wifi_event_handler,
-                                                         NULL,
-                                                         &instance_got_ip));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
     
-    // Configure WiFi
     wifi_config_t wifi_config = {
         .sta = {
             .ssid = WIFI_SSID,
@@ -139,46 +151,38 @@ static esp_err_t wifi_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
     
-    ESP_LOGI(TAG, "WiFi initialization complete, SSID: %s", WIFI_SSID);
+    ESP_LOGI(TAG, "WiFi initialization complete, connecting to %s", WIFI_SSID);
     
     // Wait for connection
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                           pdFALSE,
-                                           pdFALSE,
-                                           portMAX_DELAY);
+                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                            pdFALSE, pdFALSE, portMAX_DELAY);
     
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "WiFi connected successfully");
         return ESP_OK;
-    } else if (bits & WIFI_FAIL_BIT) {
+    } else {
         ESP_LOGE(TAG, "WiFi connection failed");
         return ESP_FAIL;
     }
-    
-    return ESP_FAIL;
 }
 
 /**
- * @brief Golioth client event handler
+ * @brief Golioth event callback
  */
-static void golioth_on_event(struct golioth_client *client, 
+static void golioth_on_event(struct golioth_client *client,
                               enum golioth_client_event event,
                               void *arg)
 {
-    switch (event) {
-        case GOLIOTH_CLIENT_EVENT_CONNECTED:
-            ESP_LOGI(TAG, "Golioth client connected");
-            s_golioth_connected = true;
-            // Signal that connection is established
+    if (event == GOLIOTH_CLIENT_EVENT_CONNECTED) {
+        ESP_LOGI(TAG, "Golioth connected");
+        s_golioth_connected = true;
+        if (s_golioth_connected_sem) {
             xSemaphoreGive(s_golioth_connected_sem);
-            break;
-        case GOLIOTH_CLIENT_EVENT_DISCONNECTED:
-            ESP_LOGW(TAG, "Golioth client disconnected");
-            s_golioth_connected = false;
-            break;
-        default:
-            break;
+        }
+    } else if (event == GOLIOTH_CLIENT_EVENT_DISCONNECTED) {
+        ESP_LOGW(TAG, "Golioth disconnected");
+        s_golioth_connected = false;
     }
 }
 
@@ -187,18 +191,12 @@ static void golioth_on_event(struct golioth_client *client,
  */
 static esp_err_t golioth_init(void)
 {
-    ESP_LOGI(TAG, "Initializing Golioth client");
-    ESP_LOGI(TAG, "PSK-ID: %s", GOLIOTH_PSK_ID);
-
-    // Create connection semaphore
     s_golioth_connected_sem = xSemaphoreCreateBinary();
     if (!s_golioth_connected_sem) {
-        ESP_LOGE(TAG, "Failed to create Golioth connection semaphore");
-        return ESP_FAIL;
+        ESP_LOGE(TAG, "Failed to create Golioth semaphore");
+        return ESP_ERR_NO_MEM;
     }
-
-    // Create Golioth client configuration
-    // Note: SDK expects PSK as hex string - it handles conversion internally
+    
     struct golioth_client_config config = {
         .credentials = {
             .auth_type = GOLIOTH_TLS_AUTH_TYPE_PSK,
@@ -211,7 +209,6 @@ static esp_err_t golioth_init(void)
         }
     };
     
-    // Create client - this spawns the Golioth client task
     s_client = golioth_client_create(&config);
     if (!s_client) {
         ESP_LOGE(TAG, "Failed to create Golioth client");
@@ -219,7 +216,6 @@ static esp_err_t golioth_init(void)
         return ESP_FAIL;
     }
     
-    // Register event callback
     golioth_client_register_event_callback(s_client, golioth_on_event, NULL);
     
     ESP_LOGI(TAG, "Golioth client created, waiting for connection...");
@@ -227,7 +223,7 @@ static esp_err_t golioth_init(void)
 }
 
 /**
- * @brief Stream push callback (optional - for debugging)
+ * @brief Stream push callback
  */
 static void stream_push_handler(struct golioth_client *client,
                                  enum golioth_status status,
@@ -237,90 +233,174 @@ static void stream_push_handler(struct golioth_client *client,
 {
     if (status != GOLIOTH_OK) {
         ESP_LOGW(TAG, "Stream push failed: status=%d", status);
-    } else {
-        ESP_LOGD(TAG, "Stream push acknowledged");
     }
 }
 
 /**
- * @brief Publish sample data to Golioth LightDB Stream using CBOR
+ * @brief Publish extended sample data to Golioth
  */
-static void publish_sample_to_golioth(const m106h_sample_t *sample)
+static void publish_to_golioth(const m106h_sample_t *sample, 
+                                const aggregated_sensors_t *sensors)
 {
     if (!s_golioth_connected || !s_client) {
-        ESP_LOGW(TAG, "Golioth not connected, skipping publish");
         return;
     }
     
-    // CBOR encoding buffer - sized for our payload
-    uint8_t cbor_buf[256];
-    
-    // Create zcbor encoder state
+    uint8_t cbor_buf[384];
     ZCBOR_STATE_E(zse, 1, cbor_buf, sizeof(cbor_buf), 1);
     
-    // Build timestamp string
     char timestamp[24];
     snprintf(timestamp, sizeof(timestamp), "%02u/%02u/%02u %02u:%02u:%02u",
              (unsigned)sample->day, (unsigned)sample->month, (unsigned)sample->year,
              (unsigned)sample->hour, (unsigned)sample->minute, (unsigned)sample->second);
     
-    // Encode CBOR map with 6 key-value pairs
-    bool ok = zcbor_map_start_encode(zse, 6);
+    // Encode CBOR map
+    bool ok = zcbor_map_start_encode(zse, 10);
     
-    // ozone_wt_pct
     ok = ok && zcbor_tstr_put_lit(zse, "ozone_wt_pct");
     ok = ok && zcbor_float32_put(zse, sample->ozone_wt_pct);
     
-    // temperature_c
     ok = ok && zcbor_tstr_put_lit(zse, "temperature_c");
     ok = ok && zcbor_float32_put(zse, sample->temperature_c);
     
-    // pressure_mbar
     ok = ok && zcbor_tstr_put_lit(zse, "pressure_mbar");
     ok = ok && zcbor_float32_put(zse, sample->pressure_mbar);
     
-    // sample_pdv_v
     ok = ok && zcbor_tstr_put_lit(zse, "sample_pdv_v");
     ok = ok && zcbor_float32_put(zse, sample->sample_pdv_v);
     
-    // ref_pdv_v
     ok = ok && zcbor_tstr_put_lit(zse, "ref_pdv_v");
     ok = ok && zcbor_float32_put(zse, sample->ref_pdv_v);
     
-    // timestamp
+    // Add room O3
+    ok = ok && zcbor_tstr_put_lit(zse, "room_o3_ppm");
+    if (sensors->room_o3_valid) {
+        ok = ok && zcbor_float32_put(zse, sensors->room_o3_ppm);
+    } else {
+        ok = ok && zcbor_nil_put(zse, NULL);
+    }
+    
+    // Add vessel temperature
+    ok = ok && zcbor_tstr_put_lit(zse, "vessel_temp_c");
+    if (sensors->vessel_temp_valid) {
+        ok = ok && zcbor_float32_put(zse, sensors->vessel_temp_c);
+    } else {
+        ok = ok && zcbor_nil_put(zse, NULL);
+    }
+    
+    // Add power level
+    ok = ok && zcbor_tstr_put_lit(zse, "power_pct");
+    ok = ok && zcbor_uint32_put(zse, o3_power_get());
+    
+    // Add flow rate
+    ok = ok && zcbor_tstr_put_lit(zse, "flow_lpm");
+    ok = ok && zcbor_float32_put(zse, s_current_flow_lpm);
+    
     ok = ok && zcbor_tstr_put_lit(zse, "timestamp");
     ok = ok && zcbor_tstr_put_term(zse, timestamp, sizeof(timestamp));
     
-    // Close the map
-    ok = ok && zcbor_map_end_encode(zse, 6);
+    ok = ok && zcbor_map_end_encode(zse, 10);
     
     if (!ok) {
         ESP_LOGE(TAG, "CBOR encoding failed");
         return;
     }
     
-    // Calculate actual payload size
     size_t payload_size = (size_t)((uintptr_t)zse->payload - (uintptr_t)cbor_buf);
     
-    // Stream to root path
-    enum golioth_status status = golioth_stream_set_async(
-        s_client,
-        "",                          // Empty path = stream root
-        GOLIOTH_CONTENT_TYPE_CBOR,   // CBOR content type
-        cbor_buf,
-        payload_size,
-        stream_push_handler,
-        NULL);
-    
-    if (status != GOLIOTH_OK) {
-        ESP_LOGW(TAG, "Failed to queue stream publish: %d", status);
-    } else {
-        ESP_LOGI(TAG, "Queued: O3=%.2f wt%%, T=%.1f°C, P=%.1f mbar",
-                 sample->ozone_wt_pct, sample->temperature_c, sample->pressure_mbar);
-    }
+    golioth_stream_set_async(s_client, "", GOLIOTH_CONTENT_TYPE_CBOR,
+                              cbor_buf, payload_size, stream_push_handler, NULL);
 }
 
 #ifdef CONFIG_LAN_CLIENT_ENABLED
+/**
+ * @brief Send extended sample to LAN client
+ * 
+ * Format: DATA,<timestamp>,<o3_pct>,<temp>,<press>,<sample_v>,<ref_v>,<room_o3>,<vessel_temp>,<power>,<flow>
+ */
+static void send_extended_sample_to_lan(const m106h_sample_t *sample,
+                                         const aggregated_sensors_t *sensors)
+{
+    if (!lan_client_is_connected()) {
+        return;
+    }
+    
+    char msg[256];
+    
+    // Format room O3: value or "-" if disconnected
+    char room_o3_str[16];
+    if (sensors->room_o3_valid) {
+        snprintf(room_o3_str, sizeof(room_o3_str), "%.4f", sensors->room_o3_ppm);
+    } else {
+        strcpy(room_o3_str, "-");
+    }
+    
+    // Format vessel temp: value or "-" if disconnected
+    char vessel_temp_str[16];
+    if (sensors->vessel_temp_valid) {
+        snprintf(vessel_temp_str, sizeof(vessel_temp_str), "%.2f", sensors->vessel_temp_c);
+    } else {
+        strcpy(vessel_temp_str, "-");
+    }
+    
+    // Build extended data message
+    int len = snprintf(msg, sizeof(msg),
+        "DATA,%02u/%02u/%02u %02u:%02u:%02u,%.5f,%.2f,%.1f,%.5f,%.5f,%s,%s,%u,%.1f\n",
+        sample->day, sample->month, sample->year,
+        sample->hour, sample->minute, sample->second,
+        sample->ozone_wt_pct,
+        sample->temperature_c,
+        sample->pressure_mbar,
+        sample->sample_pdv_v,
+        sample->ref_pdv_v,
+        room_o3_str,
+        vessel_temp_str,
+        (unsigned)o3_power_get(),
+        s_current_flow_lpm);
+    
+    if (len > 0 && len < (int)sizeof(msg)) {
+        lan_client_send_raw(msg, len);
+    }
+}
+
+/**
+ * @brief Predict O3 output based on flow rate and power level
+ * 
+ * Empirical model from calibration data:
+ * - At max power: O3 = 1.78/F + 1.40 (hyperbolic flow relationship)
+ * - Power scaling: approximately linear in active range (20-75%)
+ * 
+ * @param flow_lpm Flow rate in LPM
+ * @param power_pct Power level 0-100%
+ * @return Predicted O3 concentration in %vol
+ */
+static float predict_o3_output(float flow_lpm, uint8_t power_pct)
+{
+    if (flow_lpm <= 0 || power_pct == 0) {
+        return 0.0f;
+    }
+    
+    // Max power O3 at this flow rate (hyperbolic model)
+    float o3_max = 1.78f / flow_lpm + 1.40f;
+    
+    // Power scaling (empirical three-region model simplified to sigmoid-like)
+    // Below 20%: minimal output
+    // 20-75%: active range, roughly linear
+    // Above 75%: saturation
+    float power_factor;
+    if (power_pct < 20) {
+        power_factor = power_pct / 100.0f;  // Very low
+    } else if (power_pct <= 75) {
+        // Linear scaling in active range, mapped 20-75% → 30-100% of max
+        power_factor = 0.30f + (power_pct - 20.0f) / 55.0f * 0.70f;
+    } else {
+        // Saturation above 75%
+        power_factor = 1.0f;
+    }
+    
+    return o3_max * power_factor;
+}
+
 /**
  * @brief Handle commands received from PC over LAN
  */
@@ -355,198 +435,263 @@ static bool lan_command_handler(const char *cmd, const char *args,
             return false;
         }
         
-        relay_set(relay, state ? RELAY_ON : RELAY_OFF);
-        snprintf(response, response_size, "%s=%d", relay_name, state);
-        return true;
+        relay_state_t new_state = state ? RELAY_ON : RELAY_OFF;
+        if (relay_set(relay, new_state) == ESP_OK) {
+            snprintf(response, response_size, "%s=%s", relay_name, state ? "on" : "off");
+            return true;
+        }
+        snprintf(response, response_size, "failed");
+        return false;
         
     } else if (strcmp(cmd, "relay_get") == 0) {
-        snprintf(response, response_size, "ozone_gen=%d,o2_conc=%d",
-                 relay_get_state(RELAY_OZONE_GEN) == RELAY_ON ? 1 : 0,
-                 relay_get_state(RELAY_O2_CONC) == RELAY_ON ? 1 : 0);
-        return true;
-        
-    } else if (strcmp(cmd, "relay_all_off") == 0) {
-        relay_all_off();
-        snprintf(response, response_size, "all_off");
+        snprintf(response, response_size, "ozone_gen=%s,o2_conc=%s",
+                 relay_get_state(RELAY_OZONE_GEN) == RELAY_ON ? "on" : "off",
+                 relay_get_state(RELAY_O2_CONC) == RELAY_ON ? "on" : "off");
         return true;
     
     // =========================================================================
-    // Status command
+    // Power control commands
     // =========================================================================
-    } else if (strcmp(cmd, "status") == 0) {
-        uint32_t samples, errors;
-        m106h_get_stats(&samples, &errors);
-        snprintf(response, response_size, "heap=%lu,samples=%lu,errors=%lu",
-                 (unsigned long)esp_get_free_heap_size(), 
-                 (unsigned long)samples, 
-                 (unsigned long)errors);
+    } else if (strcmp(cmd, "power_set") == 0) {
+        if (!args) {
+            snprintf(response, response_size, "missing_args");
+            return false;
+        }
+        
+        int power_pct = atoi(args);
+        if (power_pct < 0 || power_pct > 100) {
+            snprintf(response, response_size, "invalid_range");
+            return false;
+        }
+        
+        esp_err_t ret = o3_power_set((uint8_t)power_pct);
+        if (ret == ESP_OK) {
+            float predicted = predict_o3_output(s_current_flow_lpm, power_pct);
+            snprintf(response, response_size, "power=%d,predicted_o3=%.2f", 
+                     power_pct, predicted);
+            return true;
+        } else if (ret == ESP_ERR_INVALID_STATE) {
+            snprintf(response, response_size, "dac_not_initialized");
+        } else {
+            snprintf(response, response_size, "failed");
+        }
+        return false;
+        
+    } else if (strcmp(cmd, "power_get") == 0) {
+        uint8_t power = o3_power_get();
+        float voltage = o3_power_get_voltage();
+        float predicted = predict_o3_output(s_current_flow_lpm, power);
+        snprintf(response, response_size, "power=%d,voltage=%.3f,predicted_o3=%.2f,flow=%.1f",
+                 power, voltage, predicted, s_current_flow_lpm);
         return true;
-    
-    // =========================================================================
-    // Backup storage commands
-    // =========================================================================
-    } else if (strcmp(cmd, "backup_start") == 0) {
-        if (!args || !args[0]) {
-            snprintf(response, response_size, "missing_sequence_type");
+        
+    } else if (strcmp(cmd, "flow_set") == 0) {
+        if (!args) {
+            snprintf(response, response_size, "missing_args");
             return false;
         }
         
-        esp_err_t err = backup_start_sequence(args);
-        if (err == ESP_OK) {
-            snprintf(response, response_size, "started=%s", args);
-            
-            // Notify PC of file change
-            char notify[64];
-            snprintf(notify, sizeof(notify), "FILE,START,%s", args);
-            lan_client_send_message(notify);
-            return true;
-        }
-        snprintf(response, response_size, "start_failed");
-        return false;
-        
-    } else if (strcmp(cmd, "backup_stop") == 0) {
-        const char *seq_name = backup_get_sequence_name();
-        esp_err_t err = backup_stop_sequence();
-        if (err == ESP_OK) {
-            snprintf(response, response_size, "stopped=%s", seq_name ? seq_name : "none");
-            lan_client_send_message("FILE,STOP");
-            return true;
-        }
-        snprintf(response, response_size, "stop_failed");
-        return false;
-        
-    } else if (strcmp(cmd, "backup_status") == 0) {
-        backup_storage_status_t status;
-        if (backup_get_status(&status) != ESP_OK) {
-            snprintf(response, response_size, "status_failed");
+        float flow = atof(args);
+        if (flow < 0.1f || flow > 10.0f) {
+            snprintf(response, response_size, "invalid_range");
             return false;
         }
+        
+        s_current_flow_lpm = flow;
+        dosimetry_set_flow_rate(flow);
+        
+        float predicted = predict_o3_output(flow, o3_power_get());
+        snprintf(response, response_size, "flow=%.1f,predicted_o3=%.2f", 
+                 flow, predicted);
+        return true;
+        
+    } else if (strcmp(cmd, "flow_get") == 0) {
+        snprintf(response, response_size, "flow=%.1f", s_current_flow_lpm);
+        return true;
+        
+    } else if (strcmp(cmd, "predict_o3") == 0) {
+        // Predict O3 for given flow and power
+        if (!args) {
+            snprintf(response, response_size, "missing_args");
+            return false;
+        }
+        
+        float flow;
+        int power;
+        if (sscanf(args, "%f,%d", &flow, &power) != 2) {
+            snprintf(response, response_size, "parse_error");
+            return false;
+        }
+        
+        float predicted = predict_o3_output(flow, power);
+        snprintf(response, response_size, "predicted_o3=%.2f", predicted);
+        return true;
+        
+    // =========================================================================
+    // Sensor status commands
+    // =========================================================================
+    } else if (strcmp(cmd, "sensors_get") == 0) {
+        aggregated_sensors_t sensors;
+        sensor_aggregator_peek(&sensors);
+        
         snprintf(response, response_size, 
-                 "total=%lu,used=%lu,free=%lu,files=%u/%u,recording=%d",
-                 (unsigned long)status.total_bytes,
-                 (unsigned long)status.used_bytes,
-                 (unsigned long)status.free_bytes,
-                 status.file_count,
-                 status.max_files,
-                 backup_is_recording() ? 1 : 0);
+                 "room_o3=%s,room_o3_ppm=%.4f,vessel_temp=%s,vessel_temp_c=%.2f",
+                 sensors.room_o3_valid ? "ok" : "disconnected",
+                 sensors.room_o3_valid ? sensors.room_o3_ppm : 0.0f,
+                 sensors.vessel_temp_valid ? "ok" : "disconnected",
+                 sensors.vessel_temp_valid ? sensors.vessel_temp_c : 0.0f);
         return true;
         
-    } else if (strcmp(cmd, "backup_list") == 0) {
-        backup_file_info_t files[BACKUP_MAX_FILES];
-        uint8_t count = 0;
-        
-        if (backup_list_files(files, BACKUP_MAX_FILES, &count) != ESP_OK) {
-            snprintf(response, response_size, "list_failed");
+    } else if (strcmp(cmd, "room_o3_alarm") == 0) {
+        bool alarm = sensor_aggregator_room_o3_alarm();
+        float level = dfrobot_o3_get_alarm_level();
+        snprintf(response, response_size, "alarm=%s,level=%.2f",
+                 alarm ? "active" : "inactive", level);
+        return true;
+    
+    // =========================================================================
+    // Power calibration commands
+    // =========================================================================
+    } else if (strcmp(cmd, "power_cal_start") == 0) {
+        if (!args) {
+            snprintf(response, response_size, "missing_args");
             return false;
         }
+        
+        float flow;
+        int samples;
+        if (sscanf(args, "%f,%d", &flow, &samples) != 2) {
+            // Default to current flow and 10 samples per point
+            flow = s_current_flow_lpm;
+            samples = 10;
+        }
+        
+        // Note: This is blocking! Consider making async
+        esp_err_t ret = o3_power_calibrate(flow, samples, NULL);
+        if (ret == ESP_OK) {
+            snprintf(response, response_size, "calibration_complete");
+            return true;
+        }
+        snprintf(response, response_size, "calibration_failed");
+        return false;
+        
+    } else if (strcmp(cmd, "power_cal_abort") == 0) {
+        o3_power_calibrate_abort();
+        snprintf(response, response_size, "abort_requested");
+        return true;
+        
+    } else if (strcmp(cmd, "power_cal_status") == 0) {
+        snprintf(response, response_size, "running=%s",
+                 o3_power_calibrate_is_running() ? "yes" : "no");
+        return true;
+        
+    // =========================================================================
+    // Recording commands
+    // =========================================================================
+    } else if (strcmp(cmd, "recording_start") == 0) {
+        esp_err_t ret = backup_start_recording();
+        snprintf(response, response_size, "recording=%s", 
+                 ret == ESP_OK ? "started" : "failed");
+        return ret == ESP_OK;
+        
+    } else if (strcmp(cmd, "recording_stop") == 0) {
+        esp_err_t ret = backup_stop_recording();
+        snprintf(response, response_size, "recording=%s",
+                 ret == ESP_OK ? "stopped" : "failed");
+        return ret == ESP_OK;
+        
+    } else if (strcmp(cmd, "recording_status") == 0) {
+        snprintf(response, response_size, "recording=%s",
+                 backup_is_recording() ? "active" : "inactive");
+        return true;
+        
+    // =========================================================================
+    // Backup file commands
+    // =========================================================================
+    } else if (strcmp(cmd, "backup_list") == 0) {
+        backup_file_info_t files[5];
+        int count = backup_list_files(files, 5);
         
         if (count == 0) {
-            snprintf(response, response_size, "no_files");
-            return true;
-        }
-        
-        // Format: file1.csv:1234:50;file2.csv:5678:100
-        char *p = response;
-        size_t remaining = response_size;
-        
-        for (uint8_t i = 0; i < count && remaining > 50; i++) {
-            int len = snprintf(p, remaining, "%s%s:%lu:%lu",
-                              (i > 0) ? ";" : "",
-                              files[i].filename,
-                              (unsigned long)files[i].size_bytes,
-                              (unsigned long)files[i].sample_count);
-            if (len > 0 && len < (int)remaining) {
-                p += len;
-                remaining -= len;
+            snprintf(response, response_size, "files=none");
+        } else {
+            char *p = response;
+            int remaining = response_size;
+            int n = snprintf(p, remaining, "files=%d", count);
+            p += n; remaining -= n;
+            
+            for (int i = 0; i < count && remaining > 20; i++) {
+                n = snprintf(p, remaining, ",%s:%lu", 
+                             files[i].filename, (unsigned long)files[i].size);
+                p += n; remaining -= n;
             }
         }
         return true;
+        
+    } else if (strcmp(cmd, "backup_get") == 0) {
+        if (!args) {
+            snprintf(response, response_size, "missing_args");
+            return false;
+        }
+        
+        // Read and send file contents
+        char *content = NULL;
+        size_t size = 0;
+        esp_err_t ret = backup_read_file(args, &content, &size);
+        
+        if (ret == ESP_OK && content) {
+            // Send file header
+            char header[64];
+            snprintf(header, sizeof(header), "FILE,%s,%lu\n", args, (unsigned long)size);
+            lan_client_send_raw(header, strlen(header));
+            
+            // Send content in chunks
+            lan_client_send_raw(content, size);
+            lan_client_send_raw("\nEND_FILE\n", 10);
+            
+            free(content);
+            snprintf(response, response_size, "sent");
+            return true;
+        }
+        snprintf(response, response_size, "file_not_found");
+        return false;
         
     } else if (strcmp(cmd, "backup_delete") == 0) {
-        if (!args || !args[0]) {
-            snprintf(response, response_size, "missing_filename");
+        if (!args) {
+            snprintf(response, response_size, "missing_args");
             return false;
         }
         
-        esp_err_t err = backup_delete_file(args);
-        if (err == ESP_OK) {
-            snprintf(response, response_size, "deleted=%s", args);
-            return true;
-        } else if (err == ESP_ERR_INVALID_STATE) {
-            snprintf(response, response_size, "cannot_delete_active");
-            return false;
-        }
-        snprintf(response, response_size, "not_found");
-        return false;
-        
-    } else if (strcmp(cmd, "backup_delete_all") == 0) {
-        esp_err_t err = backup_delete_all();
-        if (err == ESP_OK) {
-            snprintf(response, response_size, "all_deleted");
-            return true;
-        }
-        snprintf(response, response_size, "delete_failed");
-        return false;
-        
-    } else if (strcmp(cmd, "backup_download") == 0) {
-        if (!args || !args[0]) {
-            snprintf(response, response_size, "missing_filename");
-            return false;
-        }
-        
-        backup_file_info_t info;
-        if (backup_get_file_info(args, &info) != ESP_OK) {
-            snprintf(response, response_size, "not_found");
-            return false;
-        }
-        
-        // Send file in chunks
-        char chunk_buf[256];
-        char send_buf[400];
-        uint32_t offset = 0;
-        uint32_t bytes_read;
-        
-        // Send start notification
-        snprintf(send_buf, sizeof(send_buf), "CHUNK,START,%s,%lu",
-                 args, (unsigned long)info.size_bytes);
-        lan_client_send_message(send_buf);
-        
-        while (backup_read_chunk(args, offset, chunk_buf, sizeof(chunk_buf), &bytes_read) == ESP_OK 
-               && bytes_read > 0) {
-            
-            // Send raw chunk (for simplicity - production could use base64)
-            snprintf(send_buf, sizeof(send_buf), "CHUNK,%lu,%lu,",
-                     (unsigned long)offset, (unsigned long)bytes_read);
-            
-            size_t header_len = strlen(send_buf);
-            if (header_len + bytes_read < sizeof(send_buf) - 1) {
-                memcpy(send_buf + header_len, chunk_buf, bytes_read);
-                send_buf[header_len + bytes_read] = '\0';
-            }
-            
-            lan_client_send_message(send_buf);
-            offset += bytes_read;
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-        
-        lan_client_send_message("CHUNK,END");
-        snprintf(response, response_size, "sent=%lu", (unsigned long)offset);
-        return true;
+        esp_err_t ret = backup_delete_file(args);
+        snprintf(response, response_size, "deleted=%s", ret == ESP_OK ? "ok" : "failed");
+        return ret == ESP_OK;
     
     // =========================================================================
-    // 106-H Ozone Monitor Commands
+    // 106-H commands
     // =========================================================================
-    } else if (strcmp(cmd, "106h_avg") == 0) {
-        // Set averaging time: 1=2s, 2=10s, 3=1min, 4=5min, 5=1hr
+    } else if (strcmp(cmd, "106h_status") == 0) {
+        bool comm = m106h_is_communicating();
+        m106h_avg_time_t avg = m106h_get_averaging();
+        const char *avg_names[] = {"unknown", "2sec", "10sec", "1min", "5min", "1hr"};
+        
+        snprintf(response, response_size, "comm=%s,avg=%s,logging=%s",
+                 comm ? "ok" : "error",
+                 avg_names[avg <= 5 ? avg : 0],
+                 m106h_is_logging() ? "active" : "inactive");
+        return true;
+        
+    } else if (strcmp(cmd, "106h_avg_set") == 0) {
         if (!args) {
-            snprintf(response, response_size, "missing_option");
+            snprintf(response, response_size, "missing_args");
             return false;
         }
+        
         int option = atoi(args);
         if (option < 1 || option > 5) {
             snprintf(response, response_size, "invalid_option");
             return false;
         }
+        
         esp_err_t ret = m106h_set_averaging((m106h_avg_time_t)option);
         if (ret == ESP_OK) {
             const char *names[] = {"", "2sec", "10sec", "1min", "5min", "1hr"};
@@ -555,13 +700,6 @@ static bool lan_command_handler(const char *cmd, const char *args,
         }
         snprintf(response, response_size, "failed");
         return false;
-        
-    } else if (strcmp(cmd, "106h_avg_get") == 0) {
-        m106h_avg_time_t avg = m106h_get_averaging();
-        const char *names[] = {"unknown", "2sec", "10sec", "1min", "5min", "1hr"};
-        snprintf(response, response_size, "avg=%s,option=%d", 
-                 names[avg <= 5 ? avg : 0], (int)avg);
-        return true;
         
     } else if (strcmp(cmd, "106h_log_start") == 0) {
         esp_err_t ret = m106h_log_start();
@@ -573,11 +711,33 @@ static bool lan_command_handler(const char *cmd, const char *args,
         snprintf(response, response_size, "logging=%s", ret == ESP_OK ? "stopped" : "failed");
         return ret == ESP_OK;
         
-    } else if (strcmp(cmd, "106h_log_status") == 0) {
-        snprintf(response, response_size, "logging=%s", 
-                 m106h_is_logging() ? "active" : "inactive");
+    // =========================================================================
+    // System commands
+    // =========================================================================
+    } else if (strcmp(cmd, "version") == 0) {
+        snprintf(response, response_size, "version=%s,idf=%s", 
+                 FIRMWARE_VERSION, esp_get_idf_version());
         return true;
-    
+        
+    } else if (strcmp(cmd, "status") == 0) {
+        peripherals_status_t pstatus;
+        peripherals_get_status(&pstatus);
+        
+        snprintf(response, response_size, 
+                 "wifi=%s,golioth=%s,dac=%s,lab_o3=%s,thermo=%s,heap=%lu",
+                 (xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT) ? "ok" : "err",
+                 s_golioth_connected ? "ok" : "err",
+                 pstatus.dac_initialized ? "ok" : "err",
+                 pstatus.lab_o3_initialized ? "ok" : "err",
+                 pstatus.thermocouple_initialized ? "ok" : "err",
+                 (unsigned long)esp_get_free_heap_size());
+        return true;
+        
+    } else if (strcmp(cmd, "i2c_scan") == 0) {
+        peripherals_scan_i2c();
+        snprintf(response, response_size, "scan_complete");
+        return true;
+        
     // =========================================================================
     // Unknown command
     // =========================================================================
@@ -595,24 +755,39 @@ static bool lan_command_handler(const char *cmd, const char *args,
  */
 static void on_106h_sample(const m106h_sample_t *sample)
 {
+    // Get aggregated secondary sensor data
+    aggregated_sensors_t sensors;
+    sensor_aggregator_get_and_reset(&sensors);
+    
+    // Process dosimetry
+    dosimetry_sample_t dosi_sample;
+    float o3_ppm = sample->ozone_wt_pct * 10000.0f;  // wt% to ppm
+    dosimetry_process_sample(o3_ppm, sample->temperature_c, sample->pressure_mbar,
+                              2000, &dosi_sample);  // Assuming 2s interval
+    
     // Publish to Golioth cloud
-    publish_sample_to_golioth(sample);
+    publish_to_golioth(sample, &sensors);
     
 #ifdef CONFIG_LAN_CLIENT_ENABLED
-    // Send to local PC
-    lan_client_send_sample(sample);
+    // Send to local PC with extended data
+    send_extended_sample_to_lan(sample, &sensors);
 #endif
 
-    // Write to backup storage if recording a sequence
+    // Write to backup storage if recording
     if (backup_is_recording()) {
         backup_write_sample(sample);
     }
+    
+    // Log summary
+    ESP_LOGI(TAG, "O3=%.3f%%, Room=%.3fppm, Vessel=%.1f°C, Pwr=%d%%",
+             sample->ozone_wt_pct,
+             sensors.room_o3_valid ? sensors.room_o3_ppm : -1.0f,
+             sensors.vessel_temp_valid ? sensors.vessel_temp_c : -999.0f,
+             o3_power_get());
 }
 
 /**
  * @brief Status monitoring task
- * 
- * Periodically logs system status and statistics.
  */
 static void status_task(void *arg)
 {
@@ -622,35 +797,34 @@ static void status_task(void *arg)
         uint32_t total_samples, parse_errors;
         m106h_get_stats(&total_samples, &parse_errors);
         
+        peripherals_status_t pstatus;
+        peripherals_get_status(&pstatus);
+        
         ESP_LOGI(TAG, "=== Status ===");
-        ESP_LOGI(TAG, "WiFi: %s", (xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT) 
-                 ? "Connected" : "Disconnected");
-        ESP_LOGI(TAG, "Golioth: %s", s_golioth_connected ? "Connected" : "Disconnected");
+        ESP_LOGI(TAG, "WiFi: %s, Golioth: %s", 
+                 (xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT) ? "Connected" : "Disconnected",
+                 s_golioth_connected ? "Connected" : "Disconnected");
         
 #ifdef CONFIG_LAN_CLIENT_ENABLED
         bool lan_conn;
         uint32_t lan_tx, lan_rx, lan_reconn;
         lan_client_get_stats(&lan_conn, &lan_tx, &lan_rx, &lan_reconn);
-        ESP_LOGI(TAG, "LAN: %s (TX:%lu RX:%lu reconn:%lu)", 
-                 lan_conn ? "Connected" : "Disconnected", lan_tx, lan_rx, lan_reconn);
+        ESP_LOGI(TAG, "LAN: %s (TX:%lu RX:%lu)", 
+                 lan_conn ? "Connected" : "Disconnected", lan_tx, lan_rx);
 #endif
         
-        ESP_LOGI(TAG, "106-H Samples: %lu total, %lu errors", total_samples, parse_errors);
-        ESP_LOGI(TAG, "Relays: O3_Gen=%s, O2_Conc=%s",
-                 relay_get_state(RELAY_OZONE_GEN) == RELAY_ON ? "ON" : "OFF",
-                 relay_get_state(RELAY_O2_CONC) == RELAY_ON ? "ON" : "OFF");
-        
-        // Backup storage status
-        backup_storage_status_t backup_status;
-        if (backup_get_status(&backup_status) == ESP_OK) {
-            ESP_LOGI(TAG, "Backup: %lu/%lu bytes, %u files, %s",
-                     (unsigned long)backup_status.used_bytes,
-                     (unsigned long)backup_status.total_bytes,
-                     backup_status.file_count,
-                     backup_is_recording() ? "RECORDING" : "idle");
-        }
-        
+        ESP_LOGI(TAG, "106-H: %lu samples, %lu errors", total_samples, parse_errors);
+        ESP_LOGI(TAG, "Peripherals: DAC=%s, LabO3=%s, Thermo=%s",
+                 pstatus.dac_initialized ? "OK" : "N/A",
+                 pstatus.lab_o3_initialized ? "OK" : "N/A",
+                 pstatus.thermocouple_initialized ? "OK" : "N/A");
+        ESP_LOGI(TAG, "Power: %d%%, Flow: %.1f LPM", o3_power_get(), s_current_flow_lpm);
         ESP_LOGI(TAG, "Free heap: %lu bytes", (unsigned long)esp_get_free_heap_size());
+        
+        // Check room O3 alarm
+        if (sensor_aggregator_room_o3_alarm()) {
+            ESP_LOGW(TAG, "*** ROOM O3 ALARM ACTIVE ***");
+        }
     }
 }
 
@@ -659,11 +833,12 @@ static void status_task(void *arg)
  */
 void app_main(void)
 {
-    ESP_LOGI(TAG, "=== BlockSI Control System ===");
-    ESP_LOGI(TAG, "Firmware version: 1.4.0");
+    ESP_LOGI(TAG, "=========================================");
+    ESP_LOGI(TAG, "   BlockSI Control System v%s", FIRMWARE_VERSION);
+    ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "ESP-IDF version: %s", esp_get_idf_version());
     
-    // Initialize NVS (required for WiFi)
+    // Initialize NVS (required for WiFi and calibration storage)
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -679,8 +854,7 @@ void app_main(void)
         .active_high = RELAY_ACTIVE_HIGH,
     };
     if (relay_init(&relay_config) != ESP_OK) {
-        ESP_LOGE(TAG, "Relay initialization failed, halting");
-        return;
+        ESP_LOGE(TAG, "Relay initialization failed!");
     }
     
     // Initialize backup storage (SPIFFS)
@@ -689,88 +863,75 @@ void app_main(void)
         ESP_LOGW(TAG, "Backup storage init failed (continuing without backup)");
     }
     
+    // Initialize all peripherals (I2C, SPI, DAC, sensors)
+    ESP_LOGI(TAG, "Initializing peripherals...");
+    peripherals_init_all();
+    
+    // Initialize dosimetry
+    ESP_LOGI(TAG, "Initializing dosimetry...");
+    dosimetry_init(NULL);
+    dosimetry_set_flow_rate(s_current_flow_lpm);
+    
+    // Initialize O3 power control (uses MCP4725 DAC)
+    ESP_LOGI(TAG, "Initializing O3 power control...");
+    if (o3_power_init() != ESP_OK) {
+        ESP_LOGW(TAG, "O3 power control not available (DAC not found)");
+    }
+    
+    // Initialize sensor aggregator (starts background sampling)
+    ESP_LOGI(TAG, "Initializing sensor aggregator...");
+    sensor_aggregator_init(SENSOR_SAMPLE_INTERVAL_MS);
+    
     // Initialize WiFi and block until connected
     ESP_LOGI(TAG, "Initializing WiFi...");
     if (wifi_init() != ESP_OK) {
-        ESP_LOGE(TAG, "WiFi initialization failed, halting");
-        return;
+        ESP_LOGE(TAG, "WiFi initialization failed!");
     }
     
-    // Initialize Golioth client (starts connection process)
+    // Initialize Golioth client
     ESP_LOGI(TAG, "Initializing Golioth...");
     if (golioth_init() != ESP_OK) {
-        ESP_LOGE(TAG, "Golioth initialization failed, halting");
-        return;
+        ESP_LOGW(TAG, "Golioth initialization failed (continuing without cloud)");
     }
-    
-    // *** CRITICAL: Wait for Golioth connection before starting sensor ***
-    // The DTLS handshake takes several seconds
-    ESP_LOGI(TAG, "Waiting for Golioth connection...");
-    if (xSemaphoreTake(s_golioth_connected_sem, pdMS_TO_TICKS(30000)) != pdTRUE) {
-        ESP_LOGE(TAG, "Golioth connection timeout after 30s, halting");
-        return;
-    }
-    ESP_LOGI(TAG, "Golioth connected successfully");
-    
-    // Initialize RPC and register handlers
-    ESP_LOGI(TAG, "Registering RPC handlers...");
-    struct golioth_rpc *rpc = golioth_rpc_init(s_client);
-    if (!rpc) {
-        ESP_LOGE(TAG, "Failed to initialize Golioth RPC");
-        return;
-    }
-    
-    if (relay_register_rpc(rpc) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register relay RPC handlers");
-        return;
-    }
-    ESP_LOGI(TAG, "RPC handlers registered");
     
 #ifdef CONFIG_LAN_CLIENT_ENABLED
-    // Initialize LAN client for local PC communication
+    // Initialize LAN client
     ESP_LOGI(TAG, "Initializing LAN client...");
     lan_client_config_t lan_config = {
         .server_ip = LAN_SERVER_IP,
         .server_port = LAN_SERVER_PORT,
-        .cmd_handler = lan_command_handler,
         .reconnect_interval_ms = LAN_RECONNECT_MS,
+        .command_handler = lan_command_handler,
     };
+    
     if (lan_client_init(&lan_config) != ESP_OK) {
-        ESP_LOGW(TAG, "LAN client initialization failed (continuing without)");
-    } else {
-        ESP_LOGI(TAG, "LAN client started, connecting to %s:%d", LAN_SERVER_IP, LAN_SERVER_PORT);
+        ESP_LOGW(TAG, "LAN client initialization failed");
     }
 #endif
     
-    // Now it's safe to start the 106-H interface
+    // Initialize 106-H interface
     ESP_LOGI(TAG, "Initializing 106-H interface...");
     m106h_config_t m106h_config = {
         .uart_num = M106H_UART_NUM,
         .tx_gpio = M106H_TX_GPIO,
         .rx_gpio = M106H_RX_GPIO,
         .baud_rate = M106H_BAUD_RATE,
-        .callback = on_106h_sample,
+        .sample_callback = on_106h_sample,
     };
     
     if (m106h_init(&m106h_config) != ESP_OK) {
-        ESP_LOGE(TAG, "106-H initialization failed, halting");
-        return;
+        ESP_LOGE(TAG, "106-H initialization failed!");
     }
     
-    // Create status monitoring task
-    xTaskCreate(status_task, "status", 4096, NULL, 5, NULL);
+    // Start status monitoring task
+    xTaskCreate(status_task, "status", 3072, NULL, 2, NULL);
     
-    ESP_LOGI(TAG, "=== System Ready ===");
-    ESP_LOGI(TAG, "Streaming to: Golioth Cloud");
-#ifdef CONFIG_LAN_CLIENT_ENABLED
-    ESP_LOGI(TAG, "Streaming to: LAN PC (%s:%d)", LAN_SERVER_IP, LAN_SERVER_PORT);
-#endif
-    ESP_LOGI(TAG, "Backup storage: SPIFFS (sequence recording)");
-    ESP_LOGI(TAG, "RPC commands: relay_set, relay_get, relay_all_off");
-    ESP_LOGI(TAG, "LAN commands: backup_*, relay_*, 106h_avg, 106h_log_*");
+    ESP_LOGI(TAG, "=========================================");
+    ESP_LOGI(TAG, "   Initialization Complete");
+    ESP_LOGI(TAG, "=========================================");
     
-    // Keep main task alive - Golioth client task handles CoAP I/O
+    // Main loop - not much to do here, everything is event/task driven
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(10000));
     }
 }

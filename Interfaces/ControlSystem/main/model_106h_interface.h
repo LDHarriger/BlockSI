@@ -5,6 +5,7 @@
  * Handles bidirectional UART communication:
  * - RX: Parses incoming measurement data
  * - TX: Sends configuration commands
+ * - Response waiting: Waits for 106-H acknowledgments
  */
 
 #ifndef MODEL_106H_INTERFACE_H
@@ -42,6 +43,14 @@ typedef struct {
 typedef void (*m106h_sample_callback_t)(const m106h_sample_t *sample);
 
 /**
+ * @brief Callback for log data lines
+ * 
+ * @param line Log data line (NULL when transmission complete)
+ * @param is_end True when transmission is complete
+ */
+typedef void (*m106h_log_data_callback_t)(const char *line, bool is_end);
+
+/**
  * @brief Configuration structure
  */
 typedef struct {
@@ -59,6 +68,21 @@ typedef enum {
     M106H_STATE_MEASURING,    // Normal measurement mode
     M106H_STATE_IN_MENU,      // Serial menu active (not measuring)
 } m106h_state_t;
+
+/**
+ * @brief Averaging time options
+ */
+typedef enum {
+    M106H_AVG_2SEC = 1,
+    M106H_AVG_10SEC = 2,
+    M106H_AVG_1MIN = 3,
+    M106H_AVG_5MIN = 4,
+    M106H_AVG_1HR = 5
+} m106h_avg_time_t;
+
+// ============================================================================
+// Initialization
+// ============================================================================
 
 /**
  * @brief Initialize the 106-H interface
@@ -85,6 +109,31 @@ void m106h_get_stats(uint32_t *total_samples, uint32_t *parse_errors);
  * @brief Get current state (measuring vs menu)
  */
 m106h_state_t m106h_get_state(void);
+
+// ============================================================================
+// Response Waiting
+// ============================================================================
+
+/**
+ * @brief Wait for a response from the 106-H
+ * 
+ * Blocks until a response is received or timeout expires.
+ * The RX task detects responses including prompts like "menu>" that
+ * don't end with \r\n (using timeout-based partial line flushing).
+ * 
+ * @param timeout_ms Maximum time to wait in milliseconds
+ * @param response Output buffer for response (can be NULL)
+ * @param response_size Size of response buffer
+ * @return ESP_OK if response received, ESP_ERR_TIMEOUT if timed out
+ */
+esp_err_t m106h_wait_for_response(uint32_t timeout_ms, char *response, size_t response_size);
+
+/**
+ * @brief Get last response without waiting
+ * 
+ * @return Pointer to internal response buffer (do not free)
+ */
+const char* m106h_get_last_response(void);
 
 // ============================================================================
 // TX Command Functions
@@ -151,7 +200,7 @@ esp_err_t m106h_cmd_zero(void);
 esp_err_t m106h_cmd_get_averaging(void);
 
 /**
- * @brief Set averaging time
+ * @brief Set averaging time (low-level)
  * 
  * Must be in menu mode. Send the selection number after calling
  * m106h_cmd_get_averaging().
@@ -216,32 +265,45 @@ esp_err_t m106h_cmd_lamp_test_exit(void);
  * Enters menu, executes command, exits menu automatically.
  * Blocks until complete. Use for one-off commands.
  * 
- * @param cmd Single character command (e.g., 'V' for zero)
- * @param delay_ms Delay after command before exiting (for commands that take time)
+ * @param cmd_char Command character to send
+ * @param arg Optional argument string (NULL if none)
+ * @param delay_ms Delay between commands
  * @return ESP_OK on success
  */
-esp_err_t m106h_menu_command(char cmd, uint32_t delay_ms);
+esp_err_t m106h_execute_menu_command(char cmd_char, const char *arg, uint32_t delay_ms);
 
 // ============================================================================
-// Logging Control (works during measurement - no menu entry needed)
+// High-Level Functions (with response waiting)
 // ============================================================================
 
 /**
- * @brief Averaging time options
+ * @brief Set averaging time with full menu navigation
+ * 
+ * Handles entire sequence: enter menu, navigate to averaging,
+ * select option, exit menu. Waits for 106-H responses at each step.
+ * 
+ * @param avg_time Averaging time to set
+ * @return ESP_OK on success
  */
-typedef enum {
-    M106H_AVG_2SEC = 1,      // 2 second averaging
-    M106H_AVG_10SEC = 2,     // 10 second averaging (default)
-    M106H_AVG_1MIN = 3,      // 1 minute averaging
-    M106H_AVG_5MIN = 4,      // 5 minute averaging
-    M106H_AVG_1HR = 5,       // 1 hour averaging
-} m106h_avg_time_t;
+esp_err_t m106h_set_averaging(m106h_avg_time_t avg_time);
+
+/**
+ * @brief Get current averaging time setting
+ * 
+ * Returns the last known setting (may not reflect manual changes).
+ * 
+ * @return Current averaging time
+ */
+m106h_avg_time_t m106h_get_averaging(void);
+
+// ============================================================================
+// Logging Control
+// ============================================================================
 
 /**
  * @brief Start internal data logging (command: 'l')
  * 
- * Overwrites any existing logged data on the 106-H.
- * Works during measurement - no menu entry needed.
+ * Works during measurement. Overwrites existing logged data.
  * 
  * @return ESP_OK on success
  */
@@ -250,18 +312,16 @@ esp_err_t m106h_log_start(void);
 /**
  * @brief Stop internal data logging (command: 'e')
  * 
- * Logged data remains available for transmission.
- * Works during measurement - no menu entry needed.
+ * Works during measurement.
  * 
  * @return ESP_OK on success
  */
 esp_err_t m106h_log_stop(void);
 
 /**
- * @brief Transmit logged data (command: 't')
+ * @brief Request logged data transmission (command: 't')
  * 
- * Stops logging if active, then transmits all logged data.
- * Data is sent as normal data lines with log number prefix.
+ * Works during measurement. Use callback to receive data.
  * 
  * @return ESP_OK on success
  */
@@ -269,38 +329,15 @@ esp_err_t m106h_log_transmit(void);
 
 /**
  * @brief Check if internal logging is active
+ * 
+ * @return true if logging is active
  */
 bool m106h_is_logging(void);
 
 /**
- * @brief Set averaging time
+ * @brief Set callback for log data reception
  * 
- * Requires entering menu mode briefly.
- * 
- * @param avg_time Averaging time option (1-5)
- * @return ESP_OK on success
- */
-esp_err_t m106h_set_averaging(m106h_avg_time_t avg_time);
-
-/**
- * @brief Get current averaging time setting
- * 
- * @return Current averaging time option, or 0 if unknown
- */
-m106h_avg_time_t m106h_get_averaging(void);
-
-/**
- * @brief Callback for logged data lines
- * 
- * Called when logged data is being transmitted.
- * Line format: log_num,ozone,temp,press,ref,sample,date,time
- */
-typedef void (*m106h_log_data_callback_t)(const char *line, bool is_end);
-
-/**
- * @brief Set callback for logged data reception
- * 
- * @param callback Function to call for each logged data line
+ * @param callback Function to call for each log line
  */
 void m106h_set_log_callback(m106h_log_data_callback_t callback);
 

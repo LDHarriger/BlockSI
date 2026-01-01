@@ -22,4 +22,4 @@ set confirm off
 set confirm on
 
 # Load application symbols
-file C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/ControlSystem/build/bootloader/bootloader.elf
+file C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/build/bootloader/bootloader.elf

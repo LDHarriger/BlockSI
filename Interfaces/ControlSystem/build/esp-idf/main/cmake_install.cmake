@@ -1,4 +1,4 @@
-# Install script for directory: C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/ControlSystem/main
+# Install script for directory: C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)

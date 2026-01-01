@@ -18,8 +18,8 @@ end
 
 # Load bootloader symbols
 set confirm off
-    add-symbol-file C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/ControlSystem/build/bootloader/bootloader.elf
+    add-symbol-file C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/build/bootloader/bootloader.elf
 set confirm on
 
 # Load application symbols
-file C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/ControlSystem/build/blocksi_control.elf
+file C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/build/blocksi_control.elf

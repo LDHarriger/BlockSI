@@ -109,6 +109,10 @@
 #define DAC_DIVIDER_RATIO       ((float)DAC_DIVIDER_R2 / (DAC_DIVIDER_R1 + DAC_DIVIDER_R2))
 #define DAC_MAX_OUTPUT_V        (DAC_VDD_VOLTAGE * DAC_DIVIDER_RATIO)  // ~1.18V
 
+// Power control effective range (determined empirically)
+#define O3_POWER_EFFECTIVE_MIN_PCT  20      // Below this: no O3 output
+#define O3_POWER_EFFECTIVE_MAX_PCT  75      // Above this: diminishing returns
+
 // ============================================================================
 // DFRobot Lab O3 Sensor Configuration
 // ============================================================================

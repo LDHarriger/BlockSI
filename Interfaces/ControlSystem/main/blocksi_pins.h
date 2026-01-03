@@ -68,7 +68,7 @@
 #define I2C_MASTER_FREQ_HZ      400000      // 400kHz Fast Mode
 
 // I2C Device Addresses
-#define I2C_ADDR_MCP4725        0x60        // DAC for O3 power control
+#define I2C_ADDR_MCP4725        0x62        // DAC for O3 power control (A0 floating/high)
 #define I2C_ADDR_DFROBOT_O3     0x73        // Lab O3 safety sensor
 
 // ============================================================================

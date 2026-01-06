@@ -1,0 +1,513 @@
+ (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_d���ѥѥ���Table:
+[0;32mI (51) boot: ## Label            Usage          Type ST Offset   Length[0m
+I (�ets Jul 29 2019 12:21:46
+
+rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:2
+load:0x3fff0030,len:6276
+load:0x40078000,len:15736
+load:0x40080400,len:4
+load:0x40080404,len:3860
+entry 0x4008063c
+[0;32mI (29) boot: ESP-IDF v5.4.3 2nd stage bootloader[0m
+[0;32mI (29) boot: compile time Jan  3 2026 17:24:59[0m
+[0;32mI (30) boot: Multicore bootloader[0m
+[0;32mI (31) boot: chip revision: v3.0[0m
+[0;32mI (34) boot.esp32: SPI Speed      : 40MHz[0m
+[0;32mI (37) boot.esp32: SPI Mode       : DIO[0m
+[0;32mI (41) boot.esp32: SPI Flash Size : 4MB[0m
+[0;32mI (44) boot: Enabling RNG early entropy source...[0m
+[0;32mI (49) boot: Partition Table:[0m
+[0;32mI (51) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (58) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (71) boot:  2 factory          factory app      00 00 00010000 00100000[0m
+[0;32mI (77) boot:  3 storage          Unknown data     01 82 00110000 00080000[0m
+[0;32mI (84) boot: End of partition table[0m
+[0;32mI (87) esp_image: segment 0: paddr=00010020 vaddr=3f400020 size=2899ch (166300) map[0m
+[0;32mI (151) esp_image: segment 1: paddr=000389c4 vaddr=3ffb0000 size=042c0h ( 17088) load[0m
+[0;32mI (158) esp_image: segment 2: paddr=0003cc8c vaddr=40080000 size=0338ch ( 13196) load[0m
+[0;32mI (163) esp_image: segment 3: paddr=00040020 vaddr=400d0020 size=a4eb0h (675504) map[0m
+[0;32mI (394) esp_image: segment 4: paddr=000e4ed8 vaddr=4008338c size=15308h ( 86792) load[0m
+[0;32mI (428) esp_image: segment 5: paddr=000fa1e8 vaddr=50000000 size=0001ch (    28) load[0m
+[0;32mI (440) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (440) boot: Disabling RNG early entropy source...[0m
+[0;32mI (451) cpu_start: Multicore app[0m
+[0;32mI (459) cpu_start: Pro cpu start user code[0m
+[0;32mI (459) cpu_start: cpu freq: 160000000 Hz[0m
+[0;32mI (459) app_init: Application information:[0m
+[0;32mI (459) app_init: Project name:     blocksi_control[0m
+[0;32mI (464) app_init: App version:      0dd122e-dirty[0m
+[0;32mI (468) app_init: Compile time:     Jan  3 2026 17:24:42[0m
+[0;32mI (473) app_init: ELF file SHA256:  1fa8eb1b9...[0m
+[0;32mI (478) app_init: ESP-IDF:          v5.4.3[0m
+[0;32mI (481) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (485) efuse_init: Max chip rev:     v3.99 [0m
+[0;32mI (489) efuse_init: Chip rev:         v3.0[0m
+[0;32mI (493) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (499) heap_init: At 3FFAE6E0 len 00001920 (6 KiB): DRAM[0m
+[0;32mI (505) heap_init: At 3FFBBD20 len 000242E0 (144 KiB): DRAM[0m
+[0;32mI (510) heap_init: At 3FFE0440 len 00003AE0 (14 KiB): D/IRAM[0m
+[0;32mI (515) heap_init: At 3FFE4350 len 0001BCB0 (111 KiB): D/IRAM[0m
+[0;32mI (521) heap_init: At 40098694 len 0000796C (30 KiB): IRAM[0m
+[0;32mI (527) spi_flash: detected chip: generic[0m
+[0;32mI (530) spi_flash: flash io: dio[0m
+[0;33mW (533) i2c: This driver is an old driver, please migrate your application code to adapt `driver/i2c_master.h`[0m
+[0;32mI (543) main_task: Started on CPU0[0m
+[0;32mI (553) main_task: Calling app_main()[0m
+[0;32mI (553) BLOCKSI: =========================================[0m
+[0;32mI (553) BLOCKSI:    BlockSI Control System v2.0.0[0m
+[0;32mI (553) BLOCKSI: =========================================[0m
+[0;32mI (563) BLOCKSI: ESP-IDF version: v5.4.3[0m
+[0;32mI (583) BLOCKSI: Initializing relay control...[0m
+[0;32mI (583) RELAY: Initializing relay control[0m
+[0;32mI (583) RELAY:   Ozone Generator: GPIO12[0m
+[0;32mI (583) RELAY:   O2 Concentrator: GPIO13[0m
+[0;32mI (593) RELAY:   Active: HIGH[0m
+[0;32mI (593) gpio: GPIO[12]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (603) gpio: GPIO[13]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (603) RELAY: Relay control initialized - all relays OFF[0m
+[0;32mI (613) BLOCKSI: Initializing backup storage...[0m
+[0;32mI (613) BACKUP: Initializing backup storage[0m
+[0;32mI (653) BACKUP: Storage: 474641 total, 502 used, 474139 free[0m
+[0;32mI (673) BACKUP: Existing backup files: 1[0m
+[0;32mI (673) BLOCKSI: Initializing peripherals...[0m
+[0;32mI (673) PERIPH: ========================================[0m
+[0;32mI (673) PERIPH: Initializing all peripherals[0m
+[0;32mI (673) PERIPH: ========================================[0m
+[0;32mI (683) PERIPH: Initializing I2C bus[0m
+[0;32mI (683) PERIPH:   SDA: GPIO21, SCL: GPIO22[0m
+[0;32mI (693) PERIPH:   Frequency: 400000 Hz[0m
+[0;32mI (693) PERIPH: I2C bus initialized[0m
+[0;32mI (693) PERIPH: Scanning I2C bus...[0m
+[0;32mI (5553) PERIPH:   Found device at 0x62[0m
+[0;32mI (5553) PERIPH:     → MCP4725 DAC[0m
+[0;32mI (6353) PERIPH:   Found device at 0x73[0m
+[0;32mI (6353) PERIPH:     → DFRobot O3 Sensor[0m
+[0;32mI (6903) PERIPH: I2C scan complete: 2 device(s) found[0m
+[0;32mI (6903) PERIPH: Initializing SPI bus[0m
+[0;32mI (6903) PERIPH:   SCK: GPIO18, MISO: GPIO19, MOSI: GPIO23[0m
+[0;32mI (6903) PERIPH: SPI bus initialized[0m
+[0;32mI (6903) PERIPH: Initializing MCP4725 DAC for O3 power control[0m
+[0;32mI (6913) MCP4725: Initializing MCP4725 DAC[0m
+[0;32mI (6913) MCP4725:   I2C port: 0[0m
+[0;32mI (6913) MCP4725:   I2C address: 0x62[0m
+[0;32mI (6923) MCP4725:   VDD voltage: 3.30V[0m
+[0;32mI (6923) MCP4725:   Divider ratio: 0.357[0m
+[0;32mI (6923) MCP4725: MCP4725 detected at address 0x62[0m
+[0;32mI (6933) MCP4725: Current DAC value: 0 (0.00%)[0m
+[0;32mI (6933) MCP4725: EEPROM value: 2048[0m
+[0;32mI (6943) MCP4725: Power mode: 0[0m
+[0;32mI (6943) MCP4725: MCP4725 initialized successfully[0m
+[0;32mI (6943) PERIPH: MCP4725 DAC initialized[0m
+[0;32mI (6953) PERIPH:   Output voltage range: 0 - 1.18V[0m
+[0;32mI (6953) PERIPH: Initializing DFRobot lab O3 sensor[0m
+[0;32mI (6963) LAB_O3: Initializing DFRobot O3 sensor (lab safety monitor)[0m
+[0;32mI (6963) LAB_O3:   I2C port: 0[0m
+[0;32mI (6963) LAB_O3:   I2C address: 0x73[0m
+[0;32mI (6973) LAB_O3:   Sample interval: 1000 ms[0m
+[0;32mI (6973) LAB_O3: Sensor detected at address 0x73[0m
+[0;32mI (7093) LAB_O3: Initial reading: 0.000 ppm[0m
+[0;32mI (7093) LAB_O3: Auto-sample task started (interval=1000ms)[0m
+[0;32mI (7093) LAB_O3: DFRobot O3 sensor initialized[0m
+[0;32mI (7093) LAB_O3: Safety thresholds: Warning=0.10, Danger=0.30, Critical=1.00 ppm[0m
+[0;32mI (7093) PERIPH: Lab O3 sensor initialized[0m
+[0;32mI (7103) PERIPH: Initializing MAX31855 thermocouple[0m
+[0;32mI (7103) THERMO: Initializing MAX31855 thermocouple interface[0m
+[0;32mI (7113) THERMO:   SPI host: 2[0m
+[0;32mI (7113) THERMO:   CS GPIO: 5[0m
+[0;32mI (7123) THERMO: Initial reading: TC=17.00°C, CJ=18.00°C[0m
+[0;32mI (7123) THERMO: MAX31855 initialized[0m
+[0;32mI (7123) PERIPH: Thermocouple initialized[0m
+[0;32mI (7133) PERIPH: ========================================[0m
+[0;32mI (7133) PERIPH: Peripheral initialization summary:[0m
+[0;32mI (7143) PERIPH:   I2C bus:      OK[0m
+[0;32mI (7143) PERIPH:   SPI bus:      OK[0m
+[0;32mI (7143) PERIPH:   MCP4725 DAC:  OK[0m
+[0;32mI (7153) PERIPH:   Lab O3:       OK[0m
+[0;32mI (7153) PERIPH:   Thermocouple: OK[0m
+[0;32mI (7153) PERIPH: ========================================[0m
+[0;32mI (7163) BLOCKSI: Initializing dosimetry...[0m
+[0;32mI (7163) DOSIMETRY: Initializing dosimetry module[0m
+[0;32mI (7173) DOSIMETRY: Flow rate: 5.0 LPM[0m
+[0;32mI (7173) DOSIMETRY: Vessel volume: 2.00 L[0m
+[0;32mI (7173) DOSIMETRY: Material volume: 1.00 L[0m
+[0;32mI (7183) DOSIMETRY: Temperature: 25.0 °C[0m
+[0;32mI (7183) DOSIMETRY: Humidity: 60 %[0m
+[0;32mI (7183) DOSIMETRY: Flow rate set to 5.0 LPM[0m
+[0;32mI (7193) BLOCKSI: Initializing O3 power control...[0m
+[0;32mI (7193) O3_POWER: Initializing O3 power control[0m
+[0;32mI (7203) O3_POWER: O3 power control initialized[0m
+[0;32mI (7203) O3_POWER:   Effective range: 20% - 75%[0m
+[0;32mI (7203) O3_POWER:   Output voltage range: 0 - 1.18V[0m
+[0;32mI (7213) BLOCKSI: Initializing sensor aggregator...[0m
+[0;32mI (7213) SENSOR_AGG: Initializing sensor aggregator[0m
+[0;32mI (7223) SENSOR_AGG:   Sample interval: 500 ms[0m
+[0;32mI (7223) SENSOR_AGG: Sensor sampling task started[0m
+[0;32mI (7233) SENSOR_AGG:   Lab O3 sensor: available[0m
+[0;32mI (7233) SENSOR_AGG:   Thermocouple: available[0m
+[0;32mI (7243) SENSOR_AGG: Sensor aggregator initialized[0m
+[0;32mI (7243) BLOCKSI: Initializing WiFi...[0m
+[0;32mI (7263) wifi:wifi driver task: 3ffc6dd8, prio:23, stack:6656, core=0[0m
+[0;32mI (7273) wifi:wifi firmware version: e8ce6e2[0m
+[0;32mI (7273) wifi:wifi certification version: v7.0[0m
+[0;32mI (7273) wifi:config NVS flash: enabled[0m
+[0;32mI (7273) wifi:config nano formatting: disabled[0m
+[0;32mI (7273) wifi:Init data frame dynamic rx buffer num: 32[0m
+[0;32mI (7283) wifi:Init static rx mgmt buffer num: 5[0m
+[0;32mI (7283) wifi:Init management short buffer num: 32[0m
+[0;32mI (7293) wifi:Init dynamic tx buffer num: 32[0m
+[0;32mI (7293) wifi:Init static rx buffer size: 1600[0m
+[0;32mI (7303) wifi:Init static rx buffer num: 10[0m
+[0;32mI (7303) wifi:Init dynamic rx buffer num: 32[0m
+[0;32mI (7303) wifi_init: rx ba win: 6[0m
+[0;32mI (7313) wifi_init: accept mbox: 6[0m
+[0;32mI (7313) wifi_init: tcpip mbox: 32[0m
+[0;32mI (7313) wifi_init: udp mbox: 6[0m
+[0;32mI (7323) wifi_init: tcp mbox: 6[0m
+[0;32mI (7323) wifi_init: tcp tx win: 5760[0m
+[0;32mI (7323) wifi_init: tcp rx win: 5760[0m
+[0;32mI (7333) wifi_init: tcp mss: 1440[0m
+[0;32mI (7333) wifi_init: WiFi IRAM OP enabled[0m
+[0;32mI (7333) wifi_init: WiFi RX IRAM OP enabled[0m
+[0;32mI (7343) phy_init: phy_version 4861,b71b5ad,Aug  5 2025,11:16:06[0m
+[0;32mI (7423) phy_init: Saving new calibration data due to checksum failure or outdated calibration data, mode(0)[0m
+[0;32mI (7453) wifi:mode : sta (b8:d6:1a:57:72:e8)[0m
+[0;32mI (7453) wifi:enable tsf[0m
+[0;32mI (7453) BLOCKSI: WiFi initialization complete, connecting to Goldrush1[0m
+[0;32mI (7463) BLOCKSI: WiFi station started, connecting...[0m
+[0;32mI (7473) wifi:new:<4,1>, old:<1,0>, ap:<255,255>, sta:<4,1>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (7473) wifi:state: init -> auth (0xb0)[0m
+[0;32mI (7563) wifi:state: auth -> assoc (0x0)[0m
+[0;32mI (7733) wifi:state: assoc -> run (0x10)[0m
+[0;33mW (7763) THERMO: Fault detected: Short to GND [0m
+[0;32mI (7863) wifi:connected with Goldrush1, aid = 1, channel 4, 40U, bssid = 0e:36:c9:88:b3:57[0m
+[0;32mI (7873) wifi:security: WPA2-PSK, phy: bgn, rssi: -45[0m
+[0;32mI (7873) wifi:pm start, type: 1[0m
+
+[0;32mI (7873) wifi:dp: 1, bi: 108544, li: 2, scale listen interval from 307200 us to 217088 us[0m
+[0;32mI (7913) wifi:<ba-add>idx:0 (ifx:0, 0e:36:c9:88:b3:57), tid:0, ssn:1, winSize:64[0m
+[0;32mI (7933) wifi:dp: 3, bi: 108544, li: 3, scale listen interval from 307200 us to 325632 us[0m
+[0;32mI (7933) wifi:AP's beacon interval = 108544 us, DTIM period = 3[0m
+[0;33mW (8273) THERMO: Fault detected: Short to GND [0m
+[0;32mI (9433) esp_netif_handlers: sta ip: 192.168.1.119, mask: 255.255.255.0, gw: 192.168.1.1[0m
+[0;32mI (9433) BLOCKSI: WiFi connected, IP: 192.168.1.119[0m
+[0;32mI (9433) BLOCKSI: WiFi connected successfully[0m
+[0;32mI (9433) BLOCKSI: Initializing Golioth...[0m
+[0;32mI (9443) golioth_mbox: Mbox created, bufsize: 2688, num_items: 20, item_size: 128[0m
+[0;32mI (9453) BLOCKSI: Golioth client created, waiting for connection...[0m
+[0;32mI (9453) BLOCKSI: Initializing LAN client...[0m
+[0;32mI (9453) LAN: Initializing LAN client[0m
+[0;32mI (9463) LAN: LAN client task started[0m
+[0;32mI (9463) LAN: Server: 192.168.1.8:5000[0m
+[0;32mI (9463) LAN: LAN client initialized[0m
+[0;32mI (9463) LAN: Connecting to 192.168.1.8:5000...[0m
+[0;32mI (9473) BLOCKSI: Initializing 106-H interface...[0m
+[0;32mI (9473) 106H: Initializing 106-H interface[0m
+[0;32mI (9483) 106H: UART2, TX=17, RX=16, 19200 baud[0m
+[0;32mI (9483) 106H: RX task started[0m
+[0;32mI (9493) 106H: 106-H interface initialized[0m
+[0;32mI (9493) BLOCKSI: =========================================[0m
+[0;32mI (9493) BLOCKSI:    Initialization Complete[0m
+[0;32mI (9503) BLOCKSI: =========================================[0m
+[0;32mI (9513) golioth_coap_client_libcoap: Start CoAP session with host: coaps://coap.golioth.io[0m
+[0;32mI (9513) golioth_coap_client_libcoap: Session PSK-ID: BlockSIControl@blocksi[0m
+[0;32mI (9523) libcoap: Setting PSK key[0m
+
+[0;32mI (9533) golioth_coap_client_libcoap: Entering CoAP I/O loop[0m
+[0;32mI (9613) wifi:<ba-add>idx:1 (ifx:0, 0e:36:c9:88:b3:57), tid:3, ssn:0, winSize:64[0m
+[0;33mW (10313) THERMO: Fault detected: Short to GND [0m
+[0;32mI (10553) golioth_coap_client_libcoap: Golioth CoAP client connected[0m
+[0;32mI (10553) BLOCKSI: Golioth connected[0m
+[0;33mW (10823) THERMO: Fault detected: Short to GND [0m
+[0;33mW (11333) THERMO: Fault detected: Short to GND [0m
+[0;32mI (11413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (11843) THERMO: Fault detected: Short to GND [0m
+[0;33mW (12863) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (13413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.0°C, Pwr=0%[0m
+[0;33mW (14393) THERMO: Fault detected: Short to GND [0m
+[0;33mW (14903) THERMO: Fault detected: Short to GND [0m
+[0;32mI (15413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (15413) THERMO: Fault detected: Short to GND [0m
+[0;33mW (16433) THERMO: Fault detected: Short to GND [0m
+[0;32mI (17413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.1°C, Pwr=0%[0m
+[0;33mW (17963) THERMO: Fault detected: Short to GND [0m
+[0;33mW (18473) THERMO: Fault detected: Short to GND [0m
+[0;33mW (18983) THERMO: Fault detected: Short to GND [0m
+[0;32mI (19413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (19493) THERMO: Fault detected: Short to GND [0m
+[0;33mW (20513) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (21413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.1°C, Pwr=0%[0m
+[0;33mW (21533) THERMO: Fault detected: Short to GND [0m
+[0;33mW (22043) THERMO: Fault detected: Short to GND [0m
+[0;33mW (23063) THERMO: Fault detected: Short to GND [0m
+[0;32mI (23413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (24083) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (25413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.1°C, Pwr=0%[0m
+[0;33mW (25613) THERMO: Fault detected: Short to GND [0m
+[0;33mW (26633) THERMO: Fault detected: Short to GND [0m
+[0;32mI (27223) LAN: Connected to PC server[0m
+[0;32mI (27283) LAN: RX: CMD,status[0m
+[0;32mI (27283) BLOCKSI: LAN command: status, args: (none)[0m
+[0;32mI (27283) LAN: RX: CMD,relay_get[0m
+[0;32mI (27283) BLOCKSI: LAN command: relay_get, args: (none)[0m
+[0;32mI (27283) LAN: RX: CMD,sensors_get[0m
+[0;32mI (27283) BLOCKSI: LAN command: sensors_get, args: (none)[0m
+[0;32mI (27413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (27653) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (29183) THERMO: Fault detected: Short to GND [0m
+[0;32mI (29413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (29693) THERMO: Fault detected: Short to GND [0m
+[0;33mW (30203) THERMO: Fault detected: Short to GND [0m
+[0;33mW (30713) THERMO: Fault detected: Short to GND [0m
+[0;32mI (31413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (31733) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (32753) THERMO: Fault detected: Short to GND [0m
+[0;33mW (33263) THERMO: Fault detected: Short to GND [0m
+[0;32mI (33413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (34283) THERMO: Fault detected: Short to GND [0m
+[0;33mW (34793) THERMO: Fault detected: Short to GND [0m
+[0;33mW (35303) THERMO: Fault detected: Short to GND [0m
+[0;32mI (35413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (36323) THERMO: Fault detected: Short to GND [0m
+[0;33mW (36833) THERMO: Fault detected: Short to GND [0m
+[0;32mI (37413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (37853) THERMO: Fault detected: Short to GND [0m
+[0;33mW (38363) THERMO: Fault detected: Short to GND [0m
+[0;33mW (38873) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (39413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (40403) THERMO: Fault detected: Short to GND [0m
+[0;33mW (40913) THERMO: Fault detected: Short to GND [0m
+[0;32mI (41423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (42963) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (43413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (44493) THERMO: Fault detected: Short to GND [0m
+[0;33mW (45003) THERMO: Fault detected: Short to GND [0m
+[0;32mI (45413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (45513) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (46023) THERMO: Fault detected: Short to GND [0m
+[0;33mW (46533) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (47413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (48063) THERMO: Fault detected: Short to GND [0m
+[0;33mW (48573) THERMO: Fault detected: Short to GND [0m
+[0;33mW (49083) THERMO: Fault detected: Short to GND Short to VCC [0m
+[0;32mI (49413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (50613) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (51413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (52143) THERMO: Fault detected: Short to GND [0m
+[0;33mW (53163) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (53413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (53673) THERMO: Fault detected: Short to GND [0m
+[0;33mW (54183) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (55413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (55713) THERMO: Fault detected: Short to GND [0m
+[0;33mW (56223) THERMO: Fault detected: Short to GND [0m
+[0;33mW (57243) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (57423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (58263) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (59423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (59793) THERMO: Fault detected: Short to GND [0m
+[0;33mW (60813) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (61323) THERMO: Fault detected: Short to GND [0m
+[0;32mI (61423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (62343) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (63363) THERMO: Fault detected: Short to GND [0m
+[0;32mI (63413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (63873) THERMO: Fault detected: Short to GND [0m
+[0;33mW (64893) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (65403) THERMO: Fault detected: Short to GND [0m
+[0;32mI (65413) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;32mI (67423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.0°C, Pwr=0%[0m
+[0;33mW (67443) THERMO: Fault detected: Short to GND [0m
+[0;33mW (67953) THERMO: Fault detected: Short to GND [0m
+[0;33mW (68973) THERMO: Fault detected: Short to GND [0m
+[0;32mI (69423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (69483) THERMO: Fault detected: Short to GND [0m
+[0;32mI (69493) BLOCKSI: === Status ===[0m
+[0;32mI (69493) BLOCKSI: WiFi: Connected, Golioth: Connected[0m
+[0;32mI (69493) BLOCKSI: LAN: Connected (TX:22 RX:3)[0m
+[0;32mI (69493) BLOCKSI: 106-H: 30 samples, 0 errors[0m
+[0;32mI (69493) BLOCKSI: Peripherals: DAC=OK, LabO3=OK, Thermo=OK[0m
+[0;32mI (69503) BLOCKSI: Power: 0%, Flow: 5.0 LPM[0m
+[0;32mI (69503) BLOCKSI: Free heap: 142852 bytes[0m
+[0;32mI (71423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.1°C, Pwr=0%[0m
+[0;33mW (71523) THERMO: Fault detected: Short to GND [0m
+[0;33mW (72033) THERMO: Fault detected: Short to GND [0m
+[0;33mW (73053) THERMO: Fault detected: Short to GND [0m
+[0;32mI (73423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (73563) THERMO: Fault detected: Short to GND [0m
+[0;33mW (74073) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (74583) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (75423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.0°C, Pwr=0%[0m
+[0;33mW (76113) THERMO: Fault detected: Short to GND [0m
+[0;33mW (77133) THERMO: Fault detected: Short to GND [0m
+[0;32mI (77423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (77643) THERMO: Fault detected: Short to GND [0m
+[0;33mW (78153) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (79423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.1°C, Pwr=0%[0m
+[0;33mW (79683) THERMO: Fault detected: Short to GND [0m
+[0;33mW (80193) THERMO: Fault detected: Short to GND [0m
+[0;33mW (81213) THERMO: Fault detected: Short to GND [0m
+[0;32mI (81423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (81723) THERMO: Fault detected: Short to GND [0m
+[0;33mW (82233) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (83423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.0°C, Pwr=0%[0m
+[0;33mW (83763) THERMO: Fault detected: Short to GND [0m
+[0;33mW (84273) THERMO: Fault detected: Short to GND [0m
+[0;33mW (85293) THERMO: Fault detected: Short to GND [0m
+[0;32mI (85423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (85803) THERMO: Fault detected: Short to GND [0m
+[0;33mW (86313) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (87423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.0°C, Pwr=0%[0m
+[0;33mW (89373) THERMO: Fault detected: Short to GND [0m
+[0;32mI (89423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (89883) THERMO: Fault detected: Short to GND [0m
+[0;33mW (90393) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (91423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.1°C, Pwr=0%[0m
+[0;33mW (91923) THERMO: Fault detected: Short to GND [0m
+[0;33mW (92943) THERMO: Fault detected: Short to GND [0m
+[0;32mI (93423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (93453) THERMO: Fault detected: Short to GND [0m
+[0;33mW (94473) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (95423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (96003) THERMO: Fault detected: Short to GND Short to VCC [0m
+[0;32mI (97423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (97533) THERMO: Fault detected: Short to GND [0m
+[0;33mW (98553) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (99423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (101103) THERMO: Fault detected: Short to GND [0m
+[0;32mI (101423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (101613) THERMO: Fault detected: Short to GND [0m
+[0;32mI (103423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.1°C, Pwr=0%[0m
+[0;33mW (103653) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (105183) THERMO: Fault detected: Short to GND [0m
+[0;32mI (105243) LAN: RX: CMD,relay_set,o2_conc,1[0m
+[0;32mI (105243) BLOCKSI: LAN command: relay_set, args: o2_conc,1[0m
+[0;32mI (105243) RELAY: Oxygen Concentrator: OFF -> ON[0m
+[0;32mI (105423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (106203) THERMO: Fault detected: Short to GND [0m
+[0;32mI (107423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (108753) THERMO: Fault detected: Short to GND [0m
+[0;33mW (109263) THERMO: Fault detected: Short to GND [0m
+[0;32mI (109423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (109773) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (111423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (112833) THERMO: Fault detected: Short to GND [0m
+[0;32mI (113423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (114873) THERMO: Fault detected: Short to GND [0m
+[0;32mI (115423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (116403) THERMO: Fault detected: Short to GND [0m
+[0;32mI (117423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.1°C, Pwr=0%[0m
+[0;33mW (117433) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (118963) THERMO: Fault detected: Short to GND [0m
+[0;32mI (119423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (119983) THERMO: Fault detected: Short to GND [0m
+[0;33mW (121003) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (121423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (122533) THERMO: Fault detected: Short to GND [0m
+[0;32mI (123423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (123553) THERMO: Fault detected: Short to GND [0m
+[0;33mW (124063) THERMO: Fault detected: Short to GND [0m
+[0;33mW (124573) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (125423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (126103) THERMO: Fault detected: Short to GND [0m
+[0;33mW (126613) THERMO: Fault detected: Short to GND [0m
+[0;33mW (127123) THERMO: Fault detected: Short to GND [0m
+[0;32mI (127423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (127633) THERMO: Fault detected: Short to GND [0m
+[0;32mI (129423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;32mI (129503) BLOCKSI: === Status ===[0m
+[0;32mI (129503) BLOCKSI: WiFi: Connected, Golioth: Connected[0m
+[0;32mI (129503) BLOCKSI: LAN: Connected (TX:52 RX:4)[0m
+[0;32mI (129503) BLOCKSI: 106-H: 60 samples, 0 errors[0m
+[0;32mI (129503) BLOCKSI: Peripherals: DAC=OK, LabO3=OK, Thermo=OK[0m
+[0;32mI (129513) BLOCKSI: Power: 0%, Flow: 5.0 LPM[0m
+[0;32mI (129513) BLOCKSI: Free heap: 142872 bytes[0m
+[0;33mW (129673) THERMO: Fault detected: Short to GND [0m
+[0;33mW (130183) THERMO: Fault detected: Short to GND [0m
+[0;33mW (131203) THERMO: Fault detected: Short to GND [0m
+[0;32mI (131423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (132223) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (133423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (133753) THERMO: Fault detected: Short to GND [0m
+[0;33mW (134773) THERMO: Fault detected: Short to GND [0m
+[0;32mI (135423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (135793) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (137323) THERMO: Fault detected: Short to GND [0m
+[0;32mI (137423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (138343) THERMO: Fault detected: Short to GND Short to VCC [0m
+[0;33mW (138853) THERMO: Fault detected: Short to GND [0m
+[0;33mW (139363) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (139423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (140893) THERMO: Fault detected: Short to GND [0m
+[0;33mW (141403) THERMO: Fault detected: Short to GND [0m
+[0;32mI (141423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (141913) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (142423) THERMO: Fault detected: Short to GND [0m
+[0;33mW (142933) THERMO: Fault detected: Short to GND [0m
+[0;32mI (143423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (144973) THERMO: Fault detected: Short to GND [0m
+[0;32mI (145423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;32mI (145493) LAN: RX: CMD,relay_set,ozone_gen,1[0m
+[0;32mI (145493) BLOCKSI: LAN command: relay_set, args: ozone_gen,1[0m
+[0;32mI (145493) RELAY: Ozone Generator: OFF -> ON[0m
+[0;33mW (145993) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (147013) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (147423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (148543) THERMO: Fault detected: Short to GND [0m
+[0;32mI (149423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (149563) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (150073) THERMO: Fault detected: Short to GND [0m
+[0;33mW (150583) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (151423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (152113) THERMO: Fault detected: Short to GND [0m
+[0;33mW (152623) THERMO: Fault detected: Short to GND [0m
+[0;32mI (153423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (154663) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (155423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.0°C, Pwr=0%[0m
+[0;33mW (156193) THERMO: Fault detected: Short to GND [0m
+[0;32mI (157423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (157723) THERMO: Fault detected: Short to GND [0m
+[0;33mW (158233) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (159423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (159763) THERMO: Fault detected: Short to GND [0m
+[0;33mW (160273) THERMO: Fault detected: Short to GND [0m
+[0;32mI (161423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.2°C, Pwr=0%[0m
+[0;33mW (161803) THERMO: Fault detected: Short to GND [0m
+[0;33mW (162313) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (163423) BLOCKSI: O3=0.030%, Room=0.000ppm, Vessel=17.1°C, Pwr=0%[0m
+[0;33mW (163843) THERMO: Fault detected: Short to GND [0m
+[0;33mW (164353) THERMO: Fault detected: Short to GND [0m
+[0;33mW (164863) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (165373) THERMO: Fault detected: Short to GND [0m
+[0;32mI (165423) BLOCKSI: O3=0.040%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (165883) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (167413) THERMO: Fault detected: Short to GND [0m
+[0;32mI (167423) BLOCKSI: O3=0.050%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (167923) THERMO: Fault detected: Short to GND [0m
+[0;32mI (169423) BLOCKSI: O3=0.060%, Room=0.000ppm, Vessel=17.0°C, Pwr=0%[0m
+[0;33mW (169963) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (171423) BLOCKSI: O3=0.090%, Room=0.000ppm, Vessel=17.0°C, Pwr=0%[0m
+[0;33mW (171493) THERMO: Fault detected: Short to GND [0m
+[0;33mW (172513) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (173023) THERMO: Fault detected: Short to GND [0m
+[0;32mI (173423) BLOCKSI: O3=0.110%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (173533) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (175063) THERMO: Fault detected: Short to GND [0m
+[0;32mI (175423) BLOCKSI: O3=0.110%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (175573) THERMO: Fault detected: Short to GND [0m
+[0;33mW (176593) THERMO: Fault detected: Short to VCC [0m
+[0;32mI (177423) BLOCKSI: O3=1.880%, Room=0.000ppm, Vessel=17.0°C, Pwr=0%[0m
+[0;33mW (179143) THERMO: Fault detected: Short to GND [0m
+[0;32mI (179423) BLOCKSI: O3=1.760%, Room=0.000ppm, Vessel=-999.0°C, Pwr=0%[0m
+[0;33mW (179653) THERMO: Fault detected: Short to GND [0m
+[0;33mW (180163) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (180673) THERMO: Fault detected: Short to GND [0m
+[0;32mI (181423) BLOCKSI: O3=1.780%, Room=0.000ppm, Vessel=17.0°C, Pwr=0%[0m
+[0;33mW (181693) THERMO: Fault detected: Short to VCC [0m
+[0;33mW (183223) THERMO: Fault detected: Short to GND [0m
+[0;32mI (183423) BLOCKSI: O3=1.770%, R

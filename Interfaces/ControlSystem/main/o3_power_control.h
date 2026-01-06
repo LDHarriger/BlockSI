@@ -1,17 +1,26 @@
 /**
  * @file o3_power_control.h
- * @brief Ozone generator power control via ESP32 DAC
+ * @brief Ozone generator power control via DS3502 digital potentiometer
  * 
  * Controls MP-8000 ozone generator power level by replacing the manual
- * potentiometer with a DAC-driven voltage output.
+ * potentiometer with a DS3502 digital potentiometer in rheostat mode.
  * 
  * Hardware:
- * - ESP32 GPIO25 (DAC1) → voltage divider → op-amp buffer → MP-8000
- * - Output voltage range: 0 - 1.22V (matching original pot range)
+ * - DS3502 (10kΩ) replaces original 4.7kΩ rheostat
+ * - RH → MP-8000 control circuit (4.9V source)
+ * - RW → MP-8000 current sink (held at 0V)
+ * - RL → Jumpered to RW (rheostat mode)
  * 
- * The effective power range is 20-75% of the pot range, where:
- * - Below 20%: No measurable ozone output
- * - Above 75%: Diminishing returns
+ * Control Behavior:
+ * - Original circuit: 0-3.7kΩ range controlled ozone output
+ * - DS3502: 0-10kΩ range, with ~60 steps covering original range
+ * - Higher resistance = more current to control circuit = more ozone
+ * - R=0: Generator OFF (current sink sees short, shuts down)
+ * 
+ * Power Zones (from calibration):
+ * - 0-20%: Sub-threshold, minimal output
+ * - 20-75%: Linear active range  
+ * - 75-100%: Saturation, diminishing returns
  */
 
 #ifndef O3_POWER_CONTROL_H
@@ -26,134 +35,194 @@ extern "C" {
 #endif
 
 /**
- * @brief Power calibration data point
+ * @brief Power control mode
+ */
+typedef enum {
+    O3_POWER_MODE_ORIGINAL,     // Limit to original 4.7kΩ pot range
+    O3_POWER_MODE_EXTENDED      // Use full 10kΩ DS3502 range
+} o3_power_mode_t;
+
+/**
+ * @brief Power control state
  */
 typedef struct {
-    uint8_t power_pct;          // Power setting (0-100%)
+    uint8_t wiper_position;     // Raw wiper position (0-127)
+    uint16_t resistance_ohms;   // Current resistance
+    float power_percent;        // Power percentage (0-100%)
+    float predicted_o3_ppm;     // Predicted O3 based on calibration
+    o3_power_mode_t mode;       // Current operating mode
+} o3_power_state_t;
+
+/**
+ * @brief Calibration data point
+ */
+typedef struct {
+    uint8_t wiper;              // Wiper setting
     float o3_mean_ppm;          // Mean O3 concentration
     float o3_std_ppm;           // Standard deviation
     uint16_t sample_count;      // Number of samples
+    uint32_t hold_time_ms;      // Time held at this setting
 } o3_power_cal_point_t;
 
 /**
- * @brief Power calibration curve
+ * @brief Calibration curve
  */
 typedef struct {
     float flow_rate_lpm;        // Flow rate during calibration
     uint8_t point_count;        // Number of calibration points
-    o3_power_cal_point_t points[21];  // Up to 21 points (0%, 5%, 10%, ... 100%)
+    o3_power_cal_point_t points[128];  // Up to 128 points (full wiper range)
     uint32_t timestamp;         // Unix timestamp of calibration
     bool valid;                 // True if calibration is valid
 } o3_power_calibration_t;
 
 /**
- * @brief Callback for power sweep progress
- * 
- * @param power_pct Current power level being tested
- * @param o3_mean Current mean O3 reading
- * @param o3_std Current standard deviation
- * @param progress Sweep progress (0.0 - 1.0)
+ * @brief Callback for calibration sweep progress
  */
-typedef void (*o3_power_sweep_callback_t)(uint8_t power_pct, float o3_mean, 
-                                           float o3_std, float progress);
+typedef void (*o3_power_sweep_callback_t)(uint8_t wiper, float o3_reading, 
+                                           float progress, void *user_data);
 
 // ============================================================================
 // Initialization
 // ============================================================================
 
 /**
- * @brief Initialize power control
- * 
- * Configures DAC output and sets power to 0%.
+ * @brief Initialize power control with DS3502
  * 
  * @return ESP_OK on success
  */
 esp_err_t o3_power_init(void);
 
 /**
- * @brief Deinitialize power control
+ * @brief Deinitialize power control (sets power to 0)
  */
 void o3_power_deinit(void);
+
+/**
+ * @brief Check if power control is initialized
+ */
+bool o3_power_is_initialized(void);
 
 // ============================================================================
 // Power Control
 // ============================================================================
 
 /**
- * @brief Set power level
+ * @brief Set power level (0-100%)
  * 
- * Maps 0-100% to effective DAC range with proper voltage scaling.
- * 
- * @param percent Power level (0-100%)
+ * @param percent Power percentage
  * @return ESP_OK on success
  */
-esp_err_t o3_power_set(uint8_t percent);
+esp_err_t o3_power_set_percent(float percent);
 
 /**
  * @brief Get current power level
  * 
- * @return Current power level (0-100%)
+ * @return Power percentage (0-100%)
  */
-uint8_t o3_power_get(void);
+float o3_power_get_percent(void);
 
 /**
- * @brief Set raw DAC value (for testing/calibration)
+ * @brief Set power by raw wiper position (0-127)
  * 
- * @param dac_value Raw 8-bit DAC value (0-255)
+ * @param wiper Wiper position
  * @return ESP_OK on success
  */
-esp_err_t o3_power_set_raw(uint8_t dac_value);
+esp_err_t o3_power_set_wiper(uint8_t wiper);
 
 /**
- * @brief Get raw DAC value
+ * @brief Get current wiper position
  * 
- * @return Current raw DAC value (0-255)
+ * @return Wiper position (0-127)
  */
-uint8_t o3_power_get_raw(void);
+uint8_t o3_power_get_wiper(void);
 
 /**
- * @brief Get expected output voltage for current setting
+ * @brief Set target resistance in ohms
  * 
- * @return Expected voltage in volts
+ * @param ohms Target resistance
+ * @return ESP_OK on success
  */
-float o3_power_get_voltage(void);
+esp_err_t o3_power_set_resistance(uint16_t ohms);
+
+/**
+ * @brief Get current resistance
+ * 
+ * @return Resistance in ohms
+ */
+uint16_t o3_power_get_resistance(void);
+
+/**
+ * @brief Set operating mode (original range vs extended)
+ * 
+ * @param mode Operating mode
+ */
+void o3_power_set_mode(o3_power_mode_t mode);
+
+/**
+ * @brief Get current operating mode
+ */
+o3_power_mode_t o3_power_get_mode(void);
+
+/**
+ * @brief Emergency stop - set power to 0 immediately
+ */
+void o3_power_emergency_stop(void);
+
+// ============================================================================
+// State and Prediction
+// ============================================================================
+
+/**
+ * @brief Get complete power state
+ * 
+ * @param state Output state structure
+ * @return ESP_OK on success
+ */
+esp_err_t o3_power_get_state(o3_power_state_t *state);
+
+/**
+ * @brief Predict O3 output for given power setting
+ * 
+ * Uses calibration data if available, otherwise returns estimate.
+ * 
+ * @param percent Power percentage
+ * @param flow_lpm Flow rate in LPM
+ * @return Predicted O3 in ppm
+ */
+float o3_power_predict_o3(float percent, float flow_lpm);
 
 // ============================================================================
 // Calibration
 // ============================================================================
 
 /**
- * @brief Start power sweep calibration
+ * @brief Start calibration sweep
  * 
- * Performs automated sweep to characterize O3 output vs power level.
- * This is a blocking operation that takes several minutes.
+ * Sweeps through wiper positions, holding at each for specified time.
+ * Calls callback with progress updates.
  * 
- * Algorithm:
- * 1. Start at 0% power, establish baseline
- * 2. Coarse sweep (5% steps) to find active range
- * 3. Fine sweep (1% steps) within active range
- * 4. Collect statistics at each point (configurable samples)
- * 5. Store calibration curve
- * 
- * @param flow_rate_lpm Current O2 flow rate (for reference)
- * @param samples_per_point Number of samples to collect at each power level
+ * @param start_wiper Starting wiper position
+ * @param end_wiper Ending wiper position  
+ * @param step_size Wiper increment between points
+ * @param hold_time_ms Time to hold at each position (ms)
  * @param callback Progress callback (can be NULL)
+ * @param user_data User data passed to callback
  * @return ESP_OK on success
  */
-esp_err_t o3_power_calibrate(float flow_rate_lpm, uint16_t samples_per_point,
-                              o3_power_sweep_callback_t callback);
+esp_err_t o3_power_start_calibration(uint8_t start_wiper, uint8_t end_wiper,
+                                      uint8_t step_size, uint32_t hold_time_ms,
+                                      o3_power_sweep_callback_t callback,
+                                      void *user_data);
 
 /**
- * @brief Abort running calibration
+ * @brief Stop ongoing calibration
  */
-void o3_power_calibrate_abort(void);
+void o3_power_stop_calibration(void);
 
 /**
  * @brief Check if calibration is in progress
- * 
- * @return true if calibration is running
  */
-bool o3_power_calibrate_is_running(void);
+bool o3_power_calibration_active(void);
 
 /**
  * @brief Get calibration data
@@ -164,49 +233,9 @@ bool o3_power_calibrate_is_running(void);
 esp_err_t o3_power_get_calibration(o3_power_calibration_t *cal);
 
 /**
- * @brief Save calibration to NVS
- * 
- * @return ESP_OK on success
+ * @brief Clear calibration data
  */
-esp_err_t o3_power_save_calibration(void);
-
-/**
- * @brief Load calibration from NVS
- * 
- * @return ESP_OK on success
- */
-esp_err_t o3_power_load_calibration(void);
-
-/**
- * @brief Clear stored calibration
- * 
- * @return ESP_OK on success
- */
-esp_err_t o3_power_clear_calibration(void);
-
-// ============================================================================
-// Estimation (requires valid calibration)
-// ============================================================================
-
-/**
- * @brief Estimate O3 output rate for given power level
- * 
- * Uses calibration curve to interpolate expected O3 concentration.
- * 
- * @param power_pct Power level (0-100%)
- * @return Estimated O3 concentration in ppm, or -1 if no calibration
- */
-float o3_power_estimate_output(uint8_t power_pct);
-
-/**
- * @brief Find power level needed for target O3 output
- * 
- * Inverse of o3_power_estimate_output().
- * 
- * @param target_ppm Target O3 concentration in ppm
- * @return Required power level (0-100%), or 0xFF if not achievable
- */
-uint8_t o3_power_find_for_target(float target_ppm);
+void o3_power_clear_calibration(void);
 
 #ifdef __cplusplus
 }

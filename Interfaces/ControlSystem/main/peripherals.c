@@ -126,15 +126,15 @@ esp_err_t peripherals_init_dac(void)
     }
     
     ESP_LOGI(TAG, "Initializing motorized potentiometer for O3 power control");
-    ESP_LOGI(TAG, "  Motor: AIN1=GPIO%d, AIN2=GPIO%d, SLP=GPIO%d",
-             MOTOR_POT_AIN1_GPIO, MOTOR_POT_AIN2_GPIO, MOTOR_POT_SLP_GPIO);
+    ESP_LOGI(TAG, "  Motor: AIN1=GPIO%d, AIN2=GPIO%d",
+             MOTOR_POT_AIN1_GPIO, MOTOR_POT_AIN2_GPIO);
     ESP_LOGI(TAG, "  ADC feedback: GPIO%d", MOTOR_POT_ADC_GPIO);
+    ESP_LOGI(TAG, "  DRV8833 SLP: tied to 5V (always enabled)");
     
-    // Initialize motor pot with default configuration from blocksi_pins.h
+    // Initialize motor pot with configuration from blocksi_pins.h
     motor_pot_config_t config = {
         .ain1_gpio = MOTOR_POT_AIN1_GPIO,
         .ain2_gpio = MOTOR_POT_AIN2_GPIO,
-        .slp_gpio = MOTOR_POT_SLP_GPIO,
         .adc_gpio = MOTOR_POT_ADC_GPIO,
         .pot_ohms = MOTOR_POT_RESISTANCE,
         .invert_direction = false
@@ -268,7 +268,7 @@ esp_err_t peripherals_init_all(void)
         overall_ret = ESP_ERR_NOT_FOUND;
     }
     
-    // Initialize motorized pot power control (was DS3502, before that MCP4725)
+    // Initialize motorized pot power control
     ret = peripherals_init_dac();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Motor pot init failed - O3 power control unavailable");
@@ -341,7 +341,6 @@ void peripherals_scan_i2c(void)
             if (addr == I2C_ADDR_DFROBOT_O3) {
                 ESP_LOGI(TAG, "    -> DFRobot O3 Sensor");
             }
-            // Note: DS3502 no longer used - motor pot doesn't use I2C
         }
     }
     

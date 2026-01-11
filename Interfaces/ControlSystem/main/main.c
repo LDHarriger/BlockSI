@@ -44,7 +44,7 @@
 #include "dfrobot_ozone.h"
 #include "max31855_thermocouple.h"
 #include "o3_power_control.h"
-#include "ds3502_digipot.h"
+#include "motor_pot.h"
 
 static const char *TAG = "BLOCKSI";
 
@@ -462,13 +462,46 @@ static bool lan_command_handler(const char *cmd, const char *args,
         float predicted = predict_o3_output(flow, power);
         snprintf(response, response_size, "predicted_o3=%.2f", predicted);
         return true;
+    
+    // Pot status (recommended by Claude)
+    } else if (strcmp(cmd, "motor_pot_status") == 0) {
+        if (!motor_pot_is_initialized()) {
+            snprintf(response, response_size, "not_initialized");
+            return false;
+        }
         
+        motor_pot_state_t state;
+        motor_pot_get_state(&state);
+        
+        snprintf(response, response_size, 
+                 "pos=%.1f,adc=%u,ohms=%u,moving=%d",
+                 state.position_percent,
+                 state.adc_raw,
+                 state.resistance_ohms,
+                 state.is_moving);
+        return true;
+        
+    } else if (strcmp(cmd, "motor_pot_calibrate") == 0) {
+        esp_err_t ret = motor_pot_calibrate();
+        if (ret == ESP_OK) {
+            motor_pot_calibration_t cal;
+            motor_pot_get_calibration(&cal);
+            snprintf(response, response_size, 
+                     "min=%u,max=%u,range=%d",
+                     cal.adc_min, cal.adc_max, 
+                     cal.adc_max - cal.adc_min);
+            return true;
+        }
+        snprintf(response, response_size, "calibration_failed");
+        return false;
+    // End of pot handlers
+
     // =========================================================================
     // Sensor status commands
     // =========================================================================
     } else if (strcmp(cmd, "sensors_get") == 0) {
-        // Use _is_present() to check if each device was detected during init
-        const char *dac_s = ds3502_is_present() ? "ok" : "err";
+        // Use _is_initialized() to check if each device was detected during init
+        const char *pot_s = motor_pot_is_initialized() ? "ok" : "err";
         const char *o3_s = dfrobot_o3_is_present() ? "ok" : "err";
         const char *tc_s = max31855_is_present() ? "ok" : "err";
         
@@ -478,8 +511,8 @@ static bool lan_command_handler(const char *cmd, const char *args,
         
         // Response must fit in ~56 chars (lan_client limit)
         snprintf(response, response_size, 
-                 "dac=%s,lab_o3=%s,thermo=%s,room_o3=%.3f,vessel_temp=%.1f",
-                 dac_s, o3_s, tc_s,
+                 "pot=%s,lab_o3=%s,thermo=%s,room_o3=%.3f,vessel_temp=%.1f",
+                 pot_s, o3_s, tc_s,
                  sensors.room_o3_valid ? sensors.room_o3_ppm : 0.0f,
                  sensors.vessel_temp_valid ? sensors.vessel_temp_c : -999.0f);
         return true;

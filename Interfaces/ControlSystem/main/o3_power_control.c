@@ -57,7 +57,6 @@ esp_err_t o3_power_init(void)
         motor_pot_config_t config = {
             .ain1_gpio = MOTOR_POT_AIN1_GPIO,
             .ain2_gpio = MOTOR_POT_AIN2_GPIO,
-            .slp_gpio = MOTOR_POT_SLP_GPIO,
             .adc_gpio = MOTOR_POT_ADC_GPIO,
             .pot_ohms = MOTOR_POT_RESISTANCE,
             .invert_direction = false   // Adjust if needed after testing

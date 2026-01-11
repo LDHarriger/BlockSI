@@ -8,7 +8,7 @@
  * ESP32-WROOM-32 Pin Usage:
  * ========================
  * 
- * === I2C Bus (Shared) ===
+ * === I2C Bus ===
  * GPIO 21: SDA  - DFRobot O3 Sensor
  * GPIO 22: SCL  - DFRobot O3 Sensor
  * 
@@ -29,10 +29,11 @@
  * === Motor Pot Control (PRM162 + DRV8833) ===
  * GPIO 25: DRV8833 AIN1 - Motor control (PWM)
  * GPIO 26: DRV8833 AIN2 - Motor control (PWM)
- * GPIO 27: DRV8833 SLP  - Sleep/Enable (optional, can tie high)
  * GPIO 34: ADC input    - Servo track position feedback
+ * Note: DRV8833 SLP pin is tied to 5V (always enabled)
  * 
  * === Reserved/Available ===
+ * GPIO 27: Available (was DRV8833 SLP, now hardwired)
  * GPIO 32: ADC1_CH4 (available)
  * GPIO 33: ADC1_CH5 (available)
  * GPIO 35: ADC1_CH7, input only (available)
@@ -101,8 +102,7 @@
 // DRV8833 H-Bridge Motor Driver Pins
 #define MOTOR_POT_AIN1_GPIO     25          // PWM control pin 1
 #define MOTOR_POT_AIN2_GPIO     26          // PWM control pin 2
-#define MOTOR_POT_SLP_GPIO      27          // Sleep/Enable pin (HIGH = active)
-                                            // Set to -1 if tying SLP directly to VCC
+// Note: SLP is tied to 5V on PCB (always enabled, no GPIO control)
 
 // Servo Track ADC (position feedback from secondary pot section)
 #define MOTOR_POT_ADC_GPIO      34          // ADC1_CH6, input only
@@ -123,28 +123,5 @@
 // O3 prediction model: O3_max = A/flow + B (ppm at max power)
 #define O3_MODEL_COEFF_A        1.78f       // Inverse flow coefficient
 #define O3_MODEL_COEFF_B        1.40f       // Base concentration offset
-
-// ============================================================================
-// Legacy Definitions (kept for compatibility during transition)
-// These will be removed once peripherals.c is fully updated for motor pot
-// ============================================================================
-
-// DS3502 digital potentiometer (replaced by motor pot due to ground issues)
-#define DS3502_I2C_ADDR         0x28        // Legacy - not used with motor pot
-#define DS3502_FULL_SCALE_OHMS  10000       // Legacy - not used with motor pot
-#define DS3502_WIPER_STEPS      128         // Legacy - not used with motor pot
-#define DS3502_WIPER_R_OHMS     40          // Legacy - not used with motor pot
-
-// Original MP-8000 pot specs (still used for reference)
-#define ORIGINAL_POT_OHMS       5000        // PRM162 is 5kΩ (was 4700 for original)
-#define ORIGINAL_POT_WIPER_MAX  127         // Full range for motor pot
-
-// MCP4725 DAC legacy defines (for peripherals.c compatibility)
-#define I2C_ADDR_MCP4725        0x62        // Legacy - not used
-#define DAC_VDD_VOLTAGE         3.3f        // Legacy
-#define DAC_DIVIDER_R1          18000       // Legacy
-#define DAC_DIVIDER_R2          10000       // Legacy
-#define DAC_DIVIDER_RATIO       ((float)DAC_DIVIDER_R2 / (DAC_DIVIDER_R1 + DAC_DIVIDER_R2))
-#define DAC_MAX_OUTPUT_V        (DAC_VDD_VOLTAGE * DAC_DIVIDER_RATIO)
 
 #endif // BLOCKSI_PINS_H

@@ -7,6 +7,7 @@
  */
 
 #include "motor_pot.h"
+#include "blocksi_pins.h"
 #include "esp_log.h"
 #include "esp_adc/adc_oneshot.h"
 #include "driver/ledc.h"
@@ -17,6 +18,9 @@
 #include <math.h>
 
 static const char *TAG = "MOTOR_POT";
+
+// ADC attenuation for 0-3.3V range
+#define MOTOR_POT_ADC_ATTEN     ADC_ATTEN_DB_12
 
 // ============================================================================
 // Module State
@@ -61,7 +65,7 @@ static struct {
     .adc_gpio = MOTOR_POT_ADC_GPIO,
     .pwm_ch_ain1 = LEDC_CHANNEL_0,
     .pwm_ch_ain2 = LEDC_CHANNEL_1,
-    .pot_ohms = 5000,
+    .pot_ohms = MOTOR_POT_RESISTANCE,
     .invert_direction = false,
     .calibration = {
         .adc_min = POSITION_ADC_MIN,
@@ -285,7 +289,7 @@ esp_err_t motor_pot_init(const motor_pot_config_t *config)
         s_motor.ain2_gpio = config->ain2_gpio;
         s_motor.slp_gpio = config->slp_gpio;
         s_motor.adc_gpio = config->adc_gpio;
-        s_motor.pot_ohms = config->pot_ohms > 0 ? config->pot_ohms : 5000;
+        s_motor.pot_ohms = config->pot_ohms > 0 ? config->pot_ohms : MOTOR_POT_RESISTANCE;
         s_motor.invert_direction = config->invert_direction;
     }
     

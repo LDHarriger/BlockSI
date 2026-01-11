@@ -126,13 +126,25 @@
 
 // ============================================================================
 // Legacy Definitions (kept for compatibility during transition)
+// These will be removed once peripherals.c is fully updated for motor pot
 // ============================================================================
 
 // DS3502 digital potentiometer (replaced by motor pot due to ground issues)
-// #define DS3502_I2C_ADDR         0x28
-// #define DS3502_FULL_SCALE_OHMS  10000
+#define DS3502_I2C_ADDR         0x28        // Legacy - not used with motor pot
+#define DS3502_FULL_SCALE_OHMS  10000       // Legacy - not used with motor pot
+#define DS3502_WIPER_STEPS      128         // Legacy - not used with motor pot
+#define DS3502_WIPER_R_OHMS     40          // Legacy - not used with motor pot
 
-// MCP4725 DAC (original design, replaced)
-// #define I2C_ADDR_MCP4725        0x62
+// Original MP-8000 pot specs (still used for reference)
+#define ORIGINAL_POT_OHMS       5000        // PRM162 is 5kΩ (was 4700 for original)
+#define ORIGINAL_POT_WIPER_MAX  127         // Full range for motor pot
+
+// MCP4725 DAC legacy defines (for peripherals.c compatibility)
+#define I2C_ADDR_MCP4725        0x62        // Legacy - not used
+#define DAC_VDD_VOLTAGE         3.3f        // Legacy
+#define DAC_DIVIDER_R1          18000       // Legacy
+#define DAC_DIVIDER_R2          10000       // Legacy
+#define DAC_DIVIDER_RATIO       ((float)DAC_DIVIDER_R2 / (DAC_DIVIDER_R1 + DAC_DIVIDER_R2))
+#define DAC_MAX_OUTPUT_V        (DAC_VDD_VOLTAGE * DAC_DIVIDER_RATIO)
 
 #endif // BLOCKSI_PINS_H

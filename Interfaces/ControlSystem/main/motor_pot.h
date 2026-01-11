@@ -11,6 +11,8 @@
  *   - DRV8833: Dual H-bridge motor driver
  *   - Section 1: Connected to MP-8000 control circuit (floating)
  *   - Section 2: Connected to ESP32 for position feedback (servo track)
+ * 
+ * Pin assignments are defined in blocksi_pins.h
  */
 
 #ifndef MOTOR_POT_H
@@ -19,20 +21,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "esp_adc/adc_oneshot.h"
 
 // ============================================================================
-// Configuration Constants
+// Configuration Constants (defaults, can be overridden via config struct)
 // ============================================================================
-
-// DRV8833 Pin Assignments
-#define MOTOR_POT_AIN1_GPIO     25      // PWM capable pin
-#define MOTOR_POT_AIN2_GPIO     26      // PWM capable pin
-#define MOTOR_POT_SLP_GPIO      27      // Sleep pin (HIGH = active)
-
-// ADC Configuration for Servo Track
-#define MOTOR_POT_ADC_GPIO      34      // ADC1_CH6, input only
-#define MOTOR_POT_ADC_CHANNEL   ADC1_CHANNEL_6
-#define MOTOR_POT_ADC_ATTEN     ADC_ATTEN_DB_12  // 0-3.3V range
 
 // Motor Characteristics (PRM162)
 #define MOTOR_VOLTAGE_NOMINAL   4.5f    // Rated voltage

@@ -2,12 +2,13 @@
  * @file peripherals.c
  * @brief Peripheral initialization implementation
  * 
- * Updated to use DS3502 digital potentiometer for power control
- * instead of MCP4725 DAC.
+ * Updated to use motorized potentiometer (PRM162 + DRV8833) for power control
+ * instead of DS3502 digital potentiometer (which had ground isolation issues).
  */
 
 #include "peripherals.h"
 #include "blocksi_pins.h"
+#include "motor_pot.h"
 #include "o3_power_control.h"
 #include "dfrobot_ozone.h"
 #include "max31855_thermocouple.h"
@@ -108,35 +109,50 @@ esp_err_t peripherals_init_spi(void)
 // ============================================================================
 
 /**
- * @brief Initialize DS3502 digital potentiometer for O3 power control
+ * @brief Initialize motorized potentiometer for O3 power control
+ * 
+ * Uses PRM162 dual-gang motorized pot with DRV8833 H-bridge driver.
+ * This replaces the DS3502 digital potentiometer which had ground
+ * isolation issues with the MP-8000's floating control circuit.
  * 
  * Note: Function keeps "dac" name for backward compatibility with existing
- * code that calls peripherals_init_dac(). Internally uses DS3502.
+ * code that calls peripherals_init_dac().
  */
 esp_err_t peripherals_init_dac(void)
 {
-    if (!s_status.i2c_initialized) {
-        ESP_LOGE(TAG, "I2C not initialized, cannot init power control");
-        return ESP_ERR_INVALID_STATE;
-    }
-    
     if (s_status.dac_initialized) {
         ESP_LOGD(TAG, "Power control already initialized");
         return ESP_OK;
     }
     
-    ESP_LOGI(TAG, "Initializing DS3502 digital potentiometer for O3 power control");
+    ESP_LOGI(TAG, "Initializing motorized potentiometer for O3 power control");
+    ESP_LOGI(TAG, "  Motor: AIN1=GPIO%d, AIN2=GPIO%d, SLP=GPIO%d",
+             MOTOR_POT_AIN1_GPIO, MOTOR_POT_AIN2_GPIO, MOTOR_POT_SLP_GPIO);
+    ESP_LOGI(TAG, "  ADC feedback: GPIO%d", MOTOR_POT_ADC_GPIO);
     
-    esp_err_t ret = o3_power_init();
+    // Initialize motor pot with default configuration from blocksi_pins.h
+    motor_pot_config_t config = {
+        .ain1_gpio = MOTOR_POT_AIN1_GPIO,
+        .ain2_gpio = MOTOR_POT_AIN2_GPIO,
+        .slp_gpio = MOTOR_POT_SLP_GPIO,
+        .adc_gpio = MOTOR_POT_ADC_GPIO,
+        .pot_ohms = MOTOR_POT_RESISTANCE,
+        .invert_direction = false
+    };
+    
+    esp_err_t ret = motor_pot_init(&config);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "DS3502 not found at address 0x%02X", DS3502_I2C_ADDR);
+        ESP_LOGW(TAG, "Motor pot init failed: %s", esp_err_to_name(ret));
         return ret;
     }
     
     s_status.dac_initialized = true;
-    ESP_LOGI(TAG, "DS3502 power control initialized");
-    ESP_LOGI(TAG, "  Full scale: %d ohms", DS3502_FULL_SCALE_OHMS);
-    ESP_LOGI(TAG, "  Original pot equivalent: %d ohms", ORIGINAL_POT_OHMS);
+    ESP_LOGI(TAG, "Motor pot power control initialized");
+    ESP_LOGI(TAG, "  Pot resistance: %d ohms", MOTOR_POT_RESISTANCE);
+    
+    // Read initial position
+    float initial_pos = motor_pot_get_position_percent();
+    ESP_LOGI(TAG, "  Initial position: %.1f%%", initial_pos);
     
     return ESP_OK;
 }
@@ -252,10 +268,10 @@ esp_err_t peripherals_init_all(void)
         overall_ret = ESP_ERR_NOT_FOUND;
     }
     
-    // Initialize DS3502 power control (was MCP4725 DAC)
+    // Initialize motorized pot power control (was DS3502, before that MCP4725)
     ret = peripherals_init_dac();
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "DS3502 init failed - O3 power control unavailable");
+        ESP_LOGW(TAG, "Motor pot init failed - O3 power control unavailable");
         overall_ret = ESP_ERR_NOT_FOUND;
     }
     
@@ -278,7 +294,7 @@ esp_err_t peripherals_init_all(void)
     ESP_LOGI(TAG, "Peripheral initialization summary:");
     ESP_LOGI(TAG, "  I2C bus:      %s", s_status.i2c_initialized ? "OK" : "FAIL");
     ESP_LOGI(TAG, "  SPI bus:      %s", s_status.spi_initialized ? "OK" : "FAIL");
-    ESP_LOGI(TAG, "  DS3502:       %s", s_status.dac_initialized ? "OK" : "NOT FOUND");
+    ESP_LOGI(TAG, "  Motor Pot:    %s", s_status.dac_initialized ? "OK" : "NOT FOUND");
     ESP_LOGI(TAG, "  Lab O3:       %s", s_status.lab_o3_initialized ? "OK" : "NOT FOUND");
     ESP_LOGI(TAG, "  Thermocouple: %s", s_status.thermocouple_initialized ? "OK" : "NOT FOUND");
     ESP_LOGI(TAG, "========================================");
@@ -322,21 +338,15 @@ void peripherals_scan_i2c(void)
             devices_found++;
             
             // Identify known devices
-            if (addr == DS3502_I2C_ADDR) {
-                ESP_LOGI(TAG, "    -> DS3502 Digital Potentiometer");
-            } else if (addr == DS3502_I2C_ADDR + 1) {
-                ESP_LOGI(TAG, "    -> DS3502 (A0=1)");
-            } else if (addr == DS3502_I2C_ADDR + 2) {
-                ESP_LOGI(TAG, "    -> DS3502 (A1=1)");
-            } else if (addr == DS3502_I2C_ADDR + 3) {
-                ESP_LOGI(TAG, "    -> DS3502 (A0=1, A1=1)");
-            } else if (addr == I2C_ADDR_DFROBOT_O3) {
+            if (addr == I2C_ADDR_DFROBOT_O3) {
                 ESP_LOGI(TAG, "    -> DFRobot O3 Sensor");
             }
+            // Note: DS3502 no longer used - motor pot doesn't use I2C
         }
     }
     
     ESP_LOGI(TAG, "I2C scan complete: %d device(s) found", devices_found);
+    ESP_LOGI(TAG, "Note: Motor pot uses GPIO (PWM + ADC), not I2C");
 }
 
 void peripherals_deinit_all(void)
@@ -354,7 +364,7 @@ void peripherals_deinit_all(void)
     }
     
     if (s_status.dac_initialized) {
-        o3_power_deinit();
+        motor_pot_deinit();
         s_status.dac_initialized = false;
     }
     

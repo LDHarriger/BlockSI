@@ -51,27 +51,32 @@ esp_err_t o3_power_init(void)
 {
     ESP_LOGI(TAG, "Initializing O3 power control with motorized potentiometer");
     
-    // Configure motor pot with pin assignments from blocksi_pins.h
-    motor_pot_config_t config = {
-        .ain1_gpio = MOTOR_POT_AIN1_GPIO,
-        .ain2_gpio = MOTOR_POT_AIN2_GPIO,
-        .slp_gpio = MOTOR_POT_SLP_GPIO,
-        .adc_gpio = MOTOR_POT_ADC_GPIO,
-        .pot_ohms = 5000,           // PRM162 is 5kΩ
-        .invert_direction = false   // Adjust if needed after testing
-    };
-    
-    esp_err_t ret = motor_pot_init(&config);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize motor pot: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    
-    // Home to minimum position (safe state - generator off)
-    ESP_LOGI(TAG, "Homing to minimum position...");
-    ret = motor_pot_home();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Homing failed, continuing anyway");
+    // Check if motor pot is already initialized (by peripherals_init_dac)
+    if (!motor_pot_is_initialized()) {
+        // Initialize motor pot with pin assignments from blocksi_pins.h
+        motor_pot_config_t config = {
+            .ain1_gpio = MOTOR_POT_AIN1_GPIO,
+            .ain2_gpio = MOTOR_POT_AIN2_GPIO,
+            .slp_gpio = MOTOR_POT_SLP_GPIO,
+            .adc_gpio = MOTOR_POT_ADC_GPIO,
+            .pot_ohms = MOTOR_POT_RESISTANCE,
+            .invert_direction = false   // Adjust if needed after testing
+        };
+        
+        esp_err_t ret = motor_pot_init(&config);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initialize motor pot: %s", esp_err_to_name(ret));
+            return ret;
+        }
+        
+        // Home to minimum position (safe state - generator off)
+        ESP_LOGI(TAG, "Homing to minimum position...");
+        ret = motor_pot_home();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Homing failed, continuing anyway");
+        }
+    } else {
+        ESP_LOGI(TAG, "Motor pot already initialized");
     }
     
     // Initialize calibration data

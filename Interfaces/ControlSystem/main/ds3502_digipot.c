@@ -31,8 +31,13 @@ static struct {
 static esp_err_t ds3502_write_reg(uint8_t reg, uint8_t value)
 {
     uint8_t data[2] = {reg, value};
-    return i2c_master_write_to_device(s_ds3502.i2c_port, s_ds3502.i2c_addr,
+    esp_err_t ret = i2c_master_write_to_device(s_ds3502.i2c_port, s_ds3502.i2c_addr,
                                        data, 2, pdMS_TO_TICKS(100));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "write_reg: failed for reg 0x%02X value 0x%02X: %s",
+                 reg, value, esp_err_to_name(ret));
+    }
+    return ret;
 }
 
 static esp_err_t ds3502_read_reg(uint8_t reg, uint8_t *value)
@@ -43,12 +48,20 @@ static esp_err_t ds3502_read_reg(uint8_t reg, uint8_t *value)
     ret = i2c_master_write_to_device(s_ds3502.i2c_port, s_ds3502.i2c_addr,
                                       &reg, 1, pdMS_TO_TICKS(100));
     if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "read_reg: write addr failed for reg 0x%02X: %s", 
+                 reg, esp_err_to_name(ret));
         return ret;
     }
     
     // Read value
-    return i2c_master_read_from_device(s_ds3502.i2c_port, s_ds3502.i2c_addr,
+    ret = i2c_master_read_from_device(s_ds3502.i2c_port, s_ds3502.i2c_addr,
                                         value, 1, pdMS_TO_TICKS(100));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "read_reg: read data failed for reg 0x%02X: %s",
+                 reg, esp_err_to_name(ret));
+    }
+    
+    return ret;
 }
 
 // ----------------------------------------------------------------------------
@@ -68,34 +81,40 @@ esp_err_t ds3502_init(const ds3502_config_t *config)
     s_ds3502.original_pot_ohms = config->original_pot_ohms > 0 ?
                                   config->original_pot_ohms : 4700;
     
-    ESP_LOGI(TAG, "Initializing DS3502 at address 0x%02X", s_ds3502.i2c_addr);
+    ESP_LOGI(TAG, "Initializing DS3502 at address 0x%02X on I2C port %d", 
+             s_ds3502.i2c_addr, s_ds3502.i2c_port);
     ESP_LOGI(TAG, "Full scale: %u ohms, Original pot: %u ohms",
              s_ds3502.full_scale_ohms, s_ds3502.original_pot_ohms);
     
-    // Check device presence
+    // Check device presence by reading wiper register
     if (!ds3502_is_present()) {
         ESP_LOGE(TAG, "DS3502 not found at address 0x%02X", s_ds3502.i2c_addr);
         return ESP_ERR_NOT_FOUND;
     }
     
+    ESP_LOGI(TAG, "DS3502 detected, reading current state...");
+    
     // Read current wiper position
     uint8_t wiper;
     esp_err_t ret = ds3502_read_reg(DS3502_REG_WIPER, &wiper);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read wiper position");
+        ESP_LOGE(TAG, "Failed to read wiper position: %s", esp_err_to_name(ret));
         return ret;
     }
     s_ds3502.current_wiper = wiper & 0x7F;  // Mask to 7 bits
+    ESP_LOGI(TAG, "Current wiper position: %u", s_ds3502.current_wiper);
     
     // Disable IVR writes by default (protect NV memory)
     ret = ds3502_write_reg(DS3502_REG_MODE, DS3502_MODE_IVR_WRITE_DISABLE);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to set mode register");
+        ESP_LOGW(TAG, "Failed to set mode register: %s", esp_err_to_name(ret));
+        // Continue anyway - device may still work
     }
     
     s_ds3502.initialized = true;
     
-    ESP_LOGI(TAG, "DS3502 initialized, current wiper: %u (R=%u ohms)",
+    ESP_LOGI(TAG, "DS3502 initialized successfully");
+    ESP_LOGI(TAG, "  Wiper: %u, Resistance: %u ohms",
              s_ds3502.current_wiper, ds3502_get_resistance());
     
     return ESP_OK;
@@ -113,10 +132,35 @@ void ds3502_deinit(void)
 
 bool ds3502_is_present(void)
 {
-    uint8_t dummy;
+    // Try to read the wiper register to verify device is present
+    uint8_t reg = DS3502_REG_WIPER;
+    uint8_t value;
+    
+    // Write register address
     esp_err_t ret = i2c_master_write_to_device(s_ds3502.i2c_port, s_ds3502.i2c_addr,
-                                                &dummy, 0, pdMS_TO_TICKS(50));
-    return (ret == ESP_OK);
+                                                &reg, 1, pdMS_TO_TICKS(50));
+    if (ret != ESP_OK) {
+        ESP_LOGD(TAG, "is_present: write failed: %s", esp_err_to_name(ret));
+        return false;
+    }
+    
+    // Read value back
+    ret = i2c_master_read_from_device(s_ds3502.i2c_port, s_ds3502.i2c_addr,
+                                       &value, 1, pdMS_TO_TICKS(50));
+    if (ret != ESP_OK) {
+        ESP_LOGD(TAG, "is_present: read failed: %s", esp_err_to_name(ret));
+        return false;
+    }
+    
+    // DS3502 wiper is 7-bit, upper bit should be 0
+    // Valid values are 0x00-0x7F
+    if (value > 0x7F) {
+        ESP_LOGD(TAG, "is_present: invalid wiper value 0x%02X", value);
+        return false;
+    }
+    
+    ESP_LOGD(TAG, "is_present: detected, wiper=0x%02X", value);
+    return true;
 }
 
 esp_err_t ds3502_set_wiper(uint8_t position)

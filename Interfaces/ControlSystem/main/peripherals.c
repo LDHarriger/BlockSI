@@ -1,11 +1,14 @@
 /**
  * @file peripherals.c
  * @brief Peripheral initialization implementation
+ * 
+ * Updated to use DS3502 digital potentiometer for power control
+ * instead of MCP4725 DAC.
  */
 
 #include "peripherals.h"
 #include "blocksi_pins.h"
-#include "mcp4725_dac.h"
+#include "o3_power_control.h"
 #include "dfrobot_ozone.h"
 #include "max31855_thermocouple.h"
 
@@ -104,36 +107,36 @@ esp_err_t peripherals_init_spi(void)
 // Device Initialization
 // ============================================================================
 
+/**
+ * @brief Initialize DS3502 digital potentiometer for O3 power control
+ * 
+ * Note: Function keeps "dac" name for backward compatibility with existing
+ * code that calls peripherals_init_dac(). Internally uses DS3502.
+ */
 esp_err_t peripherals_init_dac(void)
 {
     if (!s_status.i2c_initialized) {
-        ESP_LOGE(TAG, "I2C not initialized, cannot init DAC");
+        ESP_LOGE(TAG, "I2C not initialized, cannot init power control");
         return ESP_ERR_INVALID_STATE;
     }
     
     if (s_status.dac_initialized) {
-        ESP_LOGD(TAG, "DAC already initialized");
+        ESP_LOGD(TAG, "Power control already initialized");
         return ESP_OK;
     }
     
-    ESP_LOGI(TAG, "Initializing MCP4725 DAC for O3 power control");
+    ESP_LOGI(TAG, "Initializing DS3502 digital potentiometer for O3 power control");
     
-    mcp4725_config_t dac_cfg = {
-        .i2c_port = I2C_MASTER_PORT,
-        .i2c_addr = I2C_ADDR_MCP4725,
-        .vdd_voltage = DAC_VDD_VOLTAGE,
-        .divider_ratio = DAC_DIVIDER_RATIO,
-    };
-    
-    esp_err_t ret = mcp4725_init(&dac_cfg);
+    esp_err_t ret = o3_power_init();
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "MCP4725 DAC not found at address 0x%02X", I2C_ADDR_MCP4725);
+        ESP_LOGW(TAG, "DS3502 not found at address 0x%02X", DS3502_I2C_ADDR);
         return ret;
     }
     
     s_status.dac_initialized = true;
-    ESP_LOGI(TAG, "MCP4725 DAC initialized");
-    ESP_LOGI(TAG, "  Output voltage range: 0 - %.2fV", DAC_MAX_OUTPUT_V);
+    ESP_LOGI(TAG, "DS3502 power control initialized");
+    ESP_LOGI(TAG, "  Full scale: %d ohms", DS3502_FULL_SCALE_OHMS);
+    ESP_LOGI(TAG, "  Original pot equivalent: %d ohms", ORIGINAL_POT_OHMS);
     
     return ESP_OK;
 }
@@ -145,8 +148,8 @@ static void lab_o3_alarm_handler(float level_ppm, float alarm_level)
 {
     if (alarm_level >= LAB_O3_ALARM_CRITICAL) {
         ESP_LOGE(TAG, "!!! CRITICAL: Lab O3 = %.3f ppm - EVACUATE !!!", level_ppm);
-        // TODO: Could trigger relay to shut off O3 generator
-        // TODO: Could trigger external alarm
+        // Emergency: shut off O3 generator
+        o3_power_emergency_stop();
     } else if (alarm_level >= LAB_O3_ALARM_DANGER) {
         ESP_LOGW(TAG, "!! DANGER: Lab O3 = %.3f ppm - Increase ventilation !!", level_ppm);
     } else if (alarm_level >= LAB_O3_ALARM_WARNING) {
@@ -249,10 +252,10 @@ esp_err_t peripherals_init_all(void)
         overall_ret = ESP_ERR_NOT_FOUND;
     }
     
-    // Initialize MCP4725 DAC
+    // Initialize DS3502 power control (was MCP4725 DAC)
     ret = peripherals_init_dac();
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "DAC init failed - O3 power control unavailable");
+        ESP_LOGW(TAG, "DS3502 init failed - O3 power control unavailable");
         overall_ret = ESP_ERR_NOT_FOUND;
     }
     
@@ -275,7 +278,7 @@ esp_err_t peripherals_init_all(void)
     ESP_LOGI(TAG, "Peripheral initialization summary:");
     ESP_LOGI(TAG, "  I2C bus:      %s", s_status.i2c_initialized ? "OK" : "FAIL");
     ESP_LOGI(TAG, "  SPI bus:      %s", s_status.spi_initialized ? "OK" : "FAIL");
-    ESP_LOGI(TAG, "  MCP4725 DAC:  %s", s_status.dac_initialized ? "OK" : "NOT FOUND");
+    ESP_LOGI(TAG, "  DS3502:       %s", s_status.dac_initialized ? "OK" : "NOT FOUND");
     ESP_LOGI(TAG, "  Lab O3:       %s", s_status.lab_o3_initialized ? "OK" : "NOT FOUND");
     ESP_LOGI(TAG, "  Thermocouple: %s", s_status.thermocouple_initialized ? "OK" : "NOT FOUND");
     ESP_LOGI(TAG, "========================================");
@@ -319,12 +322,16 @@ void peripherals_scan_i2c(void)
             devices_found++;
             
             // Identify known devices
-            if (addr == I2C_ADDR_MCP4725) {
-                ESP_LOGI(TAG, "    → MCP4725 DAC");
-            } else if (addr == I2C_ADDR_MCP4725 + 1) {
-                ESP_LOGI(TAG, "    → MCP4725 DAC (A0=1)");
+            if (addr == DS3502_I2C_ADDR) {
+                ESP_LOGI(TAG, "    -> DS3502 Digital Potentiometer");
+            } else if (addr == DS3502_I2C_ADDR + 1) {
+                ESP_LOGI(TAG, "    -> DS3502 (A0=1)");
+            } else if (addr == DS3502_I2C_ADDR + 2) {
+                ESP_LOGI(TAG, "    -> DS3502 (A1=1)");
+            } else if (addr == DS3502_I2C_ADDR + 3) {
+                ESP_LOGI(TAG, "    -> DS3502 (A0=1, A1=1)");
             } else if (addr == I2C_ADDR_DFROBOT_O3) {
-                ESP_LOGI(TAG, "    → DFRobot O3 Sensor");
+                ESP_LOGI(TAG, "    -> DFRobot O3 Sensor");
             }
         }
     }
@@ -347,7 +354,7 @@ void peripherals_deinit_all(void)
     }
     
     if (s_status.dac_initialized) {
-        mcp4725_deinit();
+        o3_power_deinit();
         s_status.dac_initialized = false;
     }
     

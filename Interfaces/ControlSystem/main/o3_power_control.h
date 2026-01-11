@@ -237,6 +237,33 @@ esp_err_t o3_power_get_calibration(o3_power_calibration_t *cal);
  */
 void o3_power_clear_calibration(void);
 
+// ============================================================================
+// Backward-Compatible API (matches old MCP4725 DAC interface in main.c)
+// ============================================================================
+
+/**
+ * @brief Get power level as integer percentage (legacy API)
+ * @return Power level 0-100
+ */
+uint8_t o3_power_get(void);
+
+/**
+ * @brief Set power level as integer percentage (legacy API)
+ * @param power_pct Power level 0-100
+ * @return ESP_OK on success
+ */
+esp_err_t o3_power_set(uint8_t power_pct);
+
+/**
+ * @brief Get equivalent "voltage" (legacy API - returns scaled value for digipot)
+ * 
+ * Note: This function exists for API compatibility only. The DS3502 is a
+ * resistor, not a voltage source. Returns a scaled value for display purposes.
+ * 
+ * @return Pseudo-voltage (power_percent / 100 * 3.3)
+ */
+float o3_power_get_voltage(void);
+
 #ifdef __cplusplus
 }
 #endif

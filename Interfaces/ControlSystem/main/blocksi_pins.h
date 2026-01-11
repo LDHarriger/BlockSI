@@ -9,8 +9,8 @@
  * ========================
  * 
  * === I2C Bus (Shared) ===
- * GPIO 21: SDA  - DS3502 DigiPot, DFRobot O3 Sensor
- * GPIO 22: SCL  - DS3502 DigiPot, DFRobot O3 Sensor
+ * GPIO 21: SDA  - DFRobot O3 Sensor
+ * GPIO 22: SCL  - DFRobot O3 Sensor
  * 
  * === SPI Bus (VSPI) ===
  * GPIO 18: SCK  - MAX31855 Thermocouple
@@ -26,13 +26,15 @@
  * GPIO 12: Relay 1 - O3 Generator power
  * GPIO 13: Relay 2 - O2 Concentrator power
  * 
+ * === Motor Pot Control (PRM162 + DRV8833) ===
+ * GPIO 25: DRV8833 AIN1 - Motor control (PWM)
+ * GPIO 26: DRV8833 AIN2 - Motor control (PWM)
+ * GPIO 27: DRV8833 SLP  - Sleep/Enable (optional, can tie high)
+ * GPIO 34: ADC input    - Servo track position feedback
+ * 
  * === Reserved/Available ===
- * GPIO 25: DAC1 (available)
- * GPIO 26: DAC2/ADC2_CH9 (available)
- * GPIO 27: ADC2_CH7 (available)
  * GPIO 32: ADC1_CH4 (available)
  * GPIO 33: ADC1_CH5 (available)
- * GPIO 34: ADC1_CH6, input only (available)
  * GPIO 35: ADC1_CH7, input only (available)
  * 
  * === Boot/Flash Strapping (Avoid for outputs) ===
@@ -54,11 +56,16 @@
 #define I2C_MASTER_FREQ_HZ      400000      // 400kHz Fast Mode
 
 // I2C Device Addresses
-#define DS3502_I2C_ADDR         0x28        // DS3502 DigiPot for O3 power control
 #define I2C_ADDR_DFROBOT_O3     0x73        // DFRobot Gravity O3 safety sensor
 
-// Legacy - MCP4725 DAC (replaced by DS3502)
-// #define I2C_ADDR_MCP4725     0x62        // Adafruit MCP4725 (A0 floating = VCC)
+// ============================================================================
+// Lab O3 Safety Sensor Configuration (DFRobot)
+// ============================================================================
+
+#define LAB_O3_SAMPLE_INTERVAL_MS   1000    // Sample every 1 second
+#define LAB_O3_ALARM_WARNING        0.07f   // 70 ppb - OSHA action level
+#define LAB_O3_ALARM_DANGER         0.10f   // 100 ppb - OSHA PEL
+#define LAB_O3_ALARM_CRITICAL       0.30f   // 300 ppb - Immediate danger
 
 // ============================================================================
 // SPI Bus Configuration (VSPI)
@@ -88,17 +95,22 @@
 #define RELAY_ACTIVE_HIGH       1           // SSRs activate on HIGH
 
 // ============================================================================
-// DS3502 Digital Potentiometer Configuration
+// Motorized Potentiometer Control (PRM162 + DRV8833)
 // ============================================================================
 
-// DS3502 specs
-#define DS3502_FULL_SCALE_OHMS  10000       // 10kΩ full scale
-#define DS3502_WIPER_STEPS      128         // 7-bit resolution (0-127)
-#define DS3502_WIPER_R_OHMS     40          // Typical wiper resistance
+// DRV8833 H-Bridge Motor Driver Pins
+#define MOTOR_POT_AIN1_GPIO     25          // PWM control pin 1
+#define MOTOR_POT_AIN2_GPIO     26          // PWM control pin 2
+#define MOTOR_POT_SLP_GPIO      27          // Sleep/Enable pin (HIGH = active)
+                                            // Set to -1 if tying SLP directly to VCC
 
-// Original MP-8000 potentiometer specs (for compatibility scaling)
-#define ORIGINAL_POT_OHMS       4700        // Original 4.7kΩ rheostat
-#define ORIGINAL_POT_WIPER_MAX  60          // Wiper position for ~4.7kΩ on DS3502
+// Servo Track ADC (position feedback from secondary pot section)
+#define MOTOR_POT_ADC_GPIO      34          // ADC1_CH6, input only
+
+// PRM162 Specifications
+#define MOTOR_POT_RESISTANCE    5000        // 5kΩ per section
+#define MOTOR_POT_VOLTAGE       4.5f        // Motor rated voltage
+#define MOTOR_POT_CURRENT_MA    100         // Motor max current
 
 // ============================================================================
 // Power Control Calibration Constants
@@ -111,5 +123,16 @@
 // O3 prediction model: O3_max = A/flow + B (ppm at max power)
 #define O3_MODEL_COEFF_A        1.78f       // Inverse flow coefficient
 #define O3_MODEL_COEFF_B        1.40f       // Base concentration offset
+
+// ============================================================================
+// Legacy Definitions (kept for compatibility during transition)
+// ============================================================================
+
+// DS3502 digital potentiometer (replaced by motor pot due to ground issues)
+// #define DS3502_I2C_ADDR         0x28
+// #define DS3502_FULL_SCALE_OHMS  10000
+
+// MCP4725 DAC (original design, replaced)
+// #define I2C_ADDR_MCP4725        0x62
 
 #endif // BLOCKSI_PINS_H

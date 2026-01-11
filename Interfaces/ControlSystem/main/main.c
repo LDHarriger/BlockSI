@@ -41,9 +41,10 @@
 #include "dosimetry.h"
 #include "o3_power_control.h"
 #include "sensor_aggregator.h"
-#include "mcp4725_dac.h"
 #include "dfrobot_ozone.h"
 #include "max31855_thermocouple.h"
+#include "o3_power_control.h"
+#include "ds3502_digipot.h"
 
 static const char *TAG = "BLOCKSI";
 
@@ -467,7 +468,7 @@ static bool lan_command_handler(const char *cmd, const char *args,
     // =========================================================================
     } else if (strcmp(cmd, "sensors_get") == 0) {
         // Use _is_present() to check if each device was detected during init
-        const char *dac_s = mcp4725_is_present() ? "ok" : "err";
+        const char *dac_s = ds3502_is_present() ? "ok" : "err";
         const char *o3_s = dfrobot_o3_is_present() ? "ok" : "err";
         const char *tc_s = max31855_is_present() ? "ok" : "err";
         

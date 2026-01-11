@@ -1,10 +1,13 @@
 /**
  * @file o3_power_control.c
  * @brief Ozone generator power control implementation
+ * 
+ * Updated to use motorized potentiometer (PRM162 + DRV8833) instead of
+ * digital potentiometer (DS3502) which had ground isolation issues.
  */
 
 #include "o3_power_control.h"
-#include "ds3502_digipot.h"
+#include "motor_pot.h"
 #include "blocksi_pins.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -15,8 +18,7 @@
 static const char *TAG = "O3_POWER";
 
 // Original pot specifications
-#define ORIGINAL_POT_OHMS       4700
-#define ORIGINAL_POT_MAX_WIPER  60      // Approximate wiper for 4.7kΩ on 10kΩ pot
+#define ORIGINAL_POT_OHMS       5000    // PRM162 is 5kΩ (close to original 4.7kΩ)
 
 // Calibration model coefficients (from previous characterization)
 // O3_max = 1.78/F + 1.40 where F = flow rate in LPM
@@ -47,27 +49,29 @@ static struct {
 
 esp_err_t o3_power_init(void)
 {
-    ESP_LOGI(TAG, "Initializing O3 power control with DS3502");
+    ESP_LOGI(TAG, "Initializing O3 power control with motorized potentiometer");
     
-    // Configure DS3502
-    ds3502_config_t config = {
-        .i2c_port = I2C_NUM_0,
-        .i2c_addr = DS3502_I2C_ADDR,  // From blocksi_pins.h
-        .full_scale_ohms = 10000,
-        .original_pot_ohms = ORIGINAL_POT_OHMS
+    // Configure motor pot with pin assignments from blocksi_pins.h
+    motor_pot_config_t config = {
+        .ain1_gpio = MOTOR_POT_AIN1_GPIO,
+        .ain2_gpio = MOTOR_POT_AIN2_GPIO,
+        .slp_gpio = MOTOR_POT_SLP_GPIO,
+        .adc_gpio = MOTOR_POT_ADC_GPIO,
+        .pot_ohms = 5000,           // PRM162 is 5kΩ
+        .invert_direction = false   // Adjust if needed after testing
     };
     
-    esp_err_t ret = ds3502_init(&config);
+    esp_err_t ret = motor_pot_init(&config);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize DS3502: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to initialize motor pot: %s", esp_err_to_name(ret));
         return ret;
     }
     
-    // Start at 0% power (safe state)
-    ret = ds3502_set_wiper(0);
+    // Home to minimum position (safe state - generator off)
+    ESP_LOGI(TAG, "Homing to minimum position...");
+    ret = motor_pot_home();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set initial power level");
-        return ret;
+        ESP_LOGW(TAG, "Homing failed, continuing anyway");
     }
     
     // Initialize calibration data
@@ -89,7 +93,7 @@ void o3_power_deinit(void)
         // Set to safe state
         o3_power_emergency_stop();
         
-        ds3502_deinit();
+        motor_pot_deinit();
         s_power.initialized = false;
     }
     ESP_LOGI(TAG, "O3 power control deinitialized");
@@ -114,21 +118,9 @@ esp_err_t o3_power_set_percent(float percent)
     if (percent < 0) percent = 0;
     if (percent > 100) percent = 100;
     
-    // Calculate wiper position based on mode
-    uint8_t wiper;
-    if (s_power.mode == O3_POWER_MODE_ORIGINAL) {
-        // Limit to original pot range (~60 steps for 4.7kΩ)
-        wiper = (uint8_t)((percent / 100.0f) * ORIGINAL_POT_MAX_WIPER + 0.5f);
-    } else {
-        // Full range (0-127)
-        wiper = (uint8_t)((percent / 100.0f) * DS3502_WIPER_MAX + 0.5f);
-    }
+    ESP_LOGI(TAG, "Setting power to %.1f%%", percent);
     
-    ESP_LOGI(TAG, "Setting power to %.1f%% (wiper=%u, mode=%s)",
-             percent, wiper,
-             s_power.mode == O3_POWER_MODE_ORIGINAL ? "original" : "extended");
-    
-    return ds3502_set_wiper(wiper);
+    return motor_pot_set_power(percent);
 }
 
 float o3_power_get_percent(void)
@@ -137,42 +129,30 @@ float o3_power_get_percent(void)
         return 0;
     }
     
-    uint8_t wiper;
-    if (ds3502_get_wiper(&wiper) != ESP_OK) {
-        return 0;
-    }
-    
-    // Calculate percentage based on mode
-    float max_wiper = (s_power.mode == O3_POWER_MODE_ORIGINAL) ? 
-                       ORIGINAL_POT_MAX_WIPER : DS3502_WIPER_MAX;
-    
-    float percent = (wiper / max_wiper) * 100.0f;
-    if (percent > 100.0f) percent = 100.0f;
-    
-    return percent;
+    return motor_pot_get_power();
 }
 
 esp_err_t o3_power_set_wiper(uint8_t wiper)
 {
+    // For motor pot, convert wiper (0-127) to percentage
     if (!s_power.initialized) {
         return ESP_ERR_INVALID_STATE;
     }
     
-    ESP_LOGD(TAG, "Setting wiper to %u", wiper);
-    return ds3502_set_wiper(wiper);
+    float percent = (wiper / 127.0f) * 100.0f;
+    ESP_LOGD(TAG, "Setting wiper %u -> %.1f%%", wiper, percent);
+    return motor_pot_set_power(percent);
 }
 
 uint8_t o3_power_get_wiper(void)
 {
+    // For motor pot, convert percentage back to pseudo-wiper (0-127)
     if (!s_power.initialized) {
         return 0;
     }
     
-    uint8_t wiper;
-    if (ds3502_get_wiper(&wiper) != ESP_OK) {
-        return 0;
-    }
-    return wiper;
+    float percent = motor_pot_get_power();
+    return (uint8_t)((percent / 100.0f) * 127.0f + 0.5f);
 }
 
 esp_err_t o3_power_set_resistance(uint16_t ohms)
@@ -181,8 +161,12 @@ esp_err_t o3_power_set_resistance(uint16_t ohms)
         return ESP_ERR_INVALID_STATE;
     }
     
-    ESP_LOGI(TAG, "Setting resistance to %u ohms", ohms);
-    return ds3502_set_resistance(ohms);
+    // Convert resistance to percentage (0-5000 ohms -> 0-100%)
+    float percent = (ohms / 5000.0f) * 100.0f;
+    if (percent > 100) percent = 100;
+    
+    ESP_LOGI(TAG, "Setting resistance %u ohms -> %.1f%%", ohms, percent);
+    return motor_pot_set_power(percent);
 }
 
 uint16_t o3_power_get_resistance(void)
@@ -190,7 +174,7 @@ uint16_t o3_power_get_resistance(void)
     if (!s_power.initialized) {
         return 0;
     }
-    return ds3502_get_resistance();
+    return motor_pot_get_resistance();
 }
 
 void o3_power_set_mode(o3_power_mode_t mode)
@@ -209,7 +193,7 @@ void o3_power_emergency_stop(void)
 {
     ESP_LOGW(TAG, "EMERGENCY STOP - Setting power to 0");
     if (s_power.initialized) {
-        ds3502_set_wiper(0);
+        motor_pot_set_power(0);
     }
 }
 
@@ -223,15 +207,16 @@ esp_err_t o3_power_get_state(o3_power_state_t *state)
         return ESP_ERR_INVALID_STATE;
     }
     
-    ds3502_state_t ds_state;
-    esp_err_t ret = ds3502_get_state(&ds_state);
+    motor_pot_state_t mp_state;
+    esp_err_t ret = motor_pot_get_state(&mp_state);
     if (ret != ESP_OK) {
         return ret;
     }
     
-    state->wiper_position = ds_state.wiper_position;
-    state->resistance_ohms = ds_state.resistance_ohms;
-    state->power_percent = o3_power_get_percent();
+    // Map motor pot state to o3 power state
+    state->wiper_position = (uint8_t)((mp_state.position_percent / 100.0f) * 127.0f);
+    state->resistance_ohms = mp_state.resistance_ohms;
+    state->power_percent = mp_state.power_percent;
     state->mode = s_power.mode;
     
     // Predict O3 output (assuming 5 LPM default flow)
@@ -292,8 +277,13 @@ esp_err_t o3_power_start_calibration(uint8_t start_wiper, uint8_t end_wiper,
     if (step_size == 0) step_size = 1;
     if (hold_time_ms < 1000) hold_time_ms = 1000;  // Minimum 1 second hold
     
-    ESP_LOGI(TAG, "Starting calibration: wiper %u→%u, step=%u, hold=%ums",
-             start_wiper, end_wiper, step_size, (unsigned)hold_time_ms);
+    // Convert wiper (0-127) to percentage
+    float start_pct = (start_wiper / 127.0f) * 100.0f;
+    float end_pct = (end_wiper / 127.0f) * 100.0f;
+    float step_pct = (step_size / 127.0f) * 100.0f;
+    
+    ESP_LOGI(TAG, "Starting calibration: %.1f%% -> %.1f%%, step=%.1f%%, hold=%ums",
+             start_pct, end_pct, step_pct, (unsigned)hold_time_ms);
     
     s_power.calibration_active = true;
     s_power.calibration_stop_requested = false;
@@ -303,16 +293,16 @@ esp_err_t o3_power_start_calibration(uint8_t start_wiper, uint8_t end_wiper,
     s_power.calibration.valid = false;
     
     // Calculate total steps for progress reporting
-    int total_steps = (abs((int)end_wiper - (int)start_wiper) / step_size) + 1;
+    int total_steps = (int)(fabsf(end_pct - start_pct) / step_pct) + 1;
     int current_step = 0;
     
     // Direction
-    int8_t direction = (end_wiper >= start_wiper) ? 1 : -1;
+    float direction = (end_pct >= start_pct) ? 1.0f : -1.0f;
     
     // Sweep through positions
-    for (uint8_t wiper = start_wiper; 
-         (direction > 0) ? (wiper <= end_wiper) : (wiper >= end_wiper);
-         wiper += direction * step_size) {
+    for (float pct = start_pct; 
+         (direction > 0) ? (pct <= end_pct) : (pct >= end_pct);
+         pct += direction * step_pct) {
         
         // Check for stop request
         if (s_power.calibration_stop_requested) {
@@ -320,10 +310,10 @@ esp_err_t o3_power_start_calibration(uint8_t start_wiper, uint8_t end_wiper,
             break;
         }
         
-        // Set wiper position
-        esp_err_t ret = ds3502_set_wiper(wiper);
+        // Move to position
+        esp_err_t ret = motor_pot_set_power(pct);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to set wiper to %u", wiper);
+            ESP_LOGE(TAG, "Failed to set position to %.1f%%", pct);
             continue;
         }
         
@@ -332,6 +322,7 @@ esp_err_t o3_power_start_calibration(uint8_t start_wiper, uint8_t end_wiper,
         
         // Call callback with progress
         float progress = (float)current_step / (float)total_steps;
+        uint8_t wiper = (uint8_t)((pct / 100.0f) * 127.0f);
         if (callback) {
             callback(wiper, 0, progress, user_data);  // O3 reading filled by caller
         }
@@ -348,14 +339,10 @@ esp_err_t o3_power_start_calibration(uint8_t start_wiper, uint8_t end_wiper,
         }
         
         current_step++;
-        
-        // Prevent underflow
-        if (wiper == 0 && direction < 0) break;
-        if (wiper == 127 && direction > 0) break;
     }
     
     // Return to safe state
-    ds3502_set_wiper(0);
+    motor_pot_set_power(0);
     
     s_power.calibration_active = false;
     s_power.calibration.valid = (s_power.calibration.point_count > 0);
@@ -398,4 +385,25 @@ void o3_power_clear_calibration(void)
     memset(&s_power.calibration, 0, sizeof(s_power.calibration));
     s_power.calibration.valid = false;
     ESP_LOGI(TAG, "Calibration data cleared");
+}
+
+// ============================================================================
+// Backward-Compatible API (matches old MCP4725 DAC interface)
+// ============================================================================
+
+uint8_t o3_power_get(void)
+{
+    return (uint8_t)o3_power_get_percent();
+}
+
+esp_err_t o3_power_set(uint8_t power_pct)
+{
+    return o3_power_set_percent((float)power_pct);
+}
+
+float o3_power_get_voltage(void)
+{
+    // Legacy compatibility: return a pseudo-voltage for display purposes
+    // Maps 0-100% to 0-3.3V (as the old DAC would have)
+    return (o3_power_get_percent() / 100.0f) * 3.3f;
 }

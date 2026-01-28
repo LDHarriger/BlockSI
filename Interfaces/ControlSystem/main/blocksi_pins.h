@@ -93,6 +93,7 @@
 
 #define RELAY_O3_GEN_GPIO       12          // Ozone generator SSR
 #define RELAY_O2_CONC_GPIO      13          // Oxygen concentrator SSR
+#define RELAY_AIR_COMP_GPIO     14          // Air compressor (MP-8000 internal)
 #define RELAY_ACTIVE_HIGH       1           // SSRs activate on HIGH
 
 // ============================================================================

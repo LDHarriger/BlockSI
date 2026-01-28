@@ -26,6 +26,9 @@
 #include "esp_wifi.h"
 #include "esp_netif.h"
 
+#include "esp_timer.h"
+#include <stdint.h>
+
 #include <zcbor_encode.h>
 
 #include "golioth/client.h"
@@ -45,6 +48,8 @@
 #include "max31855_thermocouple.h"
 #include "o3_power_control.h"
 #include "motor_pot.h"
+#include "blocksi_state.h"
+#include "power_calibration.h"
 
 static const char *TAG = "BLOCKSI";
 
@@ -367,6 +372,8 @@ static bool lan_command_handler(const char *cmd, const char *args,
             relay = RELAY_OZONE_GEN;
         } else if (strcmp(relay_name, "o2_conc") == 0) {
             relay = RELAY_O2_CONC;
+        } else if (strcmp(relay_name, "air_comp") == 0) {
+            relay = RELAY_AIR_COMP;
         } else {
             snprintf(response, response_size, "unknown_relay");
             return false;
@@ -381,9 +388,10 @@ static bool lan_command_handler(const char *cmd, const char *args,
         return false;
         
     } else if (strcmp(cmd, "relay_get") == 0) {
-        snprintf(response, response_size, "ozone_gen=%d,o2_conc=%d",
+        snprintf(response, response_size, "ozone_gen=%d,o2_conc=%d,air_comp=%d",
                  relay_get_state(RELAY_OZONE_GEN) == RELAY_ON ? 1 : 0,
-                 relay_get_state(RELAY_O2_CONC) == RELAY_ON ? 1 : 0);
+                 relay_get_state(RELAY_O2_CONC) == RELAY_ON ? 1 : 0,
+                 relay_get_state(RELAY_AIR_COMP) == RELAY_ON ? 1 : 0);
         return true;
     
     // =========================================================================
@@ -401,7 +409,8 @@ static bool lan_command_handler(const char *cmd, const char *args,
             return false;
         }
         
-        esp_err_t ret = o3_power_set((uint8_t)power_pct);
+        // Use blocksi_state_set_power for proper state tracking and auto-retry
+        esp_err_t ret = blocksi_state_set_power((uint8_t)power_pct);
         if (ret == ESP_OK) {
             float predicted = predict_o3_output(s_current_flow_lpm, power_pct);
             snprintf(response, response_size, "power=%d,predicted_o3=%.2f", 
@@ -495,6 +504,41 @@ static bool lan_command_handler(const char *cmd, const char *args,
         snprintf(response, response_size, "calibration_failed");
         return false;
     // End of pot handlers
+
+    // =========================================================================
+    // Power calibration sweep commands
+    // =========================================================================
+    } else if (strcmp(cmd, "calibrate_start") == 0) {
+        esp_err_t ret = power_calibration_start();
+        if (ret == ESP_OK) {
+            snprintf(response, response_size, "calibration=started");
+            return true;
+        } else if (ret == ESP_ERR_INVALID_STATE) {
+            snprintf(response, response_size, "already_active_or_pot_not_init");
+            return false;
+        }
+        snprintf(response, response_size, "failed");
+        return false;
+        
+    } else if (strcmp(cmd, "calibrate_stop") == 0) {
+        esp_err_t ret = power_calibration_stop();
+        if (ret == ESP_OK) {
+            snprintf(response, response_size, "calibration=stopping");
+            return true;
+        }
+        snprintf(response, response_size, "not_active");
+        return false;
+        
+    } else if (strcmp(cmd, "calibrate_status") == 0) {
+        power_cal_status_t status;
+        power_calibration_get_status(&status);
+        snprintf(response, response_size, 
+                 "active=%d,pct=%u,dir=%d,pts=%u",
+                 status.active ? 1 : 0,
+                 status.current_pct,
+                 status.direction,
+                 status.points_up + status.points_down);
+        return true;
 
     // =========================================================================
     // Sensor status commands
@@ -659,6 +703,28 @@ static bool lan_command_handler(const char *cmd, const char *args,
         return true;
         
     // =========================================================================
+    // Time sync command
+    // =========================================================================
+    } else if (strcmp(cmd, "time_sync") == 0) {
+        if (!args) {
+            snprintf(response, response_size, "missing_args");
+            return false;
+        }
+        
+        // Parse PC timestamp in milliseconds
+        int64_t pc_time_ms = strtoll(args, NULL, 10);
+        if (pc_time_ms <= 0) {
+            snprintf(response, response_size, "invalid_timestamp");
+            return false;
+        }
+        
+        blocksi_state_sync_time(pc_time_ms);
+        int64_t esp_time = esp_timer_get_time() / 1000;
+        snprintf(response, response_size, "synced,esp=%lld,pc=%lld", 
+                 (long long)esp_time, (long long)pc_time_ms);
+        return true;
+    
+    // =========================================================================
     // Unknown command
     // =========================================================================
     } else {
@@ -678,6 +744,13 @@ static void on_106h_sample(const m106h_sample_t *sample)
     // Get aggregated secondary sensor data
     aggregated_sensors_t sensors;
     sensor_aggregator_get_and_reset(&sensors);
+    // Timestamp for LAN telemetry (ms since boot)
+    int64_t timestamp_ms = esp_timer_get_time() / 1000;
+    
+    // Get motor pot state for power feedback
+    motor_pot_state_t pot_state = {0};
+    motor_pot_get_state(&pot_state);
+    float wiper_voltage = (pot_state.adc_raw / 4095.0f) * 3.3f;  // ADC to voltage
     
     // Process dosimetry
     dosimetry_sample_t dosi_sample;
@@ -685,15 +758,51 @@ static void on_106h_sample(const m106h_sample_t *sample)
     dosimetry_process_sample(o3_ppm, sample->temperature_c, sample->pressure_mbar,
                               2000, &dosi_sample);  // Assuming 2s interval
     
+    // Update unified state with sensor readings
+    sensor_state_t sensor_update = {
+        .vessel_o3_pct = sample->ozone_wt_pct,
+        .room_o3_ppm = sensors.room_o3_valid ? sensors.room_o3_ppm : 0.0f,
+        .vessel_temp_c = sensors.vessel_temp_valid ? sensors.vessel_temp_c : -999.0f,
+        .cell_temp_c = sample->temperature_c,
+        .pressure_mbar = sample->pressure_mbar,
+        .vessel_o3_valid = true,
+        .room_o3_valid = sensors.room_o3_valid,
+        .vessel_temp_valid = sensors.vessel_temp_valid,
+    };
+    blocksi_state_update_sensors(&sensor_update);
+    blocksi_state_update_power_actual(pot_state.position_percent, wiper_voltage, pot_state.adc_raw);
+    
     // Publish to Golioth cloud
     publish_to_golioth(sample, &sensors);
-    
+
 #ifdef CONFIG_LAN_CLIENT_ENABLED
-    // Send extended sample to LAN - use existing API
-    lan_client_send_sample(sample);
-    
-    // TODO: Extend lan_client to support additional sensor data
-    // For now, the 106-H data goes through standard channel
+    // Send extended sample to LAN including aggregated secondary sensors and power state
+    // DATA format: timestamp,vessel_o3_pct,temp,press,sample_v,ref_v,d,m,y,h,min,sec,
+    //              room_o3_ppm,vessel_temp_c,power_target_pct,power_actual_pct,wiper_voltage
+    char data_line[512];
+    int data_len = snprintf(data_line, sizeof(data_line),
+                            "DATA,%lld,%.4f,%.2f,%.2f,%.5f,%.5f,%u,%u,%u,%u,%u,%u,%.3f,%.1f,%u,%.1f,%.3f\n",
+                            (long long) timestamp_ms,
+                            sample->ozone_wt_pct,
+                            sample->temperature_c,
+                            sample->pressure_mbar,
+                            sample->sample_pdv_v,
+                            sample->ref_pdv_v,
+                            (unsigned)sample->day,
+                            (unsigned)sample->month,
+                            (unsigned)sample->year,
+                            (unsigned)sample->hour,
+                            (unsigned)sample->minute,
+                            (unsigned)sample->second,
+                            sensors.room_o3_valid ? sensors.room_o3_ppm : 0.0f,
+                            sensors.vessel_temp_valid ? sensors.vessel_temp_c : -999.0f,
+                            (unsigned)o3_power_get(),           // Target power %
+                            pot_state.position_percent,          // Actual power % from ADC
+                            wiper_voltage);                      // Wiper voltage (0-3.3V)
+
+    if (data_len > 0 && data_len < (int)sizeof(data_line)) {
+        lan_client_send_message(data_line);
+    }
 #endif
 
     // Write to backup storage if recording
@@ -775,6 +884,7 @@ void app_main(void)
     relay_config_t relay_config = {
         .ozone_gen_gpio = CONFIG_RELAY_OZONE_GEN_GPIO,
         .o2_conc_gpio = CONFIG_RELAY_O2_CONC_GPIO,
+        .air_comp_gpio = CONFIG_RELAY_AIR_COMP_GPIO,
         .active_high = CONFIG_RELAY_ACTIVE_HIGH,
     };
     if (relay_init(&relay_config) != ESP_OK) {
@@ -805,6 +915,16 @@ void app_main(void)
     // Initialize sensor aggregator (starts background sampling)
     ESP_LOGI(TAG, "Initializing sensor aggregator...");
     sensor_aggregator_init(SENSOR_SAMPLE_INTERVAL_MS);
+    
+    // Initialize unified state manager (starts validation task)
+    ESP_LOGI(TAG, "Initializing state manager...");
+    if (blocksi_state_init() != ESP_OK) {
+        ESP_LOGW(TAG, "State manager initialization failed");
+    }
+    
+    // Initialize power calibration module
+    ESP_LOGI(TAG, "Initializing power calibration...");
+    power_calibration_init();
     
     // Initialize WiFi and block until connected
     ESP_LOGI(TAG, "Initializing WiFi...");

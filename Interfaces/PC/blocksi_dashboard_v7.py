@@ -44,7 +44,10 @@ st.set_page_config(
 # Auto-refresh (install: pip install streamlit-autorefresh)
 try:
     from streamlit_autorefresh import st_autorefresh
-    st_autorefresh(interval=2000, limit=None, key="data_refresh")
+    # Default refresh interval (ms) - keep slightly slower to reduce UI flicker
+    if 'refresh_interval' not in st.session_state:
+        st.session_state.refresh_interval = 3000
+    st_autorefresh(interval=st.session_state.refresh_interval, limit=None, key="data_refresh")
 except ImportError:
     st.sidebar.warning("Install streamlit-autorefresh for auto-updates")
 
@@ -102,6 +105,24 @@ if 'server_thread' not in st.session_state:
 if 'server_running' not in st.session_state:
     st.session_state.server_running = False
 
+if 'last_responses' not in st.session_state:
+    st.session_state.last_responses = {}
+
+if 'o3_unit' not in st.session_state:
+    # Default to %vol for 106H outputs
+    st.session_state.o3_unit = '%vol'
+
+if 'debug_logs' not in st.session_state:
+    st.session_state.debug_logs = deque(maxlen=200)
+
+def log_debug(msg: str):
+    """Append debug message with timestamp."""
+    try:
+        ts = datetime.now().strftime('%H:%M:%S')
+        st.session_state.debug_logs.appendleft(f"{ts} {msg}")
+    except Exception:
+        pass
+
 # =============================================================================
 # Helper Functions
 # =============================================================================
@@ -155,54 +176,26 @@ def parse_response(response: str, expected_cmd: str) -> dict:
 # =============================================================================
 
 def start_server(port: int):
-    """Start TCP server to receive data from ESP32."""
+    """Start a non-blocking TCP server to receive data from ESP32.
+
+    This function creates the listening socket only. The Streamlit main
+    loop must call `check_server()` to accept connections and receive data.
+    """
     if st.session_state.server_running:
         return
-    
+
     try:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind(('0.0.0.0', port))
         server.listen(1)
-        server.settimeout(1.0)
+        server.setblocking(False)
         st.session_state.server_socket = server
         st.session_state.server_running = True
-        
-        def server_loop():
-            while st.session_state.server_running:
-                try:
-                    if st.session_state.client_socket is None:
-                        try:
-                            client, addr = server.accept()
-                            client.settimeout(0.5)
-                            st.session_state.client_socket = client
-                            st.session_state.connected = True
-                        except socket.timeout:
-                            continue
-                    else:
-                        try:
-                            data = st.session_state.client_socket.recv(1024)
-                            if data:
-                                process_incoming_data(data.decode('utf-8', errors='ignore'))
-                            else:
-                                # Connection closed
-                                st.session_state.client_socket.close()
-                                st.session_state.client_socket = None
-                                st.session_state.connected = False
-                        except socket.timeout:
-                            pass
-                        except Exception:
-                            st.session_state.client_socket = None
-                            st.session_state.connected = False
-                except Exception as e:
-                    time.sleep(0.1)
-        
-        thread = threading.Thread(target=server_loop, daemon=True)
-        thread.start()
-        st.session_state.server_thread = thread
-        
+        log_debug(f"Server started on port {port}")
     except Exception as e:
         st.error(f"Server error: {e}")
+        log_debug(f"Server error: {e}")
 
 def stop_server():
     """Stop TCP server."""
@@ -221,48 +214,141 @@ def stop_server():
         st.session_state.server_socket = None
     st.session_state.connected = False
 
+
+def check_server():
+    """Accept new connections and receive data (call from Streamlit main loop)."""
+    server = st.session_state.server_socket
+    if server is None:
+        return
+
+    # Accept new connection if none
+    if st.session_state.client_socket is None:
+        try:
+            client, addr = server.accept()
+            client.setblocking(False)
+            st.session_state.client_socket = client
+            st.session_state.connected = True
+            log_debug(f"Accepted connection from {addr}")
+        except BlockingIOError:
+            pass
+        except Exception:
+            pass
+
+    # Receive data from existing connection
+    if st.session_state.client_socket is not None:
+        try:
+            data = st.session_state.client_socket.recv(1024)
+            if data:
+                s = data.decode('utf-8', errors='ignore')
+                log_debug(f"Received {len(s)} bytes")
+                process_incoming_data(s)
+            else:
+                # Connection closed
+                try:
+                    st.session_state.client_socket.close()
+                except:
+                    pass
+                st.session_state.client_socket = None
+                st.session_state.connected = False
+        except BlockingIOError:
+            pass
+        except Exception:
+            try:
+                st.session_state.client_socket.close()
+            except:
+                pass
+            st.session_state.client_socket = None
+            st.session_state.connected = False
+            log_debug("Client connection lost")
+
 def send_command(cmd: str) -> str:
     """Send command to ESP32 and wait for response."""
     if not st.session_state.client_socket:
         st.warning("Not connected to ESP32")
         return None
-    
     try:
         full_cmd = f"CMD,{cmd}\n"
         st.session_state.client_socket.send(full_cmd.encode())
-        
-        # Wait for response
-        st.session_state.client_socket.settimeout(2.0)
-        response = st.session_state.client_socket.recv(256).decode('utf-8', errors='ignore')
-        st.session_state.last_response = response.strip()
-        return response.strip()
-    except socket.timeout:
+        log_debug(f"Sent CMD: {cmd}")
+
+        # Expected command token (before any commas)
+        expected_cmd = cmd.split(',')[0]
+        timeout = 2.0
+        deadline = time.time() + timeout
+        # Poll for response populated by check_server()
+        while time.time() < deadline:
+            # Process any incoming bytes
+            try:
+                check_server()
+            except Exception:
+                pass
+            # Check if response arrived
+            resp = st.session_state.last_responses.get(expected_cmd)
+            if resp:
+                return resp
+            time.sleep(0.05)
+
         st.warning("Command timeout")
+        log_debug(f"Command timeout: {cmd}")
         return None
     except Exception as e:
         st.error(f"Command error: {e}")
+        log_debug(f"Command error: {e}")
         return None
+
+
+def send_command_with_retry(cmd: str, retries: int = 3, delay: float = 0.25):
+    """Send a command and retry if no response.
+
+    Returns the response string or None.
+    """
+    for attempt in range(1, retries + 1):
+        resp = send_command(cmd)
+        if resp:
+            return resp
+        time.sleep(delay)
+    return None
 
 def process_incoming_data(data: str):
     """Process incoming telemetry data."""
     for line in data.strip().split('\n'):
         if line.startswith('DATA,'):
-            # Parse telemetry: DATA,timestamp,o3_ppm,temp,pressure,...
+            # Parse telemetry: DATA,timestamp,vessel_o3_pct,temp,pressure,sample_v,ref_v,day,month,year,hour,minute,second,room_o3_ppm,vessel_temp_c
             try:
                 parts = line.split(',')
                 if len(parts) >= 5:
                     sample = {
                         'timestamp': datetime.now(),
-                        'o3_ppm': float(parts[2]) if parts[2] else 0,
-                        'temp_c': float(parts[3]) if parts[3] else 0,
-                        'pressure_mbar': float(parts[4]) if parts[4] else 0,
+                        'vessel_o3_pct': float(parts[2]) if parts[2] else 0.0,
+                        'temp_c': float(parts[3]) if parts[3] else 0.0,
+                        'pressure_mbar': float(parts[4]) if parts[4] else 0.0,
+                        'sample_v': float(parts[5]) if len(parts) > 5 and parts[5] else None,
+                        'ref_v': float(parts[6]) if len(parts) > 6 and parts[6] else None,
+                        'day': int(parts[7]) if len(parts) > 7 and parts[7] else 0,
+                        'month': int(parts[8]) if len(parts) > 8 and parts[8] else 0,
+                        'year': int(parts[9]) if len(parts) > 9 and parts[9] else 0,
+                        'hour': int(parts[10]) if len(parts) > 10 and parts[10] else 0,
+                        'minute': int(parts[11]) if len(parts) > 11 and parts[11] else 0,
+                        'second': int(parts[12]) if len(parts) > 12 and parts[12] else 0,
+                        'room_o3_ppm': float(parts[13]) if len(parts) > 13 and parts[13] else None,
+                        'vessel_temp_c': float(parts[14]) if len(parts) > 14 and parts[14] else None,
                     }
                     st.session_state.data_buffer.append(sample)
                     
                     # Save to CSV
                     save_sample_to_csv(sample)
-            except Exception as e:
+            except Exception:
                 pass  # Ignore parse errors
+        elif line.startswith('RSP,'):
+            # Store latest response and index by command for polling
+            try:
+                st.session_state.last_response = line.strip()
+                parts = line.split(',')
+                if len(parts) >= 3:
+                    cmd = parts[2]
+                    st.session_state.last_responses[cmd] = line.strip()
+            except Exception:
+                pass
 
 def save_sample_to_csv(sample: dict):
     """Append sample to CSV file."""
@@ -270,8 +356,12 @@ def save_sample_to_csv(sample: dict):
         file_exists = os.path.exists(CSV_FILE)
         with open(CSV_FILE, 'a') as f:
             if not file_exists:
-                f.write("timestamp,o3_ppm,temp_c,pressure_mbar\n")
-            f.write(f"{sample['timestamp']},{sample['o3_ppm']},{sample['temp_c']},{sample['pressure_mbar']}\n")
+                f.write("timestamp,vessel_o3_pct,temp_c,pressure_mbar,sample_v,ref_v,day,month,year,hour,minute,second,room_o3_ppm,vessel_temp_c\n")
+            f.write(
+                f"{sample.get('timestamp')},{sample.get('vessel_o3_pct')},{sample.get('temp_c')},{sample.get('pressure_mbar')},"
+                f"{sample.get('sample_v')},{sample.get('ref_v')},{sample.get('day')},{sample.get('month')},{sample.get('year')},"
+                f"{sample.get('hour')},{sample.get('minute')},{sample.get('second')},{sample.get('room_o3_ppm')},{sample.get('vessel_temp_c')}\n"
+            )
     except Exception:
         pass
 
@@ -283,53 +373,30 @@ def render_sidebar():
     """Render sidebar with connection controls."""
     st.sidebar.title("🍄 BlockSI Control")
     st.sidebar.caption("Motor Pot Edition v7")
-    
+    # Compact connection indicator and quick stats
     st.sidebar.divider()
-    
-    # Connection settings
-    st.sidebar.subheader("Connection")
-    port = st.sidebar.number_input("TCP Port", value=DEFAULT_PORT, min_value=1024, max_value=65535)
-    
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        if st.button("Start Server"):
-            start_server(port)
-    with col2:
-        if st.button("Stop Server"):
-            stop_server()
-    
-    # Connection status
-    if st.session_state.connected:
-        st.sidebar.success("✅ ESP32 Connected")
-    elif st.session_state.server_running:
-        st.sidebar.info("🔄 Waiting for connection...")
-    else:
-        st.sidebar.warning("⚪ Server stopped")
-    
+    connected = st.session_state.connected
+    status_icon = "🟢" if connected else "🔴"
+    st.sidebar.write(f"{status_icon} {'Connected' if connected else 'Disconnected'}")
+    st.sidebar.write(f"Buffer: {len(st.session_state.data_buffer)}")
+    st.sidebar.write(f"Last: {st.session_state.last_response or 'None'}")
     st.sidebar.divider()
-    
-    # Sensor status
-    st.sidebar.subheader("Sensor Status")
-    if st.sidebar.button("Refresh Status"):
-        response = send_command("sensors_get")
-        if response:
-            # Parse: pot=ok,lab_o3=ok,thermo=ok,...
-            for part in response.split(','):
-                if '=' in part:
-                    key, val = part.split('=', 1)
-                    if key in ['pot', 'lab_o3', 'thermo']:
-                        st.session_state.sensor_status[key] = val
-    
-    status = st.session_state.sensor_status
-    st.sidebar.write(f"Motor Pot: {'✅' if status['pot'] == 'ok' else '❌'} {status['pot']}")
-    st.sidebar.write(f"Lab O₃: {'✅' if status['lab_o3'] == 'ok' else '❌'} {status['lab_o3']}")
-    st.sidebar.write(f"Thermocouple: {'✅' if status['thermo'] == 'ok' else '❌'} {status['thermo']}")
-    
-    st.sidebar.divider()
-    
-    # Last response debug
-    with st.sidebar.expander("Debug"):
-        st.text(st.session_state.last_response)
+    st.sidebar.write("Quick Actions")
+    # Quick relay toggles (mirror of main controls)
+    c1, c2 = st.sidebar.columns(2)
+    with c1:
+        if st.button("O3 ON"):
+            send_command("relay_set,1,1")
+    with c2:
+        if st.button("O3 OFF"):
+            send_command("relay_set,1,0")
+    c3, c4 = st.sidebar.columns(2)
+    with c3:
+        if st.button("O2 ON"):
+            send_command("relay_set,2,1")
+    with c4:
+        if st.button("O2 OFF"):
+            send_command("relay_set,2,0")
 
 def render_power_control():
     """Render power control section."""
@@ -344,17 +411,45 @@ def render_power_control():
     
     st.divider()
     
-    # Refresh power state
-    col_refresh, col_spacer = st.columns([1, 4])
-    with col_refresh:
-        if st.button("🔄 Refresh", key="refresh_power"):
-            response = send_command("power_get")
-            if response:
-                parsed = parse_response(response, "power_get")
+    # Top quick controls: relays and power numeric + vessel O3
+    top1, top2, top3, top4 = st.columns([1, 1, 2, 2])
+    with top1:
+        if st.button("O3 ON", key="top_o3_on"):
+            send_command("relay_set,1,1")
+    with top2:
+        if st.button("O3 OFF", key="top_o3_off"):
+            send_command("relay_set,1,0")
+    with top3:
+        power_pct_input = st.number_input("Power (%)", min_value=0, max_value=100, value=int(st.session_state.power_state['percent']), step=1, key="power_input")
+        if st.button("Apply Power", key="apply_power_btn"):
+            resp = send_command_with_retry(f"power_set,{power_pct_input}")
+            if resp:
+                parsed = parse_response(resp, "power_set")
                 if parsed and parsed.get('status') == 'OK':
-                    st.session_state.power_state['percent'] = parsed.get('pct', 0)
-                    st.session_state.power_state['resistance'] = parsed.get('resistance', 0)
-                    st.session_state.power_state['predicted_o3'] = parsed.get('pred', 0)
+                    st.success(f"Power set to {power_pct_input}%")
+                    st.session_state.power_state['percent'] = float(power_pct_input)
+                else:
+                    st.error("Failed to apply power")
+            else:
+                st.error("No response from device")
+    with top4:
+        # Display latest vessel and room O3 readings if available
+        latest_vessel = None
+        latest_room = None
+        if len(st.session_state.data_buffer) > 0:
+            latest = st.session_state.data_buffer[-1]
+            latest_vessel = latest.get('vessel_o3_pct')
+            latest_room = latest.get('room_o3_ppm')
+
+        if latest_vessel is not None:
+            st.metric("Vessel O₃", f"{latest_vessel:.3f} %vol")
+        else:
+            st.metric("Vessel O₃", "-")
+
+        if latest_room is not None:
+            st.metric("Room O₃", f"{latest_room:.3f} ppm")
+        else:
+            st.metric("Room O₃", "-")
     
     # Current state display
     col1, col2, col3 = st.columns(3)
@@ -460,14 +555,18 @@ def render_relay_control():
         col_on, col_off = st.columns(2)
         with col_on:
             if st.button("Turn ON", key="o3_on"):
-                response = send_command("relay_set,1,1")
+                response = send_command_with_retry("relay_set,1,1")
                 if response:
-                    st.session_state.relay_state['o3_gen'] = True
+                    parsed = parse_response(response, "relay_set")
+                    if parsed and parsed.get('status') == 'OK':
+                        st.session_state.relay_state['o3_gen'] = True
         with col_off:
             if st.button("Turn OFF", key="o3_off"):
-                response = send_command("relay_set,1,0")
+                response = send_command_with_retry("relay_set,1,0")
                 if response:
-                    st.session_state.relay_state['o3_gen'] = False
+                    parsed = parse_response(response, "relay_set")
+                    if parsed and parsed.get('status') == 'OK':
+                        st.session_state.relay_state['o3_gen'] = False
     
     with col2:
         st.subheader("O₂ Concentrator")
@@ -477,14 +576,50 @@ def render_relay_control():
         col_on, col_off = st.columns(2)
         with col_on:
             if st.button("Turn ON", key="o2_on"):
-                response = send_command("relay_set,2,1")
+                response = send_command_with_retry("relay_set,2,1")
                 if response:
-                    st.session_state.relay_state['o2_conc'] = True
+                    parsed = parse_response(response, "relay_set")
+                    if parsed and parsed.get('status') == 'OK':
+                        st.session_state.relay_state['o2_conc'] = True
         with col_off:
             if st.button("Turn OFF", key="o2_off"):
-                response = send_command("relay_set,2,0")
+                response = send_command_with_retry("relay_set,2,0")
                 if response:
-                    st.session_state.relay_state['o2_conc'] = False
+                    parsed = parse_response(response, "relay_set")
+                    if parsed and parsed.get('status') == 'OK':
+                        st.session_state.relay_state['o2_conc'] = False
+
+
+def render_settings():
+    """Render settings such as server port and refresh interval."""
+    st.header("⚙️ Settings")
+    col1, col2 = st.columns(2)
+    with col1:
+        port = st.number_input("TCP Port", value=DEFAULT_PORT, min_value=1024, max_value=65535, key="settings_port")
+        if st.button("Start Server", key="settings_start"):
+            start_server(port)
+        if st.button("Stop Server", key="settings_stop"):
+            stop_server()
+
+    with col2:
+        st.subheader("UI / Refresh")
+        interval = st.number_input("Refresh interval (ms)", value=int(st.session_state.refresh_interval), min_value=500, max_value=60000, step=500, key="refresh_interval_input")
+        if st.button("Apply Refresh", key="apply_refresh"):
+            st.session_state.refresh_interval = int(interval)
+            st.success("Refresh interval updated (applies on next rerun)")
+
+    st.divider()
+    st.subheader("O₃ Display")
+    unit = st.selectbox("O₃ unit", ['%vol', 'ppm'], index=0)
+    st.session_state.o3_unit = unit
+    
+    st.divider()
+    st.subheader("Debug Logs")
+    if st.button("Clear Logs"):
+        st.session_state.debug_logs.clear()
+    with st.expander("Recent Logs", expanded=False):
+        for line in list(st.session_state.debug_logs)[:200]:
+            st.text(line)
 
 def render_telemetry():
     """Render telemetry graphs."""
@@ -503,16 +638,23 @@ def render_telemetry():
         vertical_spacing=0.15
     )
     
-    # O3 plot
+    # O3 plot (vessel percent) and Room O3 as secondary series if present
+    o3_label = "Vessel O₃ (%vol)"
     fig.add_trace(
-        go.Scatter(x=df['timestamp'], y=df['o3_ppm'], name="O₃ (ppm)", 
+        go.Scatter(x=df['timestamp'], y=df['vessel_o3_pct'], name=o3_label,
                    line=dict(color='blue')),
         row=1, col=1
     )
+    if 'room_o3_ppm' in df.columns:
+        fig.add_trace(
+            go.Scatter(x=df['timestamp'], y=df['room_o3_ppm'], name='Room O₃ (ppm)',
+                       line=dict(color='green')),
+            row=1, col=1
+        )
     
-    # Temperature plot
+    # Temperature plot (vessel)
     fig.add_trace(
-        go.Scatter(x=df['timestamp'], y=df['temp_c'], name="Temp (°C)",
+        go.Scatter(x=df['timestamp'], y=df['vessel_temp_c'] if 'vessel_temp_c' in df.columns else df['temp_c'], name="Vessel Temp (°C)",
                    line=dict(color='red')),
         row=2, col=1
     )
@@ -545,12 +687,16 @@ def main():
     
     # Streamlit passes extra args, so ignore unknown
     args, _ = parser.parse_known_args()
-    
+    # Start server automatically (match v6 behavior)
+    start_server(args.port)
+
     # Render UI
     render_sidebar()
+    # Process any incoming connections/data
+    check_server()
     
     # Main content tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["⚡ Power", "🔌 Relays", "📊 Telemetry", "🔧 Debug"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["⚡ Power", "🔌 Relays", "📊 Telemetry", "🔧 Debug", "⚙️ Settings"])
     
     with tab1:
         render_power_control()
@@ -584,6 +730,9 @@ def main():
                 if st.checkbox("Confirm reboot"):
                     send_command("reboot")
                     st.warning("Rebooting...")
+
+    with tab5:
+        render_settings()
 
 if __name__ == "__main__":
     main()

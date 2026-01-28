@@ -16,6 +16,7 @@
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <math.h>
 
@@ -24,9 +25,16 @@ static const char *TAG = "MOTOR_POT";
 // ADC attenuation for 0-3.3V range
 #define MOTOR_POT_ADC_ATTEN     ADC_ATTEN_DB_12
 
+// Stall detection parameters
+#define STALL_ADC_THRESHOLD     8       // Minimum ADC change to consider movement
+#define STALL_COUNT_LIMIT       30      // Iterations before declaring stall (30 * 20ms = 600ms)
+
 // ============================================================================
 // Module State
 // ============================================================================
+
+// Mutex for thread-safe motor operations
+static SemaphoreHandle_t s_motor_mutex = NULL;
 
 static struct {
     bool initialized;
@@ -165,6 +173,15 @@ esp_err_t motor_pot_init(const motor_pot_config_t *config)
     }
     
     ESP_LOGI(TAG, "Initializing motor pot driver");
+    
+    // Create mutex for thread-safe operations
+    if (s_motor_mutex == NULL) {
+        s_motor_mutex = xSemaphoreCreateMutex();
+        if (s_motor_mutex == NULL) {
+            ESP_LOGE(TAG, "Failed to create mutex");
+            return ESP_ERR_NO_MEM;
+        }
+    }
     
     // Apply configuration
     if (config != NULL) {
@@ -405,6 +422,12 @@ esp_err_t motor_pot_goto_position(float target_percent, uint32_t timeout_ms)
         return ESP_ERR_INVALID_STATE;
     }
     
+    // Acquire mutex to prevent concurrent motor operations
+    if (xSemaphoreTake(s_motor_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "Motor busy, cannot acquire mutex");
+        return ESP_ERR_TIMEOUT;
+    }
+    
     // Clamp target
     if (target_percent < 0) target_percent = 0;
     if (target_percent > 100) target_percent = 100;
@@ -412,12 +435,13 @@ esp_err_t motor_pot_goto_position(float target_percent, uint32_t timeout_ms)
     uint16_t target_adc = percent_to_adc(target_percent);
     uint32_t start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
     
-    ESP_LOGD(TAG, "Going to %.1f%% (ADC %u), timeout %ums",
+    ESP_LOGI(TAG, "Going to %.1f%% (ADC %u), timeout %ums",
              target_percent, target_adc, (unsigned)timeout_ms);
     
     // Control loop
     int stall_count = 0;
     uint16_t last_adc = 0;
+    esp_err_t result = ESP_OK;
     
     while (1) {
         // Check timeout
@@ -425,29 +449,34 @@ esp_err_t motor_pot_goto_position(float target_percent, uint32_t timeout_ms)
         if (elapsed > timeout_ms) {
             motor_pot_stop();
             ESP_LOGW(TAG, "Position timeout at %.1f%%", motor_pot_get_position_percent());
-            return ESP_ERR_TIMEOUT;
+            result = ESP_ERR_TIMEOUT;
+            break;
         }
         
-        // Read current position
-        uint16_t current_adc = read_adc_averaged(3);
+        // Read current position with more averaging for noise reduction
+        uint16_t current_adc = read_adc_averaged(5);
         int32_t error = (int32_t)target_adc - (int32_t)current_adc;
         
         // Check if within deadband
         if (abs(error) <= POSITION_DEADBAND) {
             motor_pot_stop();
             vTaskDelay(pdMS_TO_TICKS(MOTOR_SETTLE_MS));
-            ESP_LOGD(TAG, "Position reached: ADC=%u (%.1f%%)", 
+            ESP_LOGI(TAG, "Position reached: ADC=%u (%.1f%%)", 
                      current_adc, adc_to_percent(current_adc));
-            return ESP_OK;
+            result = ESP_OK;
+            break;
         }
         
-        // Stall detection
-        if (abs((int32_t)current_adc - (int32_t)last_adc) < 5) {
+        // Stall detection - use STALL_ADC_THRESHOLD for noise immunity
+        if (abs((int32_t)current_adc - (int32_t)last_adc) < STALL_ADC_THRESHOLD) {
             stall_count++;
-            if (stall_count > 20) {
+            if (stall_count > STALL_COUNT_LIMIT) {
                 motor_pot_stop();
-                ESP_LOGW(TAG, "Stall detected at ADC=%u", current_adc);
-                return (abs(error) <= POSITION_DEADBAND * 2) ? ESP_OK : ESP_ERR_TIMEOUT;
+                ESP_LOGW(TAG, "Stall detected at ADC=%u (target=%u, error=%ld)", 
+                         current_adc, target_adc, (long)error);
+                // Accept if close enough (within 2x deadband)
+                result = (abs(error) <= POSITION_DEADBAND * 2) ? ESP_OK : ESP_ERR_TIMEOUT;
+                break;
             }
         } else {
             stall_count = 0;
@@ -464,7 +493,7 @@ esp_err_t motor_pot_goto_position(float target_percent, uint32_t timeout_ms)
             dir = MOTOR_DIR_REVERSE;
         }
         
-        // Use slow speed when close to target
+        // Use slow speed when close to target for better precision
         if (abs(error) < POSITION_FINE_THRESHOLD) {
             speed = MOTOR_PWM_SLOW;
         } else {
@@ -474,9 +503,13 @@ esp_err_t motor_pot_goto_position(float target_percent, uint32_t timeout_ms)
         // Apply motor control
         motor_pot_set_motor(dir, speed, MOTOR_DECAY_FAST);
         
-        // Brief movement then re-check
-        vTaskDelay(pdMS_TO_TICKS(20));
+        // Brief movement then re-check (25ms for smoother control)
+        vTaskDelay(pdMS_TO_TICKS(25));
     }
+    
+    // Release mutex
+    xSemaphoreGive(s_motor_mutex);
+    return result;
 }
 
 esp_err_t motor_pot_set_power(float power_percent)

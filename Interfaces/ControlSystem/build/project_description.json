@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "blocksi_control",
-    "project_version":    "c554d3f-dirty",
+    "project_version":    "4796334-dirty",
     "project_path":       "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem",
     "idf_path":           "C:/Espressif/frameworks/esp-idf-v5.4.3",
     "build_dir":          "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/build",
@@ -1225,7 +1225,7 @@
             "managed_reqs": [],
             "managed_priv_reqs": [],
             "file": "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/build/esp-idf/main/libmain.a",
-            "sources": [ "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/main.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/model_106h_interface.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/relay_control.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/lan_client.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/backup_storage.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/peripherals.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/motor_pot.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/o3_power_control.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/dfrobot_ozone.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/max31855_thermocouple.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/sensor_aggregator.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/dosimetry.c" ],
+            "sources": [ "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/main.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/model_106h_interface.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/relay_control.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/lan_client.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/backup_storage.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/peripherals.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/motor_pot.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/o3_power_control.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/dfrobot_ozone.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/max31855_thermocouple.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/sensor_aggregator.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/dosimetry.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/blocksi_state.c", "C:/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/power_calibration_v2.c" ],
             "include_dirs": [ "." ]
         },
         "mbedtls": {

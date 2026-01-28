@@ -27,6 +27,7 @@ extern "C" {
 typedef enum {
     RELAY_OZONE_GEN = 0,    ///< Ozone generator (MP-8000)
     RELAY_O2_CONC,          ///< Oxygen concentrator
+    RELAY_AIR_COMP,         ///< Air compressor (internal to MP-8000)
     RELAY_COUNT             ///< Number of relays
 } relay_id_t;
 
@@ -44,6 +45,7 @@ typedef enum {
 typedef struct {
     int ozone_gen_gpio;     ///< GPIO pin for ozone generator SSR
     int o2_conc_gpio;       ///< GPIO pin for oxygen concentrator SSR
+    int air_comp_gpio;      ///< GPIO pin for air compressor SSR
     bool active_high;       ///< true = HIGH activates relay, false = LOW activates
 } relay_config_t;
 
@@ -100,9 +102,9 @@ void relay_all_off(void);
  * 
  * Registers the following RPC methods:
  * - "relay_set": Set specific relay state
- *   Params: {"relay": "ozone_gen"|"o2_conc", "state": true|false}
+ *   Params: {"relay": "ozone_gen"|"o2_conc"|"air_comp", "state": true|false}
  * - "relay_get": Get current relay states
- *   Returns: {"ozone_gen": true|false, "o2_conc": true|false}
+ *   Returns: {"ozone_gen": true|false, "o2_conc": true|false, "air_comp": true|false}
  * - "relay_all_off": Emergency stop - turn off all relays
  * 
  * @param rpc Golioth RPC handle from golioth_rpc_init()

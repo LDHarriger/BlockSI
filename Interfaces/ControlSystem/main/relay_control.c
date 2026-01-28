@@ -16,13 +16,15 @@ static const char *TAG = "RELAY";
 // Relay names for logging and RPC
 static const char *RELAY_NAMES[RELAY_COUNT] = {
     "ozone_gen",
-    "o2_conc"
+    "o2_conc",
+    "air_comp"
 };
 
 // Human-readable names
 static const char *RELAY_DISPLAY_NAMES[RELAY_COUNT] = {
     "Ozone Generator",
-    "Oxygen Concentrator"
+    "Oxygen Concentrator",
+    "Air Compressor"
 };
 
 // Module state
@@ -58,20 +60,25 @@ esp_err_t relay_init(const relay_config_t *config)
     ESP_LOGI(TAG, "Initializing relay control");
     ESP_LOGI(TAG, "  Ozone Generator: GPIO%d", config->ozone_gen_gpio);
     ESP_LOGI(TAG, "  O2 Concentrator: GPIO%d", config->o2_conc_gpio);
+    ESP_LOGI(TAG, "  Air Compressor:  GPIO%d", config->air_comp_gpio);
     ESP_LOGI(TAG, "  Active: %s", config->active_high ? "HIGH" : "LOW");
     
     // Store configuration
     s_relay.gpio_pins[RELAY_OZONE_GEN] = config->ozone_gen_gpio;
     s_relay.gpio_pins[RELAY_O2_CONC] = config->o2_conc_gpio;
+    s_relay.gpio_pins[RELAY_AIR_COMP] = config->air_comp_gpio;
     s_relay.active_high = config->active_high;
     
     // Initialize states to OFF
     s_relay.states[RELAY_OZONE_GEN] = RELAY_OFF;
     s_relay.states[RELAY_O2_CONC] = RELAY_OFF;
+    s_relay.states[RELAY_AIR_COMP] = RELAY_OFF;
     
     // Configure GPIO pins
     gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << config->ozone_gen_gpio) | (1ULL << config->o2_conc_gpio),
+        .pin_bit_mask = (1ULL << config->ozone_gen_gpio) | 
+                        (1ULL << config->o2_conc_gpio) |
+                        (1ULL << config->air_comp_gpio),
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -84,9 +91,10 @@ esp_err_t relay_init(const relay_config_t *config)
         return ret;
     }
     
-    // Set initial GPIO states (both OFF)
+    // Set initial GPIO states (all OFF)
     apply_gpio_state(RELAY_OZONE_GEN);
     apply_gpio_state(RELAY_O2_CONC);
+    apply_gpio_state(RELAY_AIR_COMP);
     
     s_relay.initialized = true;
     ESP_LOGI(TAG, "Relay control initialized - all relays OFF");
@@ -151,6 +159,7 @@ void relay_all_off(void)
     ESP_LOGW(TAG, "Emergency stop - all relays OFF");
     relay_set(RELAY_OZONE_GEN, RELAY_OFF);
     relay_set(RELAY_O2_CONC, RELAY_OFF);
+    relay_set(RELAY_AIR_COMP, RELAY_OFF);
 }
 
 // ============================================================================

@@ -14,6 +14,8 @@ idf_component_register(
         "max31855_thermocouple.c"
         "sensor_aggregator.c"
         "dosimetry.c"
+        "blocksi_state.c"           # Unified system state management
+        "power_calibration_v2.c"    # Power calibration sweep (motor pot version)
     INCLUDE_DIRS 
         "."
     REQUIRES 

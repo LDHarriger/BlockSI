@@ -5099,6 +5099,16 @@
                     {
                         "children": [],
                         "depends_on": null,
+                        "help": "GPIO pin connected to MP-8000 internal air compressor SSR.\nDefault: GPIO14 (Kerwinn KG1-1DA25, 3-32VDC input).",
+                        "id": "RELAY_AIR_COMP_GPIO",
+                        "name": "RELAY_AIR_COMP_GPIO",
+                        "range": null,
+                        "title": "Air Compressor SSR GPIO",
+                        "type": "int"
+                    },
+                    {
+                        "children": [],
+                        "depends_on": null,
                         "help": "Enable if SSR activates (closes) when GPIO is HIGH.\nDisable if SSR activates when GPIO is LOW.\nKerwinn KG1-1DA25 is active-high.",
                         "id": "RELAY_ACTIVE_HIGH",
                         "name": "RELAY_ACTIVE_HIGH",

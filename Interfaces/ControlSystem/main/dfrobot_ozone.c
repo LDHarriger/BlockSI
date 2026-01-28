@@ -15,16 +15,23 @@
 
 static const char *TAG = "LAB_O3";
 
-// DFRobot ozone sensor registers
-#define REG_PASSIVE_MODE        0x00    // Set passive mode
-#define REG_ACTIVE_MODE         0x01    // Set active mode  
-#define REG_READ_O3             0x03    // Read O3 concentration
-#define REG_AUTO_ACTIVE         0x04    // Auto-active mode
-#define REG_SET_ADDR            0x05    // Set I2C address
+// DFRobot SEN0321 ozone sensor registers (corrected per official documentation)
+#define REG_MODE_REGISTER       0x03    // Mode register: 0x00=auto, 0x01=passive
+#define REG_SET_PASSIVE         0x04    // Trigger read: 0x00=auto data, 0x01=passive data  
+#define REG_PASSIVE_DATA_HIGH   0x07    // Passive mode data high byte
+#define REG_PASSIVE_DATA_LOW    0x08    // Passive mode data low byte
+#define REG_AUTO_DATA_HIGH      0x09    // Auto mode data high byte
+#define REG_AUTO_DATA_LOW       0x0A    // Auto mode data low byte
 
-// Conversion factor: raw value to ppm
-// Based on DFRobot documentation: 1 LSB = 10 ppb = 0.01 ppm
-#define RAW_TO_PPM              0.01f
+// Mode values
+#define MODE_AUTOMATIC          0x00
+#define MODE_PASSIVE            0x01
+#define TRIGGER_AUTO_READ       0x00
+#define TRIGGER_PASSIVE_READ    0x01
+
+// Conversion: raw value is PPB (parts per billion)
+// Divide by 1000 to get PPM
+#define PPB_TO_PPM              0.001f
 
 // Module state
 static struct {
@@ -61,14 +68,15 @@ static struct {
 // ============================================================================
 
 /**
- * @brief Write command to sensor
+ * @brief Write register and value to sensor
  */
-static esp_err_t sensor_write_cmd(uint8_t cmd)
+static esp_err_t sensor_write_reg(uint8_t reg, uint8_t value)
 {
-    ESP_LOGD(TAG, "Write cmd: 0x%02X", cmd);
+    uint8_t data[2] = {reg, value};
+    ESP_LOGD(TAG, "Write reg 0x%02X = 0x%02X", reg, value);
     
     esp_err_t ret = i2c_master_write_to_device(s_sensor.i2c_port, s_sensor.i2c_addr,
-                                                &cmd, 1, pdMS_TO_TICKS(100));
+                                                data, 2, pdMS_TO_TICKS(100));
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Write failed: %s", esp_err_to_name(ret));
     }
@@ -76,14 +84,14 @@ static esp_err_t sensor_write_cmd(uint8_t cmd)
 }
 
 /**
- * @brief Read data from sensor
+ * @brief Read data from specific register
  */
-static esp_err_t sensor_read_data(uint8_t *data, size_t len)
+static esp_err_t sensor_read_reg(uint8_t reg, uint8_t *data, size_t len)
 {
-    esp_err_t ret = i2c_master_read_from_device(s_sensor.i2c_port, s_sensor.i2c_addr,
-                                                 data, len, pdMS_TO_TICKS(100));
+    esp_err_t ret = i2c_master_write_read_device(s_sensor.i2c_port, s_sensor.i2c_addr,
+                                                  &reg, 1, data, len, pdMS_TO_TICKS(100));
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Read failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Read reg 0x%02X failed: %s", reg, esp_err_to_name(ret));
     }
     return ret;
 }
@@ -184,14 +192,14 @@ esp_err_t dfrobot_o3_init(const dfrobot_o3_config_t *config)
     
     ESP_LOGI(TAG, "Sensor detected at address 0x%02X", config->i2c_addr);
     
-    // Set passive mode (read on demand)
-    esp_err_t ret = sensor_write_cmd(REG_PASSIVE_MODE);
+    // Set passive mode (read on demand) - write to mode register
+    esp_err_t ret = sensor_write_reg(REG_MODE_REGISTER, MODE_PASSIVE);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Could not set passive mode, continuing anyway");
     }
     
-    // Allow sensor to stabilize
-    vTaskDelay(pdMS_TO_TICKS(100));
+    // Allow sensor to stabilize after mode change
+    vTaskDelay(pdMS_TO_TICKS(200));
     
     // Take initial reading
     float ppm;
@@ -253,30 +261,40 @@ esp_err_t dfrobot_o3_read(float *ppm)
         return ESP_ERR_INVALID_ARG;
     }
     
-    // Send read command
-    esp_err_t ret = sensor_write_cmd(REG_READ_O3);
+    // Step 1: Trigger a passive read by writing to SET_PASSIVE register
+    esp_err_t ret = sensor_write_reg(REG_SET_PASSIVE, TRIGGER_PASSIVE_READ);
     if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to trigger read");
         return ret;
     }
     
-    // Small delay for conversion
-    vTaskDelay(pdMS_TO_TICKS(10));
+    // Step 2: CRITICAL - Wait 100ms for sensor to perform conversion
+    // This is required by the DFRobot protocol
+    vTaskDelay(pdMS_TO_TICKS(100));
     
-    // Read 2 bytes (16-bit value)
+    // Step 3: Read 2 bytes from passive data register (0x07)
     uint8_t data[2];
-    ret = sensor_read_data(data, 2);
+    ret = sensor_read_reg(REG_PASSIVE_DATA_HIGH, data, 2);
     if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read data");
         return ret;
     }
     
-    // Combine bytes (big-endian)
-    uint16_t raw = ((uint16_t)data[0] << 8) | data[1];
+    // Step 4: Combine bytes (big-endian) - value is in PPB
+    int16_t raw_ppb = ((int16_t)data[0] << 8) | data[1];
     
-    // Convert to ppm and apply offset
-    float reading = (raw * RAW_TO_PPM) + s_sensor.offset_ppm;
+    // Validate range (0-10ppm = 0-10000 ppb)
+    if (raw_ppb < 0) raw_ppb = 0;
+    if (raw_ppb > 10000) {
+        ESP_LOGW(TAG, "Out of range reading: %d ppb (clamping)", raw_ppb);
+        raw_ppb = 10000;
+    }
+    
+    // Convert PPB to PPM and apply offset
+    float reading = (raw_ppb * PPB_TO_PPM) + s_sensor.offset_ppm;
     if (reading < 0) reading = 0;  // Can't have negative O3
     
-    ESP_LOGD(TAG, "Raw: %u → %.3f ppm", raw, reading);
+    ESP_LOGD(TAG, "Raw: %d ppb → %.3f ppm", raw_ppb, reading);
     
     // Update statistics
     s_sensor.last_reading_ppm = reading;
@@ -303,21 +321,24 @@ esp_err_t dfrobot_o3_read_raw(uint16_t *raw)
         return ESP_ERR_INVALID_ARG;
     }
     
-    esp_err_t ret = sensor_write_cmd(REG_READ_O3);
+    // Trigger passive read
+    esp_err_t ret = sensor_write_reg(REG_SET_PASSIVE, TRIGGER_PASSIVE_READ);
     if (ret != ESP_OK) {
         return ret;
     }
     
-    vTaskDelay(pdMS_TO_TICKS(10));
+    // Wait for conversion (required!)
+    vTaskDelay(pdMS_TO_TICKS(100));
     
+    // Read from passive data register
     uint8_t data[2];
-    ret = sensor_read_data(data, 2);
+    ret = sensor_read_reg(REG_PASSIVE_DATA_HIGH, data, 2);
     if (ret != ESP_OK) {
         return ret;
     }
     
     *raw = ((uint16_t)data[0] << 8) | data[1];
-    ESP_LOGD(TAG, "Raw value: %u", *raw);
+    ESP_LOGD(TAG, "Raw value: %u ppb", *raw);
     
     return ESP_OK;
 }

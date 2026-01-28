@@ -48,6 +48,7 @@ class DeviceState:
     device_info: str = ""
     ozone_gen: bool = False
     o2_conc: bool = False
+    air_comp: bool = False
     heap_free: int = 0
     error_count: int = 0
     backup_recording: bool = False
@@ -131,25 +132,36 @@ class BlockSIServer:
             return False
     
     def _setup_stream_csv(self):
-        """Setup continuous stream CSV file"""
-        filename = f"{datetime.now().strftime('%Y-%m-%d')}_Stream.csv"
-        file_exists = os.path.exists(filename)
-        self.stream_file = open(filename, 'a', newline='')
+        """Setup continuous stream CSV file in Data folder"""
+        # Create Data folder if it doesn't exist (one level up from PC/)
+        data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'Data')
+        if not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+            print(f"[CSV] Created data directory: {data_dir}")
+        
+        # Use YYYYMMDD_HHMMSS format for unique filenames
+        filename = os.path.join(data_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_Stream.csv")
+        self.stream_file = open(filename, 'w', newline='')  # New file each session
         self.stream_writer = csv.writer(self.stream_file)
-        if not file_exists:
-            self.stream_writer.writerow([
-                'timestamp', 'ozone_pct', 'temperature_c', 'pressure_mbar',
-                'sample_v', 'ref_v'
-            ])
-            self.stream_file.flush()
+        self.stream_writer.writerow([
+            'timestamp', 'ozone_pct', 'temperature_c', 'pressure_mbar',
+            'sample_v', 'ref_v'
+        ])
+        self.stream_file.flush()
         print(f"[CSV] Stream file: {filename}")
     
     def start_pc_recording(self, name: str) -> str:
-        """Start recording to a named sequence file on PC"""
+        """Start recording to a named sequence file in Data folder"""
         if self.pc_recording:
             self.stop_pc_recording()
         
-        self.pc_record_filename = f"{datetime.now().strftime('%Y-%m-%d')}_{name}.csv"
+        # Save to Data folder with YYYYMMDD_HHMMSS format
+        data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'Data')
+        if not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+        
+        self.pc_record_filename = os.path.join(
+            data_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{name}.csv")
         self.pc_record_file = open(self.pc_record_filename, 'w', newline='')
         self.pc_record_writer = csv.writer(self.pc_record_file)
         self.pc_record_writer.writerow([
@@ -282,6 +294,8 @@ class BlockSIServer:
                             self.state.ozone_gen = val == '1'
                         elif key == 'o2_conc':
                             self.state.o2_conc = val == '1'
+                        elif key == 'air_comp':
+                            self.state.air_comp = val == '1'
             
             elif cmd == 'status' and status == 'OK':
                 for pair in details.split(','):
@@ -406,6 +420,10 @@ class BlockSIServer:
                     buffer = ""  # Clear buffer on new connection
                     print(f"[CONNECTED] ESP32 at {self.state.client_ip}")
                     time.sleep(0.3)
+                    # Sync time first (PC epoch milliseconds)
+                    pc_time_ms = int(datetime.now().timestamp() * 1000)
+                    self.send_command(f"CMD,time_sync,{pc_time_ms}")
+                    time.sleep(0.1)
                     self.send_command("CMD,relay_get")
                     self.send_command("CMD,status")
                     self.send_command("CMD,106h_avg_get")
@@ -565,7 +583,7 @@ def render_relay_controls():
         st.warning("ESP32 not connected - relay controls disabled")
         return
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.write("**Ozone Generator**")
@@ -602,6 +620,23 @@ def render_relay_controls():
                 server.send_command("CMD,relay_get")
     
     with col3:
+        st.write("**Air Compressor**")
+        air_state = "🟢 ON" if server.state.air_comp else "🔴 OFF"
+        st.write(f"Status: {air_state}")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("ON", key="air_on", use_container_width=True):
+                server.send_command("CMD,relay_set,air_comp,1")
+                time.sleep(0.2)
+                server.send_command("CMD,relay_get")
+        with c2:
+            if st.button("OFF", key="air_off", use_container_width=True):
+                server.send_command("CMD,relay_set,air_comp,0")
+                time.sleep(0.2)
+                server.send_command("CMD,relay_get")
+    
+    with col4:
         st.write("**Emergency Stop**")
         st.write("")
         if st.button("🛑 ALL OFF", key="all_off", use_container_width=True, type="primary"):

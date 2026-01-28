@@ -64,6 +64,13 @@ menu "BlockSI Configuration"
                 GPIO pin connected to oxygen concentrator SSR input.
                 Default: GPIO13 (Kerwinn KG1-1DA25, 3-32VDC input).
 
+        config RELAY_AIR_COMP_GPIO
+            int "Air Compressor SSR GPIO"
+            default 14
+            help
+                GPIO pin connected to MP-8000 internal air compressor SSR.
+                Default: GPIO14 (Kerwinn KG1-1DA25, 3-32VDC input).
+
         config RELAY_ACTIVE_HIGH
             bool "SSR Active High"
             default y

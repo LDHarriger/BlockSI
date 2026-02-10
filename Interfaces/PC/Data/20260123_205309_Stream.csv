@@ -1,2 +1,0 @@
-timestamp,esp_ts_ms,vessel_o3_pct,cell_temp_c,pressure_mbar,room_o3_ppm,vessel_temp_c,power_target,power_actual,wiper_v
-2026-01-23 20:53:09.215000,526168,0.0,25.9,1022.1,0.0,-999.0,56,56.1,1.842

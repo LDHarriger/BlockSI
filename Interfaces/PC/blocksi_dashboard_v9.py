@@ -48,19 +48,36 @@ st.set_page_config(
 # =============================================================================
 DEFAULT_PORT = 5000
 MAX_DATA_POINTS = 500
-# CSV file path - save to Data folder with timestamp
+
+# Directory structure
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'Data')
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
-CSV_FILE = os.path.join(DATA_DIR, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_Stream.csv")
+CALIBRATION_DIR = os.path.join(DATA_DIR, 'O3PowerCalibration')
+MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'Model', 'O3Power')
+
+# Ensure directories exist
+for _dir in [DATA_DIR, CALIBRATION_DIR, MODEL_DIR]:
+    if not os.path.exists(_dir):
+        os.makedirs(_dir)
+
 MOTOR_POT_OHMS = 5000
 POWER_MISMATCH_THRESHOLD = 5.0  # % error threshold
 
 # Power model coefficients (from characterization)
-# O3_max = 1.78/F + 1.40 where F = flow rate in LPM (default 5 LPM)
+# O3_max = 1.78/F + 1.40 where F = flow rate in LPM
 POWER_MODEL_A = 1.78
 POWER_MODEL_B = 1.40
-DEFAULT_FLOW_LPM = 5.0
+DEFAULT_FLOW_LPM = 4.0  # Default O2 flow rate
+
+# O3 mass flow conversion: mg/s = %vol * LPM * K
+# At STP: K = (48 g/mol) / (22.4 L/mol) / 60 s/min * 10 = 0.357
+O3_MASS_FLOW_K = 0.357  # mg/s per (%vol * LPM)
+
+# Calibration sequence settings
+CAL_STEP_DURATION_S = 2.0   # Time at each power level (wait for 106-H sample)
+CAL_BASELINE_DURATION_S = 30.0  # Zero-power baseline duration
+CAL_AIR_DWELL_TIME_S = 20.0  # Time for each Air ON/OFF measurement
+CAL_NUM_RANDOM_POINTS = 15  # Number of random power levels in phase 2
+AIR_COMP_LPM = 10.0  # Additional LPM when air compressor is on
 
 # =============================================================================
 # Unified System State
@@ -77,10 +94,13 @@ class SystemState:
         self.wiper_voltage = 0.0
         self.power_error = False
         
+        # Flow settings (manually entered from analog meter)
+        self.flow_lpm = DEFAULT_FLOW_LPM
+        
         # Relays
         self.relay_o3_gen = False
         self.relay_o2_conc = False
-        self.relay_air_comp = False
+        self.relay_air_comp = False  # Air Flow boost (+~10 LPM)
         
         # Sensors
         self.vessel_o3_pct = 0.0
@@ -94,9 +114,17 @@ class SystemState:
         self.time_synced = False
         self.last_update = None
         
-        # Calibration
-        self.calibration_active = False
-        self.calibration_data = []  # List of (power_pct, o3_pct) tuples
+        # Calibration sequence state
+        self.cal_active = False
+        self.cal_phase = None  # 'baseline', 'sweep_up', 'sweep_down', 'random_pairs'
+        self.cal_phase_progress = 0.0  # 0-100% within current phase
+        self.cal_current_power = 0
+        self.cal_air_state = False  # Current air compressor state during cal
+        self.cal_start_time = None
+        self.cal_data = []  # List of dicts for each sample
+        self.cal_random_powers = []  # List of random power levels for phase 2
+        self.cal_random_idx = 0  # Current index in random_powers
+        self.cal_o2_lpm = DEFAULT_FLOW_LPM  # O2 LPM setting for this calibration
         
         # Connection
         self.connected = False
@@ -145,6 +173,13 @@ if 'debug_logs' not in st.session_state:
 if 'last_response' not in st.session_state:
     st.session_state.last_response = ""
 
+# CSV file for this session - created once when session starts
+if 'csv_file_path' not in st.session_state:
+    st.session_state.csv_file_path = os.path.join(
+        DATA_DIR, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_Stream.csv"
+    )
+    st.session_state.csv_header_written = False
+
 
 def log_debug(msg: str):
     ts = datetime.now().strftime('%H:%M:%S')
@@ -152,9 +187,9 @@ def log_debug(msg: str):
 
 
 # =============================================================================
-# Power Model
+# Power Model & Conversions
 # =============================================================================
-def predict_o3_from_power(power_pct: float, flow_lpm: float = DEFAULT_FLOW_LPM) -> float:
+def predict_o3_from_power(power_pct: float, flow_lpm: float = None) -> float:
     """
     Predict O3 output based on power level.
     Uses piecewise model:
@@ -162,6 +197,8 @@ def predict_o3_from_power(power_pct: float, flow_lpm: float = DEFAULT_FLOW_LPM) 
     - 20-75%: linear ramp
     - 75-100%: saturation (diminishing returns)
     """
+    if flow_lpm is None:
+        flow_lpm = _sys.flow_lpm
     if power_pct <= 0 or flow_lpm <= 0:
         return 0.0
     
@@ -179,8 +216,59 @@ def predict_o3_from_power(power_pct: float, flow_lpm: float = DEFAULT_FLOW_LPM) 
     return o3_max * scaling
 
 
-def generate_power_curve(flow_lpm: float = DEFAULT_FLOW_LPM):
+def predict_power_from_o3(o3_pct: float, flow_lpm: float = None) -> float:
+    """Inverse of predict_o3_from_power - find power for target O3."""
+    if flow_lpm is None:
+        flow_lpm = _sys.flow_lpm
+    if o3_pct <= 0 or flow_lpm <= 0:
+        return 0.0
+    
+    o3_max = POWER_MODEL_A / flow_lpm + POWER_MODEL_B
+    scaling = o3_pct / o3_max
+    
+    # Clamp to valid range
+    if scaling >= 1.0:
+        return 100.0
+    elif scaling <= 0.1:
+        # In threshold zone (0-20%)
+        return (scaling / 0.1) * 20
+    else:
+        # In linear ramp zone (20-75%)
+        return 20 + (scaling - 0.1) / 0.9 * 55
+
+
+def o3_pct_to_mg_per_s(o3_pct: float, flow_lpm: float = None) -> float:
+    """Convert O3 %vol to mg/s mass flow rate."""
+    if flow_lpm is None:
+        flow_lpm = _sys.flow_lpm
+    return o3_pct * flow_lpm * O3_MASS_FLOW_K
+
+
+def mg_per_s_to_o3_pct(mg_per_s: float, flow_lpm: float = None) -> float:
+    """Convert mg/s mass flow to O3 %vol."""
+    if flow_lpm is None:
+        flow_lpm = _sys.flow_lpm
+    if flow_lpm <= 0:
+        return 0.0
+    return mg_per_s / (flow_lpm * O3_MASS_FLOW_K)
+
+
+def mg_per_s_to_g_at_time(mg_per_s: float, minutes: float = 30.0) -> float:
+    """Convert mg/s to grams produced over given time."""
+    return mg_per_s * minutes * 60 / 1000
+
+
+def g_at_time_to_mg_per_s(grams: float, minutes: float = 30.0) -> float:
+    """Convert grams at time to mg/s rate."""
+    if minutes <= 0:
+        return 0.0
+    return grams * 1000 / (minutes * 60)
+
+
+def generate_power_curve(flow_lpm: float = None):
     """Generate power vs O3 curve data."""
+    if flow_lpm is None:
+        flow_lpm = _sys.flow_lpm
     power_values = np.linspace(0, 100, 101)
     o3_values = [predict_o3_from_power(p, flow_lpm) for p in power_values]
     return power_values, o3_values
@@ -495,12 +583,19 @@ def process_queued_data():
 
 
 def save_sample_to_csv(sample: dict):
+    """Append sample to the session's CSV file."""
     try:
-        file_exists = os.path.exists(CSV_FILE)
-        with open(CSV_FILE, 'a') as f:
-            if not file_exists:
+        csv_path = st.session_state.csv_file_path
+        
+        # Write header on first write
+        if not st.session_state.csv_header_written:
+            with open(csv_path, 'w') as f:
                 f.write("timestamp,esp_ts_ms,vessel_o3_pct,cell_temp_c,pressure_mbar,"
                         "room_o3_ppm,vessel_temp_c,power_target,power_actual,wiper_v\n")
+            st.session_state.csv_header_written = True
+        
+        # Append data
+        with open(csv_path, 'a') as f:
             f.write(f"{sample['timestamp']},{sample['esp_ts_ms']},{sample['vessel_o3_pct']},"
                     f"{sample['cell_temp_c']},{sample['pressure_mbar']},{sample['room_o3_ppm']},"
                     f"{sample['vessel_temp_c']},{sample.get('power_target_pct',0)},"
@@ -513,202 +608,241 @@ def save_sample_to_csv(sample: dict):
 # UI Components
 # =============================================================================
 def render_sidebar():
-    """Render sidebar with connection and quick controls."""
-    st.sidebar.title("🍄 BlockSI")
+    """Render sidebar matching BlockSI v2 mockup."""
+    st.sidebar.title("BlockSI v2")
     
     # Connection status
     if is_connected():
-        st.sidebar.success("🟢 Connected")
+        st.sidebar.markdown("🟢 **Connected**")
     else:
-        st.sidebar.error("🔴 Disconnected")
+        st.sidebar.markdown("🔴 **Disconnected**")
     
     st.sidebar.divider()
     
-    # Quick relay toggles with color
-    st.sidebar.subheader("Quick Controls")
-    
+    # Relay toggles: Air, O2, O3 (clustered)
     col1, col2, col3 = st.sidebar.columns(3)
     with col1:
-        o3_label = "🟢 O₃" if _sys.relay_o3_gen else "🔴 O₃"
-        if st.button(o3_label, key="sb_o3_toggle", help="Ozone Generator"):
+        air_icon = "🟢" if _sys.relay_air_comp else "⚪"
+        if st.button(f"{air_icon} Air", key="sb_air", help="Air Compressor (+10 LPM)"):
+            set_relay('air_comp', not _sys.relay_air_comp)
+            st.rerun()
+    with col2:
+        o2_icon = "🟢" if _sys.relay_o2_conc else "⚪"
+        if st.button(f"{o2_icon} O₂", key="sb_o2", help="O2 Concentrator"):
+            set_relay('o2_conc', not _sys.relay_o2_conc)
+            st.rerun()
+    with col3:
+        o3_icon = "🟢" if _sys.relay_o3_gen else "⚪"
+        if st.button(f"{o3_icon} O₃", key="sb_o3", help="Ozone Generator"):
             set_relay('ozone_gen', not _sys.relay_o3_gen)
             st.rerun()
     
-    with col2:
-        o2_label = "🟢 O₂" if _sys.relay_o2_conc else "🔴 O₂"
-        if st.button(o2_label, key="sb_o2_toggle", help="O2 Concentrator"):
-            set_relay('o2_conc', not _sys.relay_o2_conc)
-            st.rerun()
-    
-    with col3:
-        air_label = "🟢 Air" if _sys.relay_air_comp else "🔴 Air"
-        if st.button(air_label, key="sb_air_toggle", help="Air Compressor"):
-            set_relay('air_comp', not _sys.relay_air_comp)
-            st.rerun()
+    # O2 LPM manual entry (user reads from analog meter)
+    new_lpm = st.sidebar.number_input(
+        "O₂ LPM",
+        min_value=1.0,
+        max_value=15.0,
+        value=float(_sys.flow_lpm),
+        step=0.5,
+        key="sb_lpm",
+        help="Manually enter O2 flow rate from analog meter"
+    )
+    if new_lpm != _sys.flow_lpm:
+        _sys.flow_lpm = new_lpm
     
     st.sidebar.divider()
     
-    # Live metrics
-    st.sidebar.metric("Vessel O₃", f"{_sys.vessel_o3_pct:.3f} %vol")
-    st.sidebar.metric("Room O₃", f"{_sys.room_o3_ppm:.3f} ppm")
-    if _sys.vessel_temp_c > -900:
-        st.sidebar.metric("Vessel Temp", f"{_sys.vessel_temp_c:.1f} °C")
-    st.sidebar.metric("Power", f"{_sys.power_actual_pct:.1f}%")
+    # Sensor readings (display only - underlined style)
+    st.sidebar.markdown("**Readings**")
+    st.sidebar.markdown(f"<u>O₂</u>: {_sys.flow_lpm:.1f} LPM", unsafe_allow_html=True)
+    st.sidebar.markdown(f"<u>O₃</u>: {_sys.vessel_o3_pct:.3f} %vol", unsafe_allow_html=True)
+    
+    # Target O3 (calculated from current power setting)
+    target_o3 = predict_o3_from_power(_sys.power_target_pct)
+    st.sidebar.markdown(f"<u>Target %vol O₃</u>: {target_o3:.2f}", unsafe_allow_html=True)
 
 
 def render_power_tab():
-    """Render power control tab with new UI design."""
-    st.header("⚡ Power Control")
+    """Render power control tab matching BlockSI v2 mockup."""
+    st.header("BlockSI v2 Settings")
     
-    # Top row: Target, Actual, O3
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Target Power", f"{_sys.power_target_pct}%")
-    with col2:
-        delta = _sys.power_actual_pct - _sys.power_target_pct
-        st.metric("Actual Power", f"{_sys.power_actual_pct:.1f}%",
-                  delta=f"{delta:+.1f}%" if abs(delta) > 0.5 else None,
-                  delta_color="inverse" if abs(delta) > POWER_MISMATCH_THRESHOLD else "normal")
-    with col3:
-        st.metric("Vessel O₃", f"{_sys.vessel_o3_pct:.4f} %vol")
+    # =========================================================================
+    # Main layout: Graph (left) + Settings boxes (right)
+    # =========================================================================
+    graph_col, settings_col = st.columns([2, 1])
     
-    # Power mismatch warning
-    if _sys.power_error:
-        st.error(f"⚠️ Power mismatch! Target: {_sys.power_target_pct}%, "
-                f"Actual: {_sys.power_actual_pct:.1f}%")
+    with graph_col:
+        # Power slider
+        power_pct = st.slider(
+            "Power (%)",
+            min_value=0,
+            max_value=100,
+            value=_sys.power_target_pct,
+            step=1,
+            key="power_slider",
+            help="Drag to set power level",
+            label_visibility="collapsed"
+        )
+        
+        # Graduated marks (clickable presets)
+        cols = st.columns(11)
+        for i, preset in enumerate(range(0, 110, 10)):
+            with cols[i]:
+                # Highlight current target with shading effect
+                if preset == _sys.power_target_pct:
+                    if st.button(f"▼{preset}", key=f"preset_{preset}"):
+                        pass  # Already at this value
+                else:
+                    if st.button(f"{preset}", key=f"preset_{preset}"):
+                        if set_power(preset):
+                            st.rerun()
+        
+        # Power vs O3 curve
+        power_vals, o3_vals = generate_power_curve()
+        
+        fig = go.Figure()
+        
+        # Model curve (blue line)
+        fig.add_trace(go.Scatter(
+            x=power_vals, y=o3_vals,
+            mode='lines',
+            name='Model',
+            line=dict(color='blue', width=2),
+            showlegend=False
+        ))
+        
+        # Target point (black hollow circle on curve)
+        target_o3 = predict_o3_from_power(_sys.power_target_pct)
+        fig.add_trace(go.Scatter(
+            x=[_sys.power_target_pct], y=[target_o3],
+            mode='markers',
+            name='Target',
+            marker=dict(
+                color='rgba(0,0,0,0)',  # Hollow
+                size=18,
+                line=dict(color='black', width=3)
+            ),
+            showlegend=False
+        ))
+        
+        # Actual point (solid green circle)
+        actual_o3 = _sys.vessel_o3_pct
+        fig.add_trace(go.Scatter(
+            x=[_sys.power_actual_pct], y=[actual_o3],
+            mode='markers',
+            name='Actual',
+            marker=dict(color='green', size=14),
+            showlegend=False
+        ))
+        
+        fig.update_layout(
+            xaxis_title='Power',
+            yaxis_title='O₃ %vol',
+            height=350,
+            margin=dict(l=50, r=20, t=20, b=50),
+            xaxis=dict(range=[0, 105], dtick=10),
+            yaxis=dict(range=[0, max(o3_vals) * 1.1])
+        )
+        
+        st.plotly_chart(fig, key="power_curve")
     
+    with settings_col:
+        st.markdown("**Settings**")
+        
+        # LPM setting
+        new_lpm = st.number_input(
+            "LPM",
+            min_value=1.0,
+            max_value=15.0,
+            value=float(_sys.flow_lpm),
+            step=0.5,
+            key="settings_lpm",
+            help="O2 flow rate"
+        )
+        if new_lpm != _sys.flow_lpm:
+            _sys.flow_lpm = new_lpm
+            st.rerun()
+        
+        st.divider()
+        
+        # Current values for conversion
+        target_o3_pct = predict_o3_from_power(_sys.power_target_pct)
+        target_mg_per_s = o3_pct_to_mg_per_s(target_o3_pct)
+        target_g_30min = mg_per_s_to_g_at_time(target_mg_per_s, 30.0)
+        
+        # % Power input
+        new_power = st.number_input(
+            "% Power",
+            min_value=0,
+            max_value=100,
+            value=_sys.power_target_pct,
+            step=1,
+            key="settings_power",
+            help="Direct power setting"
+        )
+        if new_power != _sys.power_target_pct:
+            if set_power(new_power):
+                st.rerun()
+        
+        # % vol O3 input
+        new_o3_pct = st.number_input(
+            "% vol O₃",
+            min_value=0.0,
+            max_value=5.0,
+            value=float(target_o3_pct),
+            step=0.01,
+            format="%.2f",
+            key="settings_o3_pct",
+            help="Target O3 concentration"
+        )
+        if abs(new_o3_pct - target_o3_pct) > 0.005:
+            new_pwr = int(predict_power_from_o3(new_o3_pct))
+            if set_power(new_pwr):
+                st.rerun()
+        
+        # mg O3/s input
+        new_mg_s = st.number_input(
+            "mg O₃/s",
+            min_value=0.0,
+            max_value=10.0,
+            value=float(target_mg_per_s),
+            step=0.01,
+            format="%.2f",
+            key="settings_mg_s",
+            help="O3 mass flow rate"
+        )
+        if abs(new_mg_s - target_mg_per_s) > 0.005:
+            new_o3 = mg_per_s_to_o3_pct(new_mg_s)
+            new_pwr = int(predict_power_from_o3(new_o3))
+            if set_power(new_pwr):
+                st.rerun()
+        
+        # g O3 @ 30min input
+        new_g_30 = st.number_input(
+            "g O₃ @ 30min",
+            min_value=0.0,
+            max_value=20.0,
+            value=float(target_g_30min),
+            step=0.1,
+            format="%.2f",
+            key="settings_g_30",
+            help="Total O3 produced in 30 minutes"
+        )
+        if abs(new_g_30 - target_g_30min) > 0.05:
+            new_mg = g_at_time_to_mg_per_s(new_g_30, 30.0)
+            new_o3 = mg_per_s_to_o3_pct(new_mg)
+            new_pwr = int(predict_power_from_o3(new_o3))
+            if set_power(new_pwr):
+                st.rerun()
+    
+    # =========================================================================
+    # Emergency stop at bottom
+    # =========================================================================
     st.divider()
-    
-    # Slider with synced value
-    st.subheader("Power Setting")
-    
-    # Use system state for slider default
-    power_pct = st.slider(
-        "Power (%)",
-        min_value=0,
-        max_value=100,
-        value=_sys.power_target_pct,
-        step=1,
-        key="power_slider",
-        help="Drag to set power level"
-    )
-    
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.write(f"**Selected: {power_pct}%** ({power_pct/100*MOTOR_POT_OHMS:.0f}Ω)")
-    with col2:
-        if st.button("Apply", type="primary", key="apply_power"):
-            if set_power(power_pct):
-                st.success(f"Power set to {power_pct}%")
-            else:
-                st.error("Failed to set power")
-    
-    # Quick presets (10% intervals)
-    st.write("**Quick Set:**")
-    cols = st.columns(11)
-    for i, preset in enumerate(range(0, 110, 10)):
-        with cols[i]:
-            # Highlight current target
-            btn_type = "primary" if preset == _sys.power_target_pct else "secondary"
-            if st.button(f"{preset}", key=f"preset_{preset}"):
-                if set_power(preset):
-                    st.rerun()
-    
-    # Emergency stop
-    st.divider()
-    if st.button("🛑 EMERGENCY STOP", type="primary"):
+    if st.button("🛑 EMERGENCY STOP", type="primary", key="estop"):
         set_power(0)
+        set_relay('ozone_gen', False)
         st.rerun()
-    
-    # Power curve visualization
-    st.divider()
-    st.subheader("Power vs O₃ Curve")
-    
-    power_vals, o3_vals = generate_power_curve()
-    
-    fig = go.Figure()
-    
-    # Model curve
-    fig.add_trace(go.Scatter(
-        x=power_vals, y=o3_vals,
-        mode='lines',
-        name='Predicted O₃',
-        line=dict(color='blue', width=2)
-    ))
-    
-    # Target point (black circle)
-    target_o3 = predict_o3_from_power(_sys.power_target_pct)
-    fig.add_trace(go.Scatter(
-        x=[_sys.power_target_pct], y=[target_o3],
-        mode='markers',
-        name=f'Target ({_sys.power_target_pct}%)',
-        marker=dict(color='black', size=15, symbol='circle-open', line=dict(width=3))
-    ))
-    
-    # Actual point (green dot)
-    actual_o3 = _sys.vessel_o3_pct
-    fig.add_trace(go.Scatter(
-        x=[_sys.power_actual_pct], y=[actual_o3],
-        mode='markers',
-        name=f'Actual ({_sys.power_actual_pct:.1f}%)',
-        marker=dict(color='green', size=12, symbol='circle')
-    ))
-    
-    fig.update_layout(
-        xaxis_title='Power (%)',
-        yaxis_title='O₃ (%vol)',
-        height=300,
-        margin=dict(l=50, r=20, t=30, b=50),
-        legend=dict(orientation='h', yanchor='bottom', y=1.02)
-    )
-    
-    st.plotly_chart(fig)
-
-
-def render_relay_tab():
-    """Render relay control tab."""
-    st.header("🔌 Relay Control")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.subheader("O₃ Generator")
-        if _sys.relay_o3_gen:
-            st.success("🟢 **ON**")
-            if st.button("Turn OFF", key="relay_o3_off"):
-                set_relay('ozone_gen', False)
-                st.rerun()
-        else:
-            st.error("🔴 **OFF**")
-            if st.button("Turn ON", key="relay_o3_on"):
-                set_relay('ozone_gen', True)
-                st.rerun()
-    
-    with col2:
-        st.subheader("O₂ Concentrator")
-        if _sys.relay_o2_conc:
-            st.success("🟢 **ON**")
-            if st.button("Turn OFF", key="relay_o2_off"):
-                set_relay('o2_conc', False)
-                st.rerun()
-        else:
-            st.error("🔴 **OFF**")
-            if st.button("Turn ON", key="relay_o2_on"):
-                set_relay('o2_conc', True)
-                st.rerun()
-    
-    with col3:
-        st.subheader("Air Compressor")
-        if _sys.relay_air_comp:
-            st.success("🟢 **ON**")
-            if st.button("Turn OFF", key="relay_air_off"):
-                set_relay('air_comp', False)
-                st.rerun()
-        else:
-            st.error("🔴 **OFF**")
-            if st.button("Turn ON", key="relay_air_on"):
-                set_relay('air_comp', True)
-                st.rerun()
 
 
 def render_telemetry_tab():
@@ -781,55 +915,398 @@ def render_telemetry_tab():
 
 
 def render_calibration_tab():
-    """Render calibration interface."""
-    st.header("🔧 Calibration")
+    """
+    Render calibration interface with automated sequence.
     
-    st.markdown("""
-    **Power Calibration Sweep**
+    Sequence:
+    - Phase 1 (Air OFF): Baseline 30s @ 0%, sweep up 0→100%, sweep down 100→0%
+    - Phase 2: 15 random power levels, each with Air OFF 20s then Air ON 20s
     
-    This routine sweeps power from 0-100% and back while recording O₃ output.
-    Each step is 1% and waits for one 106-H sample (~2s) before advancing.
+    Data saved to: Data/O3PowerCalibration/YYYY-MM-DD_PowerO3Cal_{LPM}Lpm.csv
+    """
+    st.header("🔧 Power-O₃ Calibration")
     
-    **Requirements:**
-    - O₃ generator connected directly to 106-H (minimal path volume)
-    - O₂ concentrator running (for oxygen supply)
-    - Stable flow rate
-    """)
+    # === Section 1: Calibration Controls ===
+    col1, col2 = st.columns([2, 1])
     
-    if _sys.calibration_active:
-        st.warning("Calibration in progress...")
-        if st.button("Stop Calibration"):
-            send_command("calibrate_stop")
-            _sys.calibration_active = False
-            st.rerun()
-    else:
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Start Calibration Sweep", type="primary"):
-                resp = send_command("calibrate_start")
-                if resp and 'OK' in resp:
-                    _sys.calibration_active = True
-                    st.success("Calibration started")
-                else:
-                    st.error("Failed to start calibration")
+    with col1:
+        st.markdown("""
+        **Automated Calibration Sequence** (~17 min)
+        1. **Baseline**: 30s at 0% power (Air OFF)
+        2. **Sweep Up**: 0→100% in 1% steps (Air OFF)
+        3. **Sweep Down**: 100→0% in 1% steps (Air OFF)
+        4. **Random Pairs**: 15 random power levels × (Air OFF 20s + Air ON 20s)
+        """)
     
-    # Show calibration data if available
-    if len(_sys.calibration_data) > 0:
-        st.subheader("Calibration Results")
-        cal_df = pd.DataFrame(_sys.calibration_data, columns=['Power (%)', 'O₃ (%vol)'])
+    with col2:
+        st.info(f"**O₂ LPM**: {_sys.flow_lpm:.1f}")
+        if _sys.relay_air_comp:
+            total_lpm = _sys.flow_lpm + AIR_COMP_LPM
+            st.info(f"**Air ON** → Total: {total_lpm:.1f} LPM")
+    
+    # Start/Stop buttons
+    if _sys.cal_active:
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            if st.button("⏹ Stop Calibration", type="secondary"):
+                stop_calibration()
+                st.rerun()
         
+        # Progress display
+        with col_b:
+            phase_names = {
+                'baseline': '⏳ Baseline (0% power)',
+                'sweep_up': '📈 Sweep Up (0→100%)',
+                'sweep_down': '📉 Sweep Down (100→0%)',
+                'random_pairs': '🎲 Random Power Pairs'
+            }
+            phase_str = phase_names.get(_sys.cal_phase, _sys.cal_phase or 'Starting...')
+            st.progress(_sys.cal_phase_progress / 100, text=f"{phase_str}: {_sys.cal_phase_progress:.0f}%")
+        
+        # Show current state
+        st.markdown(f"""
+        | Power | O₃ | Air | Samples |
+        |-------|-----|-----|---------|
+        | {_sys.cal_current_power}% | {_sys.vessel_o3_pct:.2f}% | {'ON' if _sys.cal_air_state else 'OFF'} | {len(_sys.cal_data)} |
+        """)
+        
+        if _sys.cal_phase == 'random_pairs':
+            st.caption(f"Random point {_sys.cal_random_idx + 1}/{CAL_NUM_RANDOM_POINTS}: {_sys.cal_random_powers[_sys.cal_random_idx] if _sys.cal_random_idx < len(_sys.cal_random_powers) else '-'}%")
+    else:
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("▶ Start Calibration", type="primary"):
+                if not _sys.connected:
+                    st.error("Not connected to ESP32")
+                elif not _sys.relay_o2_conc:
+                    st.warning("O₂ Concentrator should be ON")
+                else:
+                    start_calibration()
+                    st.rerun()
+        with col_b:
+            if st.button("📊 Fit Model from Files"):
+                fit_unified_model()
+    
+    st.divider()
+    
+    # === Section 2: Existing Calibration Files ===
+    st.subheader("📁 Calibration Files")
+    cal_files = list_calibration_files()
+    
+    if cal_files:
+        for lpm, files in sorted(cal_files.items()):
+            with st.expander(f"O₂ @ {lpm} LPM ({len(files)} files)"):
+                for f in files:
+                    st.text(f"  {os.path.basename(f)}")
+    else:
+        st.caption("No calibration files found in Data/O3PowerCalibration/")
+    
+    # === Section 3: Current Session Data ===
+    if _sys.cal_data:
+        st.subheader("Current Calibration Data")
+        cal_df = pd.DataFrame(_sys.cal_data)
+        
+        # Plot Power vs O3 with Air state color coding
         fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=cal_df['Power (%)'], y=cal_df['O₃ (%vol)'],
-            mode='markers+lines',
-            name='Measured'
-        ))
+        
+        # Air OFF points
+        air_off = cal_df[cal_df['air_comp_on'] == False]
+        if len(air_off) > 0:
+            fig.add_trace(go.Scatter(
+                x=air_off['power_pct'], y=air_off['o3_pct'],
+                mode='markers',
+                name='Air OFF',
+                marker=dict(color='blue', size=6)
+            ))
+        
+        # Air ON points
+        air_on = cal_df[cal_df['air_comp_on'] == True]
+        if len(air_on) > 0:
+            fig.add_trace(go.Scatter(
+                x=air_on['power_pct'], y=air_on['o3_pct'],
+                mode='markers',
+                name='Air ON',
+                marker=dict(color='orange', size=6)
+            ))
+        
         fig.update_layout(
             xaxis_title='Power (%)',
             yaxis_title='O₃ (%vol)',
-            height=400
+            height=350,
+            showlegend=True
         )
         st.plotly_chart(fig)
+        
+        with st.expander("Raw Data"):
+            st.dataframe(cal_df.tail(20))
+
+
+def list_calibration_files():
+    """
+    List calibration files grouped by O2 LPM setting.
+    Returns: {lpm: [filepath, ...], ...}
+    """
+    files_by_lpm = {}
+    if not os.path.exists(CALIBRATION_DIR):
+        return files_by_lpm
+    
+    import re
+    for fname in os.listdir(CALIBRATION_DIR):
+        if fname.endswith('.csv') and 'PowerO3Cal' in fname:
+            # Extract LPM from filename: YYYY-MM-DD_PowerO3Cal_{LPM}Lpm.csv
+            match = re.search(r'_(\d+(?:\.\d+)?)Lpm\.csv$', fname)
+            if match:
+                lpm = float(match.group(1))
+                if lpm not in files_by_lpm:
+                    files_by_lpm[lpm] = []
+                files_by_lpm[lpm].append(os.path.join(CALIBRATION_DIR, fname))
+    
+    return files_by_lpm
+
+
+def start_calibration():
+    """Initialize and start calibration sequence."""
+    _sys.cal_active = True
+    _sys.cal_phase = 'baseline'
+    _sys.cal_phase_progress = 0.0
+    _sys.cal_current_power = 0
+    _sys.cal_air_state = False
+    _sys.cal_start_time = time.time()
+    _sys.cal_data = []
+    _sys.cal_o2_lpm = _sys.flow_lpm
+    
+    # Generate random power levels for phase 2 (avoid extremes, spread evenly)
+    np.random.seed(int(time.time()))
+    _sys.cal_random_powers = sorted(np.random.randint(5, 96, CAL_NUM_RANDOM_POINTS).tolist())
+    _sys.cal_random_idx = 0
+    
+    # Ensure Air is OFF at start
+    send_command("relay_set,air_comp,0")
+    _sys.cal_air_state = False
+    
+    # Set power to 0
+    send_command("power_set:0")
+    
+    # Initialize calibration timing in session state
+    if 'cal_step_start' not in st.session_state:
+        st.session_state['cal_step_start'] = time.time()
+    st.session_state['cal_step_start'] = time.time()
+
+
+def stop_calibration():
+    """Stop calibration and save data."""
+    _sys.cal_active = False
+    
+    # Reset to safe state
+    send_command("power_set:0")
+    send_command("relay_set,air_comp,0")
+    
+    # Save data if we have any
+    if _sys.cal_data:
+        save_calibration_data()
+    
+    _sys.cal_phase = None
+    _sys.cal_data = []
+
+
+def save_calibration_data():
+    """Save calibration data to CSV file."""
+    if not _sys.cal_data:
+        return
+    
+    # Filename: YYYY-MM-DD_PowerO3Cal_{LPM}Lpm.csv
+    date_str = datetime.now().strftime('%Y-%m-%d')
+    lpm_str = f"{_sys.cal_o2_lpm:.0f}" if _sys.cal_o2_lpm == int(_sys.cal_o2_lpm) else f"{_sys.cal_o2_lpm:.1f}"
+    filename = f"{date_str}_PowerO3Cal_{lpm_str}Lpm.csv"
+    filepath = os.path.join(CALIBRATION_DIR, filename)
+    
+    # Check for existing file and add suffix if needed
+    if os.path.exists(filepath):
+        for i in range(2, 100):
+            filename = f"{date_str}_PowerO3Cal_{lpm_str}Lpm_{i}.csv"
+            filepath = os.path.join(CALIBRATION_DIR, filename)
+            if not os.path.exists(filepath):
+                break
+    
+    df = pd.DataFrame(_sys.cal_data)
+    df.to_csv(filepath, index=False)
+    st.success(f"Saved calibration data to {filename}")
+
+
+def calibration_step():
+    """
+    Execute one step of the calibration sequence.
+    Called from the main update loop during calibration.
+    """
+    if not _sys.cal_active:
+        return
+    
+    # Check if enough time has passed for current step
+    if 'cal_step_start' not in st.session_state:
+        st.session_state['cal_step_start'] = time.time()
+    
+    elapsed = time.time() - st.session_state['cal_step_start']
+    
+    if _sys.cal_phase == 'baseline':
+        # Wait for baseline duration
+        _sys.cal_phase_progress = min(100, (elapsed / CAL_BASELINE_DURATION_S) * 100)
+        
+        if elapsed >= CAL_STEP_DURATION_S:  # Record sample periodically
+            record_calibration_sample()
+            st.session_state['cal_step_start'] = time.time()
+        
+        if elapsed >= CAL_BASELINE_DURATION_S:
+            # Move to sweep up
+            _sys.cal_phase = 'sweep_up'
+            _sys.cal_current_power = 0
+            st.session_state['cal_step_start'] = time.time()
+            send_command("power_set:0")
+    
+    elif _sys.cal_phase == 'sweep_up':
+        _sys.cal_phase_progress = _sys.cal_current_power
+        
+        if elapsed >= CAL_STEP_DURATION_S:
+            record_calibration_sample()
+            
+            if _sys.cal_current_power < 100:
+                _sys.cal_current_power += 1
+                send_command(f"power_set:{_sys.cal_current_power}")
+            else:
+                # Move to sweep down
+                _sys.cal_phase = 'sweep_down'
+                _sys.cal_current_power = 100
+            
+            st.session_state['cal_step_start'] = time.time()
+    
+    elif _sys.cal_phase == 'sweep_down':
+        _sys.cal_phase_progress = 100 - _sys.cal_current_power
+        
+        if elapsed >= CAL_STEP_DURATION_S:
+            record_calibration_sample()
+            
+            if _sys.cal_current_power > 0:
+                _sys.cal_current_power -= 1
+                send_command(f"power_set:{_sys.cal_current_power}")
+            else:
+                # Move to random pairs
+                _sys.cal_phase = 'random_pairs'
+                _sys.cal_random_idx = 0
+                _sys.cal_air_state = False
+                st.session_state['cal_step_start'] = time.time()
+                if _sys.cal_random_powers:
+                    _sys.cal_current_power = _sys.cal_random_powers[0]
+                    send_command(f"power_set:{_sys.cal_current_power}")
+            
+            st.session_state['cal_step_start'] = time.time()
+    
+    elif _sys.cal_phase == 'random_pairs':
+        # Calculate overall progress
+        total_steps = CAL_NUM_RANDOM_POINTS * 2  # Each point has Air OFF and Air ON
+        current_step = _sys.cal_random_idx * 2 + (1 if _sys.cal_air_state else 0)
+        _sys.cal_phase_progress = (current_step / total_steps) * 100
+        
+        if elapsed >= CAL_AIR_DWELL_TIME_S:
+            record_calibration_sample()
+            
+            if not _sys.cal_air_state:
+                # Was Air OFF, switch to Air ON
+                _sys.cal_air_state = True
+                send_command("relay_set,air_comp,1")
+            else:
+                # Was Air ON, move to next power level
+                _sys.cal_air_state = False
+                send_command("relay_set,air_comp,0")
+                _sys.cal_random_idx += 1
+                
+                if _sys.cal_random_idx >= len(_sys.cal_random_powers):
+                    # Calibration complete!
+                    stop_calibration()
+                    st.success("✅ Calibration complete!")
+                    return
+                else:
+                    _sys.cal_current_power = _sys.cal_random_powers[_sys.cal_random_idx]
+                    send_command(f"power_set:{_sys.cal_current_power}")
+            
+            st.session_state['cal_step_start'] = time.time()
+
+
+def record_calibration_sample():
+    """Record current state as a calibration sample."""
+    total_lpm = _sys.cal_o2_lpm + (AIR_COMP_LPM if _sys.cal_air_state else 0)
+    o2_conc = (_sys.cal_o2_lpm * 0.93 + (AIR_COMP_LPM * 0.21 if _sys.cal_air_state else 0)) / total_lpm
+    
+    sample = {
+        'timestamp': datetime.now().isoformat(),
+        'power_pct': _sys.cal_current_power,
+        'o3_pct': _sys.vessel_o3_pct,
+        'o2_lpm': _sys.cal_o2_lpm,
+        'air_comp_on': _sys.cal_air_state,
+        'total_lpm': total_lpm,
+        'o2_concentration_pct': o2_conc * 100,
+        'cell_temp_c': _sys.cell_temp_c,
+        'phase': _sys.cal_phase
+    }
+    _sys.cal_data.append(sample)
+
+
+def fit_unified_model():
+    """
+    Fit a unified O3 model from all calibration files.
+    Model: O3_pct = f(power, total_lpm, o2_concentration)
+    """
+    cal_files = list_calibration_files()
+    if not cal_files:
+        st.error("No calibration files found")
+        return
+    
+    # Load all files
+    all_data = []
+    for lpm, files in cal_files.items():
+        if len(files) > 1:
+            # Multiple files at same LPM - use most recent
+            files = sorted(files, reverse=True)
+            st.info(f"Using most recent file for {lpm} LPM: {os.path.basename(files[0])}")
+        
+        for f in files[:1]:  # Only use first (most recent)
+            try:
+                df = pd.read_csv(f)
+                all_data.append(df)
+            except Exception as e:
+                st.warning(f"Error loading {f}: {e}")
+    
+    if not all_data:
+        st.error("No valid data loaded")
+        return
+    
+    combined = pd.concat(all_data, ignore_index=True)
+    st.success(f"Loaded {len(combined)} samples from {len(all_data)} files")
+    
+    # For now, just show summary - full model fitting can be added later
+    st.subheader("Data Summary")
+    
+    # Group by Air state and show curves
+    fig = go.Figure()
+    
+    for air_state in [False, True]:
+        subset = combined[combined['air_comp_on'] == air_state]
+        if len(subset) > 0:
+            # Average O3 at each power level
+            avg = subset.groupby('power_pct')['o3_pct'].mean().reset_index()
+            fig.add_trace(go.Scatter(
+                x=avg['power_pct'], y=avg['o3_pct'],
+                mode='lines+markers',
+                name=f"Air {'ON' if air_state else 'OFF'}"
+            ))
+    
+    fig.update_layout(
+        xaxis_title='Power (%)',
+        yaxis_title='O₃ (%vol)',
+        height=400
+    )
+    st.plotly_chart(fig)
+    
+    # TODO: Fit sigmoid or piecewise model and save to MODEL_DIR
+    st.info("Full model fitting coming soon - will save to Model/O3Power/")
 
 
 def render_debug_tab():
@@ -882,6 +1359,10 @@ def main():
     start_receiver(args.port)
     process_queued_data()
     
+    # Run calibration step if active
+    if _sys.cal_active:
+        calibration_step()
+    
     # Auto-refresh
     try:
         from streamlit_autorefresh import st_autorefresh
@@ -891,19 +1372,17 @@ def main():
     
     render_sidebar()
     
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "⚡ Power", "🔌 Relays", "📊 Telemetry", "🔧 Calibration", "🐛 Debug"
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "⚡ Power", "📊 Telemetry", "🔧 Calibration", "🐛 Debug"
     ])
     
     with tab1:
         render_power_tab()
     with tab2:
-        render_relay_tab()
-    with tab3:
         render_telemetry_tab()
-    with tab4:
+    with tab3:
         render_calibration_tab()
-    with tab5:
+    with tab4:
         render_debug_tab()
 
 

@@ -51,6 +51,9 @@
 #include "motor_pot.h"
 #include "blocksi_state.h"
 #include "power_calibration.h"
+#include "sequence_runner.h"
+#include "seq_power_cal.h"
+#include "seq_airflow_val.h"
 
 static const char *TAG = "BLOCKSI";
 
@@ -754,6 +757,104 @@ static bool lan_command_handler(const char *cmd, const char *args,
         return true;
     
     // =========================================================================
+    // Autonomous sequence commands
+    // =========================================================================
+    } else if (strcmp(cmd, "sequence_start") == 0) {
+        if (!args) {
+            snprintf(response, response_size, "missing_args:need_type");
+            return false;
+        }
+        
+        // Parse type and optional params: "cal,4.0" → type="cal", params="4.0"
+        char seq_type[16] = {0};
+        const char *seq_params = NULL;
+        
+        // Find first comma to split type from params
+        const char *comma = strchr(args, ',');
+        if (comma) {
+            size_t type_len = comma - args;
+            if (type_len >= sizeof(seq_type)) type_len = sizeof(seq_type) - 1;
+            strncpy(seq_type, args, type_len);
+            seq_type[type_len] = '\0';
+            seq_params = comma + 1;
+        } else {
+            strncpy(seq_type, args, sizeof(seq_type) - 1);
+        }
+        
+        esp_err_t ret = sequence_runner_start(seq_type, seq_params);
+        if (ret == ESP_OK) {
+            snprintf(response, response_size, "type=%s,status=started", seq_type);
+            return true;
+        } else if (ret == ESP_ERR_NOT_FOUND) {
+            snprintf(response, response_size, "unknown_type=%s", seq_type);
+        } else if (ret == ESP_ERR_INVALID_STATE) {
+            snprintf(response, response_size, "busy_or_prereq_fail");
+        } else {
+            snprintf(response, response_size, "failed=%s", esp_err_to_name(ret));
+        }
+        return false;
+        
+    } else if (strcmp(cmd, "sequence_stop") == 0) {
+        esp_err_t ret = sequence_runner_stop();
+        if (ret == ESP_OK) {
+            snprintf(response, response_size, "stopping");
+            return true;
+        }
+        snprintf(response, response_size, "not_active");
+        return false;
+        
+    } else if (strcmp(cmd, "sequence_status") == 0) {
+        sequence_status_t status;
+        sequence_runner_get_status(&status);
+        
+        const char *state_names[] = {"idle", "running", "stopping", "complete", "error"};
+        int state_idx = (int)status.state;
+        if (state_idx < 0 || state_idx > 4) state_idx = 0;
+        
+        snprintf(response, response_size,
+                 "state=%s,type=%s,phase=%s,progress=%.1f,power=%u,air=%d,elapsed=%.1f",
+                 state_names[state_idx],
+                 status.type_name,
+                 status.phase_name,
+                 status.progress_pct,
+                 status.power_pct,
+                 status.air_comp ? 1 : 0,
+                 status.elapsed_s);
+        return true;
+    
+    } else if (strcmp(cmd, "sequence_confirm") == 0) {
+        if (!args) {
+            snprintf(response, response_size, "missing_args:need_prompt_id");
+            return false;
+        }
+        
+        // Parse: "prompt_id[,value]" 
+        char confirm_id[24] = {0};
+        const char *confirm_value = NULL;
+        
+        const char *comma = strchr(args, ',');
+        if (comma) {
+            size_t id_len = comma - args;
+            if (id_len >= sizeof(confirm_id)) id_len = sizeof(confirm_id) - 1;
+            strncpy(confirm_id, args, id_len);
+            confirm_id[id_len] = '\0';
+            confirm_value = comma + 1;
+        } else {
+            strncpy(confirm_id, args, sizeof(confirm_id) - 1);
+        }
+        
+        esp_err_t ret = sequence_runner_provide_confirmation(confirm_id, confirm_value);
+        if (ret == ESP_OK) {
+            snprintf(response, response_size, "confirmed=%s", confirm_id);
+            return true;
+        } else if (ret == ESP_ERR_INVALID_STATE) {
+            snprintf(response, response_size, "no_prompt_pending");
+        } else {
+            snprintf(response, response_size, "confirm_failed=%s", esp_err_to_name(ret));
+        }
+        return false;
+    
+    // =========================================================================
     // Unknown command
     // =========================================================================
     } else {
@@ -982,6 +1083,19 @@ void app_main(void)
     // Initialize power calibration module
     ESP_LOGI(TAG, "Initializing power calibration...");
     power_calibration_init();
+    
+    // Initialize sequence runner framework and register sequences
+    ESP_LOGI(TAG, "Initializing sequence runner...");
+    if (sequence_runner_init() == ESP_OK) {
+        sequence_runner_register(seq_power_cal_get_impl());
+        sequence_runner_register(seq_airflow_val_get_impl());
+        // Future: register additional sequences here
+        // sequence_runner_register(seq_fill_model_get_impl());
+        // sequence_runner_register(seq_decay_test_get_impl());
+        // sequence_runner_register(seq_sterilize_get_impl());
+    } else {
+        ESP_LOGW(TAG, "Sequence runner initialization failed");
+    }
     
     // Initialize WiFi and block until connected
     ESP_LOGI(TAG, "Initializing WiFi...");

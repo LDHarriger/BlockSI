@@ -16,6 +16,9 @@ idf_component_register(
         "dosimetry.c"
         "blocksi_state.c"           # Unified system state management
         "power_calibration_v2.c"    # Power calibration sweep (motor pot version)
+        "sequence_runner.c"         # Generic autonomous sequence framework
+        "seq_power_cal.c"           # Sequence: Power-O3 calibration (4-phase)
+        "seq_airflow_val.c"         # Sequence: Airflow/concentration validation
     INCLUDE_DIRS 
         "."
     REQUIRES 

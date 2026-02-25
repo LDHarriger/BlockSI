@@ -22,7 +22,7 @@ From `main/CMakeLists.txt` SRCS:
 
 | File | Purpose |
 |------|---------|
-| `main.c` | Entry point, WiFi, Golioth, LAN command handler (28 commands) |
+| `main.c` | Entry point, WiFi, Golioth, LAN command handler (32 commands) |
 | `lan_client.c` / `.h` | TCP client -- connects to PC on port 5000.  Sends DATA telemetry, receives CMD, sends RSP |
 | `relay_control.c` / `.h` | 3x SSR control (ozone_gen, o2_conc, air_comp) -- active-high |
 | `motor_pot.c` / `.h` | PRM162 motorized potentiometer driver via DRV8833 H-bridge + ADC feedback |
@@ -36,6 +36,9 @@ From `main/CMakeLists.txt` SRCS:
 | `blocksi_state.c` / `.h` | Unified system state management |
 | `power_calibration_v2.c` | Motor pot version of power calibration sweep |
 | `power_calibration.h` | Calibration API: `_init()`, `_start()`, `_stop()`, `_get_status()` |
+| `sequence_runner.c` / `.h` | Generic sequence framework: lifecycle, SEQ streaming, interactive prompts |
+| `seq_power_cal.c` / `.h` | Sequence #1: Power-O3 calibration (4-phase, type: `cal`) |
+| `seq_airflow_val.c` / `.h` | Sequence #2: Airflow/concentration validation (5-phase, type: `validate`) |
 | `blocksi_pins.h` | **All GPIO pin assignments** -- check before adding hardware |
 
 ## Pin Assignments (from `blocksi_pins.h`)
@@ -58,8 +61,8 @@ Tag convention: `static const char *TAG = "MODULE_NAME";`
 
 ## LAN Command Handler
 
-Located in `main.c` `lan_command_handler()` starting at ~line 350.
-28 commands across 7 categories.  Full specification in
+Located in `main.c` `lan_command_handler()` starting at ~line 380.
+32 commands across 8 categories.  Full specification in
 `.github/copilot/interface_contract.md`.
 
 ## Power Calibration (`power_calibration_v2.c`)  `[IMPLEMENTED]`
@@ -91,10 +94,14 @@ on 2026-02-24.  Only the motor pot version (`_v2.c`) remains.
 
 ## Pending Work (ESP32-Specific)
 
-- `[DECIDED]` **ESP32-owned sequences**: Extend firmware to run full calibration
-  sequences autonomously (baseline + sweep up + sweep down + random pairs).
-  Stream `SEQ,...` progress lines to PC.  PC sends `CMD,sequence_start,cal,...`
-  and `CMD,sequence_stop`.  See decisions_log.md entry 2026-02-24.
+- `[IMPLEMENTED]` **ESP32-owned sequences**: Generic `sequence_runner` framework
+  with `seq_power_cal.c` (4-phase calibration) and `seq_airflow_val.c` (5-phase
+  interactive validation).  LAN commands: `sequence_start`, `sequence_stop`,
+  `sequence_status`, `sequence_confirm`.  SEQ + interactive prompt streaming.
+- `[DECIDED]` **Additional sequence types**: 3 more sequences planned:
+  1. Fill model calibration (mean transit time, infer vessel volume)
+  2. O3 decay testing (fill, seal, wait, measure decay)
+  3. Sterilize batch (validate, configure, 15min sterilization, dose-based)
 - `[PROPOSED]` **Relay dropout investigation**: Root causes identified (see
   Recent Changes below). Source-tracking now implemented for ongoing monitoring.
   Monitor logs for `[src=...]` tags to catch remaining unexplained dropouts.
@@ -103,6 +110,34 @@ on 2026-02-24.  Only the motor pot version (`_v2.c`) remains.
   state across watchdog/brownout resets.
 
 ## Recent Changes (2026-02-25)
+
+### Sequence Runner Framework  `[IMPLEMENTED]`
+- Generic `sequence_runner.c/.h`: task lifecycle, SEQ streaming, mutual exclusion
+- `sequence_impl_t` interface: `prepare()`, `execute()`, `request_stop()`, `cleanup()`
+- Helper API: `seq_report_progress()`, `seq_check_stop()`, `seq_send_data()`
+- Interactive prompt support: `seq_prompt_user()` + `sequence_runner_provide_confirmation()`
+- 4 LAN commands: `sequence_start`, `sequence_stop`, `sequence_status`, `sequence_confirm`
+- Registration pattern: new sequence types add ~200 LOC each
+
+### Power-O3 Calibration Sequence (`seq_power_cal.c`)  `[IMPLEMENTED]`
+- Type name: `"cal"`, param: O2 flow LPM (default 4.0)
+- 4 phases: baseline (30s), sweep_up (0-100%), sweep_down (100-0%), random_pair (15 levels × air OFF/ON)
+- Enhanced CAL_DATA format: timestamp, power, actual, o3, o2_lpm, air_comp, total_lpm, temp, phase
+- CAL_START/CAL_COMPLETE metadata messages
+- Prerequisites: O3 gen relay ON, motor pot initialized
+- Safe cleanup: power→0%, air comp OFF on abort/completion
+
+### Airflow/Concentration Validation (`seq_airflow_val.c`)  `[IMPLEMENTED]`
+- Type name: `"validate"`, params: power_pct, o2_lpm (defaults 75%, 4.0)
+- 5 phases: prompt_vessel, prompt_direct, stabilize (60s), measure (60s), complete
+- Interactive: operator confirms L-valve routing at two points
+- New messages: `VAL_START`, `VAL_DATA`, `VAL_RESULT`
+- Reports: mean/std O3, expected O3, deviation percentage
+- Intended as pre-flight check before sterilization/decay testing
+- **Boundary note**: ESP32 sends `SEQ,prompt,<id>,<message>` with plain-text fallback.
+  Dashboard should map prompt IDs (`prompt_vessel`, `prompt_direct`) to rich UI
+  dialogs with step-by-step instructions.  See `interface_contract.md` §Sequence
+  Integration Guide for the full Dashboard responsibility matrix.
 
 ### Relay Source-Tracking  `[IMPLEMENTED]`
 - Added `relay_source_t` enum: `BOOT`, `LAN`, `RPC`, `INTERNAL`, `SEQUENCE`,

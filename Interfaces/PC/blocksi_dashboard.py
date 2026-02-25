@@ -31,7 +31,6 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 from nicegui import ui, app
 
@@ -43,10 +42,11 @@ MAX_DATA_POINTS = 500
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "Data")
+STREAM_DIR = os.path.join(DATA_DIR, "Stream")
 CALIBRATION_DIR = os.path.join(DATA_DIR, "O3PowerCalibration")
 MODEL_DIR = os.path.join(BASE_DIR, "Model", "O3Power")
 
-for _d in (DATA_DIR, CALIBRATION_DIR, MODEL_DIR):
+for _d in (DATA_DIR, STREAM_DIR, CALIBRATION_DIR, MODEL_DIR):
     os.makedirs(_d, exist_ok=True)
 
 # Power model coefficients  (O3_max = A/F + B)
@@ -170,6 +170,8 @@ class SystemState:
         self.sequence_active: bool = False
         self.sequence_name: str = ""
         self.sequence_description: str = ""
+        # Notification preference: "all", "errors", "none"
+        self.notify_level: str = "all"
         # Derived (kept in sync by update_derived)
         self.target_o3_pct: float = 0.0
         self.target_mg_per_s: float = 0.0
@@ -340,12 +342,14 @@ class TCPServer:
                             apply_telemetry(sample)
                             data_buf.append(sample)
                             csv_logger.write(sample)
+                    elif line.startswith("STATE,"):
+                        self._handle_state(line)
                     elif line.startswith("RSP,"):
                         self._handle_response(line)
         except Exception as exc:
-            log(f"TCP read error: {exc}")
+            log(f"TCP read error: {exc}", "error")
         finally:
-            log("ESP32 disconnected")
+            log("ESP32 disconnected", "warn")
             await self._close_client()
 
     def _handle_response(self, line: str) -> None:
@@ -363,6 +367,30 @@ class TCPServer:
             self._response_q.put_nowait(line)
         except asyncio.QueueFull:
             pass
+
+    def _handle_state(self, line: str) -> None:
+        """Parse STATE push from ESP32 on connect/reconnect."""
+        # STATE,ozone_gen=0,o2_conc=1,air_comp=0,power=50,flow=4.0
+        for part in line.split(","):
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            k = k.strip()
+            try:
+                if k == "ozone_gen":
+                    S.relay_o3_gen = v.strip() == "1"
+                elif k == "o2_conc":
+                    S.relay_o2_conc = v.strip() == "1"
+                elif k == "air_comp":
+                    S.relay_air_comp = v.strip() == "1"
+                elif k == "power":
+                    S.power_target_pct = int(float(v))
+                    S.update_derived()
+                elif k == "flow":
+                    S.flow_lpm = float(v)
+            except (ValueError, IndexError):
+                pass
+        log("STATE sync from ESP32")
 
     # -- sending -----------------------------------------------------------
     async def _send_raw(self, text: str) -> bool:
@@ -387,13 +415,13 @@ class TCPServer:
                 break
         if not await self._send_raw(f"CMD,{cmd}\n"):
             return None
-        log(f"-> {cmd}")
+        log(f"-> {cmd}", "send")
         try:
             resp = await asyncio.wait_for(self._response_q.get(), timeout)
-            log(f"<- {resp}")
+            log(f"<- {resp}", "recv")
             return resp
         except asyncio.TimeoutError:
-            log(f"timeout: {cmd}")
+            log(f"timeout: {cmd}", "error")
             return None
 
 
@@ -453,7 +481,7 @@ async def cmd_emergency_stop() -> None:
 class _CSVLogger:
     def __init__(self) -> None:
         self._path = os.path.join(
-            DATA_DIR, f"{datetime.now():%Y%m%d_%H%M%S}_Stream.csv"
+            STREAM_DIR, f"{datetime.now():%Y-%m-%d}_Stream.csv"
         )
         self._header = False
 
@@ -681,12 +709,23 @@ def list_calibration_files() -> dict[float, list[str]]:
 # Shared buffers / logging
 # =============================================================================
 data_buf: deque[dict] = deque(maxlen=MAX_DATA_POINTS)
-debug_log: deque[str] = deque(maxlen=200)
+debug_log: deque[tuple[str, str, str]] = deque(maxlen=200)
+# Each entry: (timestamp_str, category, message)
+# category: "send", "recv", "info", "error", "warn"
 
 
-def log(msg: str) -> None:
+def log(msg: str, cat: str = "info") -> None:
     ts = datetime.now().strftime("%H:%M:%S")
-    debug_log.appendleft(f"{ts}  {msg}")
+    debug_log.appendleft((ts, cat, msg))
+
+
+def _notify(msg: str, level: str = "positive") -> None:
+    """Show toast notification respecting user preference."""
+    if S.notify_level == "none":
+        return
+    if S.notify_level == "errors" and level == "positive":
+        return
+    ui.notify(msg, type=level, position="bottom-right", timeout=3000)
 
 
 # =============================================================================
@@ -924,15 +963,46 @@ async def index():
     # BUILD THE PAGE
     # =====================================================================
     ui.page_title("BlockSI Control")
-    ui.dark_mode(True)
+    dark = ui.dark_mode(True)
+
+    # -- Custom CSS --------------------------------------------------------
+    ui.add_head_html("""
+    <style>
+    @keyframes blink-disconnect {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.2; }
+    }
+    .conn-blink { animation: blink-disconnect 0.6s ease-in-out infinite; }
+    .conn-steady { animation: none; }
+    .sensor-card {
+      min-width: 170px; padding: 8px 12px;
+      border-radius: 6px; border-left: 3px solid;
+    }
+    .sensor-card-o3  { border-left-color: #2196F3; }
+    .sensor-card-room { border-left-color: #4CAF50; }
+    .sensor-card-temp { border-left-color: #FF9800; }
+    .sensor-card-flow { border-left-color: #9C27B0; }
+    .log-send { color: #42A5F5; }
+    .log-recv { color: #66BB6A; }
+    .log-error { color: #EF5350; }
+    .log-warn { color: #FFA726; }
+    .log-info { color: #BDBDBD; }
+    /* Enhanced slider track */
+    .power-slider .q-slider__track-container { height: 8px !important; }
+    .power-slider .q-slider__thumb { width: 24px !important; height: 24px !important; }
+    </style>
+    """)
 
     # -- LEFT DRAWER (sidebar) --------------------------------------------
     with ui.left_drawer(value=True).classes(
         "bg-dark q-pa-md"
-    ).style("width:220px") as drawer:
+    ).style("width:240px") as drawer:
         ui.label("BlockSI v2").classes("text-h6 text-weight-bold q-mb-sm")
-        conn_icon = ui.icon("circle", color="red").classes("q-mr-xs")
-        conn_label = ui.label("Disconnected").classes("text-caption")
+
+        # Connection badge
+        conn_badge = ui.badge("Disconnected", color="red").classes(
+            "q-mb-sm conn-blink"
+        )
         ui.separator().classes("q-my-sm")
 
         # Relay toggles
@@ -959,24 +1029,33 @@ async def index():
 
         ui.separator().classes("q-my-sm")
 
-        # Sensor readings
+        # Sensor reading cards
         ui.label("Readings").classes("text-subtitle2")
-        lbl_o2_read = ui.label(
-            f"O2: {S.flow_lpm:.1f} LPM"
-        ).classes("text-caption")
-        lbl_o3_read = ui.label(
-            f"O3: {S.vessel_o3_pct:.3f} %vol"
-        ).classes("text-caption")
-        lbl_tgt_o3 = ui.label(
-            f"Target: {S.target_o3_pct:.2f} %vol"
-        ).classes("text-caption")
-        lbl_room_o3 = ui.label(
-            f"Room: {S.room_o3_ppm:.3f} ppm"
-        ).classes("text-caption")
-        lbl_vtemp = ui.label("Vessel T: N/A").classes("text-caption")
-        lbl_ctemp = ui.label(
-            f"Cell T: {S.cell_temp_c:.1f} C"
-        ).classes("text-caption")
+
+        with ui.card().classes("sensor-card sensor-card-flow q-mb-xs").props("flat bordered"):
+            ui.label("O2 Flow").classes("text-caption text-grey")
+            card_flow_val = ui.label(f"{S.flow_lpm:.1f}").classes("text-h5 text-purple")
+            ui.label("LPM").classes("text-caption text-grey")
+
+        with ui.card().classes("sensor-card sensor-card-o3 q-mb-xs").props("flat bordered"):
+            ui.label("Vessel O3").classes("text-caption text-grey")
+            card_o3_val = ui.label(f"{S.vessel_o3_pct:.3f}").classes("text-h5 text-blue")
+            ui.label("%vol").classes("text-caption text-grey")
+
+        with ui.card().classes("sensor-card sensor-card-room q-mb-xs").props("flat bordered"):
+            ui.label("Room O3").classes("text-caption text-grey")
+            card_room_val = ui.label(f"{S.room_o3_ppm:.3f}").classes("text-h5 text-green")
+            ui.label("ppm").classes("text-caption text-grey")
+
+        with ui.card().classes("sensor-card sensor-card-temp q-mb-xs").props("flat bordered"):
+            ui.label("Vessel Temp").classes("text-caption text-grey")
+            card_vtemp_val = ui.label("N/A").classes("text-h5 text-orange")
+            ui.label("C").classes("text-caption text-grey")
+
+        with ui.card().classes("sensor-card sensor-card-temp q-mb-xs").props("flat bordered"):
+            ui.label("Cell Temp").classes("text-caption text-grey")
+            card_ctemp_val = ui.label(f"{S.cell_temp_c:.1f}").classes("text-h5 text-orange")
+            ui.label("C").classes("text-caption text-grey")
 
     # -- HEADER ------------------------------------------------------------
     with ui.header().classes("bg-primary items-center q-px-md"):
@@ -984,6 +1063,11 @@ async def index():
             icon="menu", on_click=lambda: drawer.toggle()
         ).props("flat dense round color=white")
         ui.label("BlockSI Control").classes("text-h6 q-ml-md")
+        ui.space()
+        ui.button(
+            icon="dark_mode",
+            on_click=lambda: dark.toggle()
+        ).props("flat dense round color=white").tooltip("Toggle dark/light")
 
     # -- TABS --------------------------------------------------------------
     with ui.column().classes("w-full q-pa-md"):
@@ -1017,6 +1101,7 @@ async def index():
             tab_telem = ui.tab("Telemetry", icon="show_chart")
             tab_cal = ui.tab("Calibration", icon="tune")
             tab_debug = ui.tab("Debug", icon="bug_report")
+            tab_settings = ui.tab("Settings", icon="settings")
 
         with ui.tab_panels(tabs, value=tab_power).classes("w-full"):
 
@@ -1032,7 +1117,7 @@ async def index():
                             min=0, max=100, step=1,
                             value=S.power_target_pct,
                             on_change=_on_power_slide,
-                        ).classes("w-full")
+                        ).classes("w-full power-slider")
 
                         # Graduated preset buttons
                         preset_btns = []
@@ -1141,11 +1226,80 @@ async def index():
                         f"Cell T: {S.cell_temp_c:.1f} C"
                     ).classes("text-body1")
 
-                telem_plot = ui.plotly(go.Figure()).classes("w-full")
+                # Skeleton placeholder (shown until first data)
+                telem_skeleton = ui.column().classes("w-full")
+                with telem_skeleton:
+                    for _ in range(2):
+                        ui.skeleton(type="rect").classes(
+                            "w-full q-mb-sm"
+                        ).style("height: 200px")
+                telem_skeleton.visible = True
 
+                # ECharts time-series (hidden until data arrives)
+                echart_o3 = ui.echart({
+                    "darkMode": True,
+                    "tooltip": {"trigger": "axis"},
+                    "legend": {"data": ["Vessel O3 (%vol)", "Room O3 (ppm)"]},
+                    "xAxis": {"type": "time", "name": "Time"},
+                    "yAxis": [
+                        {"type": "value", "name": "O3 %vol", "position": "left"},
+                        {"type": "value", "name": "Room ppm", "position": "right"},
+                    ],
+                    "series": [
+                        {"name": "Vessel O3 (%vol)", "type": "line", "smooth": True,
+                         "yAxisIndex": 0, "data": [], "showSymbol": False,
+                         "lineStyle": {"width": 2, "color": "#42A5F5"},
+                         "areaStyle": {"opacity": 0.08}},
+                        {"name": "Room O3 (ppm)", "type": "line", "smooth": True,
+                         "yAxisIndex": 1, "data": [], "showSymbol": False,
+                         "lineStyle": {"width": 2, "color": "#66BB6A"}},
+                    ],
+                    "dataZoom": [{"type": "inside"}, {"type": "slider"}],
+                }).classes("w-full").style("height: 260px")
+                echart_o3.visible = False
+
+                echart_pwr = ui.echart({
+                    "darkMode": True,
+                    "tooltip": {"trigger": "axis"},
+                    "legend": {"data": ["Power (%)", "Cell Temp (C)"]},
+                    "xAxis": {"type": "time", "name": "Time"},
+                    "yAxis": [
+                        {"type": "value", "name": "Power %", "position": "left",
+                         "max": 105},
+                        {"type": "value", "name": "C", "position": "right"},
+                    ],
+                    "series": [
+                        {"name": "Power (%)", "type": "line", "smooth": True,
+                         "yAxisIndex": 0, "data": [], "showSymbol": False,
+                         "lineStyle": {"width": 2, "color": "#FFA726"}},
+                        {"name": "Cell Temp (C)", "type": "line", "smooth": True,
+                         "yAxisIndex": 1, "data": [], "showSymbol": False,
+                         "lineStyle": {"width": 2, "color": "#EF5350"}},
+                    ],
+                    "dataZoom": [{"type": "inside"}, {"type": "slider"}],
+                }).classes("w-full").style("height: 260px")
+                echart_pwr.visible = False
+
+                # CSV export + raw data table
                 with ui.expansion(
                     "Raw data", icon="table_chart"
                 ).classes("w-full q-mt-sm"):
+                    async def _export_csv():
+                        if not data_buf:
+                            _notify("No data to export", "warning")
+                            return
+                        df = pd.DataFrame(list(data_buf))
+                        fname = f"{datetime.now():%Y-%m-%d_%H%M%S}_Export.csv"
+                        fpath = os.path.join(STREAM_DIR, fname)
+                        df.to_csv(fpath, index=False)
+                        _notify(f"Exported {len(df)} rows to {fname}")
+                        log(f"CSV export -> {fname}")
+
+                    ui.button(
+                        "Export CSV", icon="download",
+                        on_click=_export_csv,
+                    ).props("dense flat size=sm").classes("q-mb-sm")
+
                     raw_table = ui.table(
                         columns=[
                             {
@@ -1153,26 +1307,31 @@ async def index():
                                 "label": "Time",
                                 "field": "timestamp",
                                 "align": "left",
+                                "sortable": True,
                             },
                             {
                                 "name": "vessel_o3_pct",
                                 "label": "O3 %",
                                 "field": "vessel_o3_pct",
+                                "sortable": True,
                             },
                             {
                                 "name": "room_o3_ppm",
                                 "label": "Room ppm",
                                 "field": "room_o3_ppm",
+                                "sortable": True,
                             },
                             {
                                 "name": "power_actual_pct",
                                 "label": "Power %",
                                 "field": "power_actual_pct",
+                                "sortable": True,
                             },
                             {
                                 "name": "cell_temp_c",
                                 "label": "Cell C",
                                 "field": "cell_temp_c",
+                                "sortable": True,
                             },
                         ],
                         rows=[],
@@ -1183,19 +1342,45 @@ async def index():
             # CALIBRATION TAB
             # =============================================================
             with ui.tab_panel(tab_cal):
-                ui.label("Power -- O3 Calibration").classes(
+                ui.label("Power → O₃ Calibration").classes(
                     "text-h6 q-mb-sm"
                 )
-                ui.markdown(
-                    "**Sequence** (~17 min): "
-                    "1. Baseline 30 s @ 0 %  "
-                    "2. Sweep Up 0->100 %  "
-                    "3. Sweep Down 100->0 %  "
-                    "4. 15 random levels x "
-                    "(Air OFF 20 s + Air ON 20 s)"
-                )
 
-                with ui.row().classes("q-gutter-sm q-my-md"):
+                # Phase stepper (all 4 visible, current highlighted)
+                CAL_PHASES = [
+                    ("Baseline", "30 s @ 0 % power"),
+                    ("Sweep Up", "0 → 100 % in 1 % steps"),
+                    ("Sweep Down", "100 → 0 % in 1 % steps"),
+                    ("Random Pairs", "15 levels × Air OFF/ON"),
+                ]
+                cal_stepper_container = ui.row().classes(
+                    "w-full q-gutter-sm q-my-md"
+                )
+                cal_step_cards: list = []
+                with cal_stepper_container:
+                    for i, (phase_name, phase_desc) in enumerate(
+                        CAL_PHASES
+                    ):
+                        with ui.card().classes(
+                            "cal-step-card"
+                        ).style(
+                            "flex: 1; min-width: 150px; opacity: 0.4"
+                        ) as step_card:
+                            with ui.row().classes(
+                                "items-center no-wrap q-mb-xs"
+                            ):
+                                ui.badge(
+                                    str(i + 1), color="primary"
+                                ).props("rounded")
+                                ui.label(phase_name).classes(
+                                    "text-subtitle2"
+                                )
+                            ui.label(phase_desc).classes(
+                                "text-caption text-grey"
+                            )
+                        cal_step_cards.append(step_card)
+
+                with ui.row().classes("q-gutter-sm q-my-sm"):
                     cal_start_btn = ui.button(
                         "Start", icon="play_arrow",
                         on_click=_cal_start, color="primary",
@@ -1213,7 +1398,7 @@ async def index():
                 ).classes("q-mb-sm")
                 cal_info_lbl = ui.label("").classes("text-caption")
 
-                # Live scatter
+                # Live scatter (Plotly kept)
                 cal_plot = ui.plotly(go.Figure()).classes(
                     "w-full q-mt-sm"
                 )
@@ -1233,7 +1418,7 @@ async def index():
                         else:
                             for lpm in sorted(files):
                                 with ui.expansion(
-                                    f"O2 @ {lpm} LPM  "
+                                    f"O₂ @ {lpm} LPM  "
                                     f"({len(files[lpm])} files)"
                                 ):
                                     for fp in sorted(files[lpm]):
@@ -1266,17 +1451,51 @@ async def index():
                 dbg_state_lbl = ui.code("").classes("w-full")
 
                 ui.label("Log").classes("text-subtitle2 q-mt-md")
-                dbg_log_area = ui.log(max_lines=100).classes(
-                    "w-full h-64"
+                dbg_log_html = ui.html("").classes(
+                    "w-full"
+                ).style(
+                    "max-height: 320px; overflow-y: auto; "
+                    "font-family: monospace; font-size: 0.82rem; "
+                    "background: var(--q-dark-page, #1d1d1d); "
+                    "border-radius: 8px; padding: 8px"
                 )
+
+            # =============================================================
+            # SETTINGS TAB
+            # =============================================================
+            with ui.tab_panel(tab_settings):
+                ui.label("Settings").classes("text-h6 q-mb-md")
+                with ui.card().classes("q-pa-md"):
+                    ui.label("Toast Notifications").classes(
+                        "text-subtitle2 q-mb-sm"
+                    )
+                    ui.label(
+                        "Control which notifications appear as pop-ups"
+                    ).classes("text-caption text-grey q-mb-sm")
+                    notify_select = ui.select(
+                        options=["all", "errors", "none"],
+                        value=S.notify_level,
+                        label="Notification level",
+                    ).classes("w-48")
+
+                    def _on_notify_change(e):
+                        S.notify_level = e.value
+                        log(
+                            f"Notification level -> {e.value}",
+                            cat="info",
+                        )
+
+                    notify_select.on("update:model-value",
+                                     _on_notify_change)
 
     # =====================================================================
     # PERIODIC UI REFRESH  (runs every 1 s via NiceGUI timer)
     # =====================================================================
     _relay_ts: float = 0.0
+    _echart_has_data: bool = False
 
     async def _tick() -> None:
-        nonlocal _updating, _relay_ts
+        nonlocal _updating, _relay_ts, _echart_has_data
 
         # -- run calibration step ------------------------------------------
         if S.cal_active:
@@ -1288,12 +1507,26 @@ async def index():
             _relay_ts = time.time()
 
         # -- update sidebar status -----------------------------------------
-        conn_icon.props(
-            f'color={"green" if S.connected else "red"}'
-        )
-        conn_label.text = (
-            "Connected" if S.connected else "Disconnected"
-        )
+        if S.connected:
+            conn_badge.text = "Connected"
+            conn_badge.props('color="green"')
+            conn_badge._classes = [
+                c for c in conn_badge._classes
+                if c != "blink-disconnect"
+            ]
+            if "conn-steady" not in conn_badge._classes:
+                conn_badge._classes.append("conn-steady")
+        else:
+            conn_badge.text = "Disconnected"
+            conn_badge.props('color="red"')
+            conn_badge._classes = [
+                c for c in conn_badge._classes
+                if c != "conn-steady"
+            ]
+            if "blink-disconnect" not in conn_badge._classes:
+                conn_badge._classes.append("blink-disconnect")
+        conn_badge.update()
+
         btn_air.props(
             f'color={"green" if S.relay_air_comp else "grey"}'
         )
@@ -1304,16 +1537,15 @@ async def index():
             f'color={"green" if S.relay_o3_gen else "grey"}'
         )
 
-        lbl_o2_read.text = f"O2: {S.flow_lpm:.1f} LPM"
-        lbl_o3_read.text = f"O3: {S.vessel_o3_pct:.3f} %vol"
-        lbl_tgt_o3.text = f"Target: {S.target_o3_pct:.2f} %vol"
-        lbl_room_o3.text = f"Room: {S.room_o3_ppm:.3f} ppm"
-        lbl_vtemp.text = (
-            f"Vessel T: {S.vessel_temp_c:.1f} C"
+        card_flow_val.text = f"{S.flow_lpm:.1f}"
+        card_o3_val.text = f"{S.vessel_o3_pct:.3f}"
+        card_room_val.text = f"{S.room_o3_ppm:.3f}"
+        card_vtemp_val.text = (
+            f"{S.vessel_temp_c:.1f}"
             if S.vessel_temp_c > -900
-            else "Vessel T: N/A"
+            else "N/A"
         )
-        lbl_ctemp.text = f"Cell T: {S.cell_temp_c:.1f} C"
+        card_ctemp_val.text = f"{S.cell_temp_c:.1f}"
 
         # -- sync power slider & inputs to SystemState -----------------
         if not _updating:
@@ -1363,9 +1595,8 @@ async def index():
         # -- power curve (target + actual markers) -------------------------
         _update_power_curve()
 
-        # -- telemetry charts ----------------------------------------------
+        # -- telemetry charts (ECharts) ------------------------------------
         if data_buf:
-            df = pd.DataFrame(list(data_buf))
             met_o3.text = f"Vessel O3: {S.vessel_o3_pct:.4f} %vol"
             met_room.text = f"Room O3: {S.room_o3_ppm:.3f} ppm"
             met_vt.text = (
@@ -1375,69 +1606,36 @@ async def index():
             )
             met_ct.text = f"Cell T: {S.cell_temp_c:.1f} C"
 
-            fig = make_subplots(
-                rows=2, cols=1,
-                subplot_titles=(
-                    "Ozone Concentration", "Power & Temperature"
-                ),
-                vertical_spacing=0.15,
-                specs=[
-                    [{"secondary_y": True}],
-                    [{"secondary_y": True}],
-                ],
-            )
-            ts = df["timestamp"]
-            fig.add_trace(
-                go.Scatter(
-                    x=ts, y=df["vessel_o3_pct"],
-                    name="Vessel O3 (%vol)",
-                    line=dict(color="royalblue", width=2),
-                ),
-                row=1, col=1, secondary_y=False,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=ts, y=df["room_o3_ppm"],
-                    name="Room O3 (ppm)",
-                    line=dict(color="limegreen", width=2),
-                ),
-                row=1, col=1, secondary_y=True,
-            )
-            if "power_actual_pct" in df.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=ts, y=df["power_actual_pct"],
-                        name="Power (%)",
-                        line=dict(color="orange", width=2),
-                    ),
-                    row=2, col=1, secondary_y=False,
+            # Show charts, hide skeleton on first data
+            if not _echart_has_data:
+                telem_skeleton.visible = False
+                echart_o3.visible = True
+                echart_pwr.visible = True
+                _echart_has_data = True
+
+            # Build data arrays for ECharts
+            o3_data = []
+            room_data = []
+            pwr_data = []
+            temp_data = []
+            for s in data_buf:
+                ts_ms = int(s["timestamp"].timestamp() * 1000)
+                o3_data.append([ts_ms, s["vessel_o3_pct"]])
+                room_data.append([ts_ms, s["room_o3_ppm"]])
+                pwr_data.append(
+                    [ts_ms, s.get("power_actual_pct", 0)]
                 )
-            fig.add_trace(
-                go.Scatter(
-                    x=ts, y=df["cell_temp_c"],
-                    name="Cell Temp (C)",
-                    line=dict(color="red", width=2),
-                ),
-                row=2, col=1, secondary_y=True,
-            )
-            fig.update_yaxes(
-                title_text="O3 %vol", row=1, col=1, secondary_y=False
-            )
-            fig.update_yaxes(
-                title_text="Room ppm", row=1, col=1, secondary_y=True
-            )
-            fig.update_yaxes(
-                title_text="Power %", row=2, col=1, secondary_y=False
-            )
-            fig.update_yaxes(
-                title_text="C", row=2, col=1, secondary_y=True
-            )
-            fig.update_layout(
-                height=500, showlegend=True,
-                margin=dict(l=50, r=30, t=30, b=30),
-            )
-            telem_plot.figure = fig
-            telem_plot.update()
+                temp_data.append(
+                    [ts_ms, s.get("cell_temp_c", 0)]
+                )
+
+            echart_o3.options["series"][0]["data"] = o3_data
+            echart_o3.options["series"][1]["data"] = room_data
+            echart_o3.update()
+
+            echart_pwr.options["series"][0]["data"] = pwr_data
+            echart_pwr.options["series"][1]["data"] = temp_data
+            echart_pwr.update()
 
             # raw table (latest 20)
             rows = []
@@ -1464,8 +1662,8 @@ async def index():
         if S.cal_active:
             phase_labels = {
                 "baseline": "Baseline (0 %)",
-                "sweep_up": "Sweep Up (0->100 %)",
-                "sweep_down": "Sweep Down (100->0 %)",
+                "sweep_up": "Sweep Up (0→100 %)",
+                "sweep_down": "Sweep Down (100→0 %)",
                 "random_pairs": "Random Pairs",
             }
             cal_phase_lbl.text = (
@@ -1490,10 +1688,29 @@ async def index():
                     f"{S.cal_random_powers[idx]}%)"
                 )
             cal_info_lbl.text = info
+
+            # Highlight active step card
+            phase_idx = {
+                "baseline": 0, "sweep_up": 1,
+                "sweep_down": 2, "random_pairs": 3,
+            }
+            active_i = phase_idx.get(S.cal_phase, -1)
+            for i, sc in enumerate(cal_step_cards):
+                if i < active_i:
+                    sc.style("opacity: 0.6; border-left: 3px solid green")
+                elif i == active_i:
+                    sc.style(
+                        "opacity: 1.0; border-left: 3px solid #42A5F5; "
+                        "box-shadow: 0 0 8px rgba(66,165,245,0.4)"
+                    )
+                else:
+                    sc.style("opacity: 0.4; border-left: none")
         else:
             cal_phase_lbl.text = "Phase: --"
             cal_progress.value = 0
             cal_info_lbl.text = ""
+            for sc in cal_step_cards:
+                sc.style("opacity: 0.4; border-left: none")
 
         # Live calibration scatter
         if S.cal_data:
@@ -1546,9 +1763,16 @@ async def index():
             f"data_buf={len(data_buf)}  "
             f"last_update={S.last_update}"
         )
-        # push recent log lines
-        for entry in list(debug_log)[:5]:
-            dbg_log_area.push(entry)
+
+        # -- colored debug log HTML ----------------------------------------
+        lines_html = []
+        for ts, cat, msg in list(debug_log):
+            css_cls = f"log-{cat}" if cat else "log-info"
+            lines_html.append(
+                f'<div class="{css_cls}">'
+                f'<span style="opacity:0.5">{ts}</span> {msg}</div>'
+            )
+        dbg_log_html.content = "\n".join(lines_html[-80:])
 
     ui.timer(1.0, _tick)
 

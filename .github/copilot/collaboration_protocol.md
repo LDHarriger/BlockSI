@@ -88,3 +88,47 @@ When starting a new agent chat session:
 4. Ask it to read its own summary (e.g., `dashboard_agent_summary.md`).
 5. Optionally, ask it to read the other agent's summary if cross-domain
    awareness is needed.
+
+## End-of-Session Procedure (MANDATORY)
+
+Every agent MUST perform these steps at the end of a development session,
+or when prompted by the user:
+
+### 1. Update your agent summary
+Rewrite your summary file with current state, including any work done in
+this session.  Add/update the "Recent Changes" section.
+
+### 2. Commit and push all changes
+Run the following git commands:
+
+```powershell
+cd c:\Users\ldhar\Documents\Shroom-E_Co\BlockSI
+git status --short                    # Review changes
+git add -A                            # Stage all changes
+git commit -m "<Agent>: <summary>"    # Commit with agent prefix
+git push                              # Push to remote
+```
+
+**Commit message conventions:**
+- Prefix with agent domain: `ESP32:`, `Dashboard:`, or `docs:`
+- If changes span multiple concerns, split into multiple commits:
+  1. `chore:` — gitignore, build config, tooling
+  2. `ESP32:` or `Dashboard:` — domain-specific code changes
+  3. `docs:` — collaboration docs, interface contract, decisions log
+- If committing another agent's uncommitted work (e.g., found in working
+  tree), note it: `"Dashboard: ... (committed by ESP32 agent on behalf of Dashboard session)"`
+
+**Before staging, verify:**
+- No build artifacts (`build/`, `__pycache__/`, `*.pyc`) are staged
+- No credentials (`sdkconfig` with WiFi/PSK) are staged
+- `.gitignore` covers all generated/sensitive files
+
+**If push fails** (e.g., remote has diverged):
+```powershell
+git pull --rebase       # Rebase local commits on top of remote
+git push                # Try again
+```
+If there are merge conflicts, resolve them and inform the user.
+
+### 3. Confirm to the user
+Report: number of commits, what was pushed, and any issues encountered.

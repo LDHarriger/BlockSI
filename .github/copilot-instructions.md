@@ -28,6 +28,7 @@ documentation.  All collaboration docs live in `.github/copilot/`:
 - **Summary updates**: rewrite your summary when prompted (context window ~85%)
 - **File ownership**: Dashboard agent writes to `Interfaces/PC/`, ESP32 agent writes to `Interfaces/ControlSystem/`
 - **New chat startup**: read `copilot-instructions.md` -> `collaboration_protocol.md` -> `interface_contract.md` -> your agent summary
+- **End of session**: update your agent summary, then `git add -A && git commit && git push` (see `collaboration_protocol.md` for full procedure)
 
 ## Architecture & Data Flow
 

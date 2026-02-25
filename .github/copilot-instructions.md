@@ -4,8 +4,30 @@
 
 BlockSI is an ozone sterilization monitoring and control system for Shroom-E Co. It comprises:
 - **ESP32 Firmware** (`Interfaces/ControlSystem/`): ESP-IDF v5.4+ project controlling ozone generation, monitoring sensors, and streaming data
-- **PC Dashboard** (`Interfaces/PC/`): Streamlit-based Python app for real-time visualization and device control
+- **PC Dashboard** (`Interfaces/PC/`): Being migrated from Streamlit (v9) to **NiceGUI**. The Streamlit version (`blocksi_dashboard_v9.py`) is the last working version but has fundamental limitations.
 - **Data** (`Data/`): CSV telemetry logs from sterilization runs
+- **Calibration Data** (`Data/O3PowerCalibration/`): Power-O3 characterization CSVs
+- **Models** (`Model/O3Power/`): Fitted O3 prediction models (planned)
+
+## Collaboration Protocol
+
+This project uses **domain-separated AI coding agents** with shared
+documentation.  All collaboration docs live in `.github/copilot/`:
+
+| File | Purpose |
+|------|---------|
+| `collaboration_protocol.md` | Rules: agent responsibilities, file ownership, update conventions |
+| `interface_contract.md` | **Single source of truth** for LAN commands, DATA format, shared constants |
+| `dashboard_agent_summary.md` | PC dashboard agent's current state and pending work |
+| `esp32_agent_summary.md` | ESP32 firmware agent's current state and pending work |
+| `decisions_log.md` | Architectural decisions with date, context, rationale |
+
+**Key rules**:
+- Status tags: `[IMPLEMENTED]`, `[DECIDED]`, `[PROPOSED]` on all items
+- **Interface changes**: update `interface_contract.md` FIRST, then your summary
+- **Summary updates**: rewrite your summary when prompted (context window ~85%)
+- **File ownership**: Dashboard agent writes to `Interfaces/PC/`, ESP32 agent writes to `Interfaces/ControlSystem/`
+- **New chat startup**: read `copilot-instructions.md` -> `collaboration_protocol.md` -> `interface_contract.md` -> your agent summary
 
 ## Architecture & Data Flow
 
@@ -15,64 +37,112 @@ BlockSI is an ozone sterilization monitoring and control system for Shroom-E Co.
    O3 wt% readings         Control: Relays, Motor Pot, Dosimetry
 ```
 
-Key integration pattern: The ESP32 acts as a bridge between industrial equipment (106-H monitor, MP-8000 generator) and cloud/PC interfaces. The LAN client (`lan_client.c`) uses a simple text command protocol (`cmd:args\n → response\n`).
+Key integration pattern: The ESP32 acts as a bridge between industrial equipment (106-H monitor, MP-8000 generator) and cloud/PC interfaces. The LAN client (`lan_client.c`) uses a comma-separated text command protocol over TCP.
+
+## LAN Command Protocol (CRITICAL)
+
+ESP32 ↔ PC uses **comma-separated** commands over TCP port 5000:
+```
+Format:  CMD,command_name,arg1,arg2\n  →  RSP,OK|ERR,command_name,response_data\n
+
+Examples:
+  CMD,relay_set,ozone_gen,1\n     → RSP,OK,relay_set,ozone_gen=on\n
+  CMD,power_set,50\n              → RSP,OK,power_set,power=50,predicted_o3=1.23\n
+  CMD,relay_get\n                 → RSP,OK,relay_get,ozone_gen=1,o2_conc=0,air_comp=0\n
+  CMD,time_sync,1708888888000\n   → RSP,OK,time_sync,synced,esp=12345,pc=1708888888000\n
+```
+
+**WARNING**: Commands use COMMAS not colons as separators. Previous versions had bugs using `power_set:50` which silently fails because the ESP32 parses `power_set:50` as the command name.
+
+See command handlers in `main.c` `lan_command_handler()` (~line 350).
+
+### DATA telemetry format (ESP32 → PC):
+```
+DATA,esp_timestamp_ms,vessel_o3_pct,temp_c,pressure_mbar,sample_v,ref_v,
+     day,month,year,hour,minute,second,room_o3_ppm,vessel_temp_c,
+     power_target_pct,power_actual_pct,wiper_voltage
+```
+
+### Relay names (used in relay_set/relay_get):
+- `ozone_gen` — O3 generator SSR
+- `o2_conc` — O2 concentrator SSR  
+- `air_comp` — Air compressor SSR (+~10 LPM air flow)
 
 ## ESP32 Firmware Conventions
 
 ### Pin Assignments
-All GPIO pins are centralized in [blocksi_pins.h](Interfaces/ControlSystem/main/blocksi_pins.h). **Always check here before adding hardware**:
+All GPIO pins are centralized in `blocksi_pins.h`. **Always check here before adding hardware**:
 - I2C: GPIO 21/22 (DFRobot O3 sensor)
 - SPI: GPIO 18/19/5 (MAX31855 thermocouple)
 - UART2: GPIO 16/17 (106-H RS232 via level shifter)
-- Relays: GPIO 12/13 (SSR control)
+- Relays: GPIO 12/13/27 (SSR control — 3 relays)
 - Motor Pot: GPIO 25/26/34 (DRV8833 + ADC feedback)
 
 ### Module Pattern
-Each peripheral follows the pattern in [sensor_aggregator.h](Interfaces/ControlSystem/main/sensor_aggregator.h):
-```c
-esp_err_t module_init(config_t *config);  // Returns ESP_OK/ESP_FAIL
-void module_deinit(void);
-bool module_is_initialized(void);         // Safe to call anytime
-```
+Each peripheral follows: `module_init()` → `module_deinit()` → `module_is_initialized()`
 
-### Configuration
-Runtime config uses Kconfig (`Kconfig.projbuild`). Access via `CONFIG_*` macros (e.g., `CONFIG_WIFI_SSID`).
-
-### Build & Flash Commands
+### Build & Flash
 ```powershell
-idf.py build                    # Build firmware
-idf.py -p COM3 flash monitor    # Flash and open serial monitor (exit: Ctrl+])
-idf.py menuconfig               # Configure WiFi, Golioth PSK, pin assignments
+idf.py build
+idf.py -p COM3 flash monitor    # exit: Ctrl+]
+idf.py menuconfig               # WiFi, Golioth PSK, pins
 ```
+
+## PC Dashboard -- Status
+
+### Migration Complete: NiceGUI (`blocksi_dashboard.py`)
+The dashboard has been fully migrated from Streamlit to NiceGUI.
+See `.github/copilot/dashboard_agent_summary.md` for current state.
+
+- **File**: `Interfaces/PC/blocksi_dashboard.py` (~1570 lines, NiceGUI)
+- **Reference**: `blocksi_dashboard_v9.py` (Streamlit, kept for reference only)
+- **Run**: `.venv\Scripts\python.exe Interfaces\PC\blocksi_dashboard.py`
+- **Dependencies**: nicegui, numpy, pandas, plotly (in `.venv`)
+
+### Key constants:
+```python
+O3_MASS_FLOW_K = 0.357   # mg/s per (%vol * LPM)
+AIR_COMP_LPM = 10.0      # Additional LPM when air compressor on
+POWER_MODEL_A = 1.78      # O3_max = A/F + B
+POWER_MODEL_B = 1.40
+DEFAULT_FLOW_LPM = 4.0
+```
+
+### UI layout (from hand-drawn mockup):
+- **Sidebar**: Connection status, Air/O2/O3 relay toggles, O2 LPM input, sensor readings
+- **Power tab**: Slider (0-100%), graduated preset buttons, Power-O3 curve graph, settings boxes (LPM, %Power, %vol O3, mg O3/s, g O3 @ 30min) — all linked via conversions
+- **Telemetry tab**: Dual-axis time-series plots (O3 + Room O3, Power + Temp)
+- **Calibration tab**: Automated sequence (~17 min), progress display, file browser, model fitting
+- **Debug tab**: Manual command entry, system state dump
+
+### Calibration sequence design:
+1. **Baseline**: 30s at 0% (Air OFF)
+2. **Sweep Up**: 0→100% in 1% steps, 2s each (Air OFF)
+3. **Sweep Down**: 100→0% in 1% steps, 2s each (Air OFF)
+4. **Random Pairs**: 15 random power levels × (Air OFF 20s + Air ON 20s)
+- Files: `Data/O3PowerCalibration/YYYY-MM-DD_PowerO3Cal_{LPM}Lpm.csv`
+- CSV columns: timestamp, power_pct, o3_pct, o2_lpm, air_comp_on, total_lpm, o2_concentration_pct, cell_temp_c, phase
 
 ## Hardware-Specific Notes
 
-- **Motor Pot replaced DS3502**: Ground isolation issues required switching from I2C digital pot to motorized potentiometer (PRM162 + DRV8833). See comment block in `main/CMakeLists.txt`.
-- **106-H quirks**: Baud rate is fixed 19200. D9 connector has non-standard female pinout. RS232 level shifter required.
+- **Motor Pot replaced DS3502**: Ground isolation issues. PRM162 + DRV8833 driver.
+- **106-H quirks**: Fixed 19200 baud, non-standard female D9 pinout, RS232 level shifter required.
 - **SSRs are active-high** (Kerwinn KG1-1DA25)
-
-## LAN Command Protocol
-
-ESP32 ↔ PC uses text commands over TCP port 5000:
-```
-relay_set:ozone_gen,1    # Turn on ozone generator
-power_set:50             # Set power to 50%
-sensors_get              # Query all sensor status
-recording_start:MyRun    # Start backup recording
-```
-See command handlers in [main.c](Interfaces/ControlSystem/main/main.c#L350) `lan_command_handler()`.
-
-## PC Dashboard
-
-Run with: `streamlit run blocksi_dashboard.py -- --port 5000`
-
-The dashboard (`blocksi_dashboard.py`) is the current version. Versioned files (`_v4` through `_v8`) are development history.
+- **Air compressor** adds ~10 LPM at ~21% O2 to the O2 concentrator's output (~93% O2)
 
 ## Code Style
 
-- ESP-IDF conventions: `esp_err_t` returns, `ESP_LOG*` macros, FreeRTOS tasks
-- Module-level static state structs: `static struct { ... } s_module = {0};`
+- ESP-IDF: `esp_err_t` returns, `ESP_LOG*` macros, FreeRTOS tasks
+- Module-level static state: `static struct { ... } s_module = {0};`
 - Tag convention: `static const char *TAG = "MODULE_NAME";`
+
+## Known Pitfalls (avoid these)
+
+1. **Command separator**: Use COMMAS (`CMD,power_set,50`) not colons (`CMD,power_set:50`)
+2. **Power authority**: PC is sole authority for `power_target_pct` -- never accept it from ESP32 telemetry (see decisions_log.md)
+3. **Sequence lockout**: When `sequence_active=True`, power controls must be disabled in the UI
+4. **Venv required**: PC dashboard must run from `.venv\Scripts\python.exe`, not system Python
+5. **NiceGUI Quasar pattern**: Disable controls with `.props("disable")`, re-enable with `.props(remove="disable")`
 
 ## Common Tasks
 

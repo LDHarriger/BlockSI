@@ -34,12 +34,23 @@ typedef bool (*lan_command_handler_t)(const char *cmd, const char *args,
                                        char *response, size_t response_size);
 
 /**
+ * @brief Connection event callback type
+ * 
+ * Called when LAN TCP connection state changes.
+ * Runs in the LAN client task context — keep processing brief.
+ * 
+ * @param connected true if just connected, false if just disconnected
+ */
+typedef void (*lan_event_callback_t)(bool connected);
+
+/**
  * @brief LAN client configuration
  */
 typedef struct {
     const char *server_ip;           ///< PC server IP address
     uint16_t server_port;            ///< PC server port
     lan_command_handler_t cmd_handler; ///< Command handler callback
+    lan_event_callback_t event_cb;    ///< Connection event callback (optional, may be NULL)
     uint32_t reconnect_interval_ms;  ///< Time between reconnection attempts
 } lan_client_config_t;
 

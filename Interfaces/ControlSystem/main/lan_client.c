@@ -36,6 +36,7 @@ static struct {
     char server_ip[16];
     uint16_t server_port;
     lan_command_handler_t cmd_handler;
+    lan_event_callback_t event_cb;
     uint32_t reconnect_interval_ms;
     
     // Task handle
@@ -123,6 +124,11 @@ static esp_err_t connect_to_server(void)
     const char *hello = "HELLO,BlockSI,1.2.0\n";
     send(s_lan.sock, hello, strlen(hello), 0);
     
+    // Notify connection event callback
+    if (s_lan.event_cb) {
+        s_lan.event_cb(true);
+    }
+    
     return ESP_OK;
 }
 
@@ -131,12 +137,19 @@ static esp_err_t connect_to_server(void)
  */
 static void disconnect(void)
 {
+    bool was_connected = s_lan.connected;
+    
     if (s_lan.sock >= 0) {
         close(s_lan.sock);
         s_lan.sock = -1;
     }
     s_lan.connected = false;
     s_lan.rx_pos = 0;
+    
+    // Notify disconnect if we were previously connected
+    if (was_connected && s_lan.event_cb) {
+        s_lan.event_cb(false);
+    }
 }
 
 /**
@@ -307,6 +320,7 @@ esp_err_t lan_client_init(const lan_client_config_t *config)
     s_lan.server_ip[sizeof(s_lan.server_ip) - 1] = '\0';
     s_lan.server_port = config->server_port;
     s_lan.cmd_handler = config->cmd_handler;
+    s_lan.event_cb = config->event_cb;
     s_lan.reconnect_interval_ms = config->reconnect_interval_ms > 0 
                                    ? config->reconnect_interval_ms : 5000;
     

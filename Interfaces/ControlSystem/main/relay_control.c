@@ -7,6 +7,8 @@
 #include <string.h>
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "zcbor_decode.h"
 #include "zcbor_encode.h"
 #include "zcbor_common.h"
@@ -26,6 +28,22 @@ static const char *RELAY_DISPLAY_NAMES[RELAY_COUNT] = {
     "Oxygen Concentrator",
     "Air Compressor"
 };
+
+// Source names for audit logging
+static const char *SOURCE_NAMES[] = {
+    "BOOT",
+    "LAN",
+    "RPC",
+    "INTERNAL",
+    "SEQUENCE",
+    "NVS_RESTORE",
+    "EMERGENCY",
+    "UNKNOWN"
+};
+
+// NVS namespace and key for relay state persistence
+#define RELAY_NVS_NAMESPACE "relay_ctrl"
+#define RELAY_NVS_KEY       "states"
 
 // Module state
 static struct {
@@ -104,6 +122,11 @@ esp_err_t relay_init(const relay_config_t *config)
 
 esp_err_t relay_set(relay_id_t relay, relay_state_t state)
 {
+    return relay_set_with_source(relay, state, RELAY_SRC_UNKNOWN);
+}
+
+esp_err_t relay_set_with_source(relay_id_t relay, relay_state_t state, relay_source_t source)
+{
     if (!s_relay.initialized) {
         ESP_LOGE(TAG, "Relay module not initialized");
         return ESP_ERR_INVALID_STATE;
@@ -118,11 +141,23 @@ esp_err_t relay_set(relay_id_t relay, relay_state_t state)
     s_relay.states[relay] = state;
     apply_gpio_state(relay);
     
+    const char *src_name = (source < sizeof(SOURCE_NAMES)/sizeof(SOURCE_NAMES[0]))
+                           ? SOURCE_NAMES[source] : "UNKNOWN";
+    
     if (old_state != state) {
-        ESP_LOGI(TAG, "%s: %s -> %s", 
+        ESP_LOGI(TAG, "%s: %s -> %s [src=%s]", 
                  RELAY_DISPLAY_NAMES[relay],
                  old_state == RELAY_ON ? "ON" : "OFF",
-                 state == RELAY_ON ? "ON" : "OFF");
+                 state == RELAY_ON ? "ON" : "OFF",
+                 src_name);
+        
+        // Persist to NVS on every state change (for watchdog/brownout recovery)
+        relay_save_to_nvs();
+    } else {
+        ESP_LOGD(TAG, "%s: already %s [src=%s]",
+                 RELAY_DISPLAY_NAMES[relay],
+                 state == RELAY_ON ? "ON" : "OFF",
+                 src_name);
     }
     
     return ESP_OK;
@@ -154,12 +189,87 @@ const char* relay_get_name(relay_id_t relay)
     return RELAY_DISPLAY_NAMES[relay];
 }
 
+const char* relay_get_name_str(relay_id_t relay)
+{
+    if (relay >= RELAY_COUNT) {
+        return "unknown";
+    }
+    return RELAY_NAMES[relay];
+}
+
+const char* relay_source_name(relay_source_t source)
+{
+    if (source < sizeof(SOURCE_NAMES)/sizeof(SOURCE_NAMES[0])) {
+        return SOURCE_NAMES[source];
+    }
+    return "UNKNOWN";
+}
+
+esp_err_t relay_save_to_nvs(void)
+{
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(RELAY_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "NVS open failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    
+    // Pack 3 relay states into a single byte: bit0=ozone_gen, bit1=o2_conc, bit2=air_comp
+    uint8_t packed = 0;
+    for (int i = 0; i < RELAY_COUNT; i++) {
+        if (s_relay.states[i] == RELAY_ON) {
+            packed |= (1 << i);
+        }
+    }
+    
+    ret = nvs_set_u8(handle, RELAY_NVS_KEY, packed);
+    if (ret == ESP_OK) {
+        ret = nvs_commit(handle);
+    }
+    
+    nvs_close(handle);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "NVS save failed: %s", esp_err_to_name(ret));
+    }
+    
+    return ret;
+}
+
+esp_err_t relay_restore_from_nvs(void)
+{
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(RELAY_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (ret != ESP_OK) {
+        ESP_LOGD(TAG, "NVS open failed (no saved state?): %s", esp_err_to_name(ret));
+        return ESP_ERR_NOT_FOUND;
+    }
+    
+    uint8_t packed = 0;
+    ret = nvs_get_u8(handle, RELAY_NVS_KEY, &packed);
+    nvs_close(handle);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGD(TAG, "No saved relay state in NVS");
+        return ESP_ERR_NOT_FOUND;
+    }
+    
+    ESP_LOGW(TAG, "Restoring relay states from NVS (packed=0x%02X)", packed);
+    
+    for (int i = 0; i < RELAY_COUNT; i++) {
+        relay_state_t saved = (packed & (1 << i)) ? RELAY_ON : RELAY_OFF;
+        relay_set_with_source((relay_id_t)i, saved, RELAY_SRC_NVS_RESTORE);
+    }
+    
+    return ESP_OK;
+}
+
 void relay_all_off(void)
 {
     ESP_LOGW(TAG, "Emergency stop - all relays OFF");
-    relay_set(RELAY_OZONE_GEN, RELAY_OFF);
-    relay_set(RELAY_O2_CONC, RELAY_OFF);
-    relay_set(RELAY_AIR_COMP, RELAY_OFF);
+    relay_set_with_source(RELAY_OZONE_GEN, RELAY_OFF, RELAY_SRC_EMERGENCY);
+    relay_set_with_source(RELAY_O2_CONC, RELAY_OFF, RELAY_SRC_EMERGENCY);
+    relay_set_with_source(RELAY_AIR_COMP, RELAY_OFF, RELAY_SRC_EMERGENCY);
 }
 
 // ============================================================================
@@ -217,7 +327,7 @@ static enum golioth_rpc_status on_relay_set(
     }
     
     // Set the relay
-    esp_err_t ret = relay_set((relay_id_t)relay_id, state ? RELAY_ON : RELAY_OFF);
+    esp_err_t ret = relay_set_with_source((relay_id_t)relay_id, state ? RELAY_ON : RELAY_OFF, RELAY_SRC_RPC);
     if (ret != ESP_OK) {
         return GOLIOTH_RPC_INTERNAL;
     }

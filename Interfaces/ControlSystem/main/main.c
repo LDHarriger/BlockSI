@@ -28,6 +28,7 @@
 
 #include "esp_timer.h"
 #include <stdint.h>
+#include "esp_system.h"
 
 #include <zcbor_encode.h>
 
@@ -344,6 +345,34 @@ static float predict_o3_output(float flow_lpm, uint8_t power_pct)
 }
 
 /**
+ * @brief LAN connection event callback
+ * 
+ * Called from the LAN client task when TCP connects or disconnects.
+ * On connect: push current relay + power state so PC is synchronized.
+ */
+static void lan_event_callback(bool connected)
+{
+    if (connected) {
+        ESP_LOGI(TAG, "LAN connected — pushing current state to PC");
+        
+        // Build state push message:
+        // STATE,ozone_gen=<0|1>,o2_conc=<0|1>,air_comp=<0|1>,power=<pct>,flow=<lpm>
+        char state_msg[128];
+        snprintf(state_msg, sizeof(state_msg),
+                 "STATE,ozone_gen=%d,o2_conc=%d,air_comp=%d,power=%d,flow=%.1f\n",
+                 relay_get_state(RELAY_OZONE_GEN) == RELAY_ON ? 1 : 0,
+                 relay_get_state(RELAY_O2_CONC) == RELAY_ON ? 1 : 0,
+                 relay_get_state(RELAY_AIR_COMP) == RELAY_ON ? 1 : 0,
+                 o3_power_get(),
+                 s_current_flow_lpm);
+        
+        lan_client_send_message(state_msg);
+    } else {
+        ESP_LOGW(TAG, "LAN disconnected — relay and power states preserved");
+    }
+}
+
+/**
  * @brief Handle commands received from PC over LAN
  */
 static bool lan_command_handler(const char *cmd, const char *args,
@@ -379,8 +408,8 @@ static bool lan_command_handler(const char *cmd, const char *args,
             return false;
         }
         
-        relay_state_t new_state = state ? RELAY_ON : RELAY_OFF;
-        if (relay_set(relay, new_state) == ESP_OK) {
+        // Route through state manager with LAN source tracking
+        if (blocksi_state_set_relay((uint8_t)relay, state ? true : false, RELAY_SRC_LAN) == ESP_OK) {
             snprintf(response, response_size, "%s=%s", relay_name, state ? "on" : "off");
             return true;
         }
@@ -891,6 +920,34 @@ void app_main(void)
         ESP_LOGE(TAG, "Relay initialization failed!");
     }
     
+    // Check reset reason and conditionally restore relay states from NVS
+    // Power-on / external reset: stay OFF (safety — operator may have unplugged)
+    // Watchdog / brownout / panic / SW reset: restore (transient glitch recovery)
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    ESP_LOGI(TAG, "Reset reason: %d", (int)reset_reason);
+    
+    switch (reset_reason) {
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT:
+        case ESP_RST_BROWNOUT:
+        case ESP_RST_PANIC:
+        case ESP_RST_SW:
+            ESP_LOGW(TAG, "Transient reset detected — restoring relay states from NVS");
+            if (relay_restore_from_nvs() != ESP_OK) {
+                ESP_LOGI(TAG, "No saved relay state in NVS, staying OFF");
+            }
+            break;
+            
+        case ESP_RST_POWERON:
+        case ESP_RST_EXT:
+        default:
+            ESP_LOGI(TAG, "Power-on or external reset — relays start OFF (safety)");
+            // relay_init() already set everything OFF; clear any stale NVS
+            relay_save_to_nvs();  // Save all-OFF state
+            break;
+    }
+    
     // Initialize backup storage (SPIFFS)
     ESP_LOGI(TAG, "Initializing backup storage...");
     if (backup_storage_init() != ESP_OK) {
@@ -946,6 +1003,7 @@ void app_main(void)
         .server_port = LAN_SERVER_PORT,
         .reconnect_interval_ms = LAN_RECONNECT_MS,
         .cmd_handler = lan_command_handler,
+        .event_cb = lan_event_callback,
     };
     
     if (lan_client_init(&lan_config) != ESP_OK) {

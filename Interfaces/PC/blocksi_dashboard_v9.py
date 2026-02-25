@@ -565,6 +565,118 @@ def set_relay(relay_name: str, state: bool):
     return False
 
 
+def sync_relay_state():
+    """
+    Poll ESP32 for actual relay states to prevent state drift.
+    Called periodically (every ~10s) to keep dashboard in sync.
+    """
+    if not is_connected():
+        return
+    resp = send_command("relay_get", timeout=1.0)
+    if not resp or 'OK' not in resp:
+        return
+    # Parse RSP,OK,relay_get,ozone_gen=1,o2_conc=0,air_comp=0
+    try:
+        # Find the relay data after "relay_get,"
+        parts = resp.split(',')
+        for part in parts:
+            part = part.strip()
+            if '=' not in part:
+                continue
+            key, val = part.split('=', 1)
+            state = val.strip() == '1'
+            if key == 'ozone_gen':
+                _sys.relay_o3_gen = state
+            elif key == 'o2_conc':
+                _sys.relay_o2_conc = state
+            elif key == 'air_comp':
+                _sys.relay_air_comp = state
+    except Exception:
+        pass
+
+
+# =============================================================================
+# Widget Callbacks (fire ONLY on explicit user interaction)
+#
+# These prevent the autorefresh-triggered spurious command sends that
+# caused relay dropouts and widget fighting in the old pattern.
+# =============================================================================
+def _on_power_slider():
+    """User dragged the power slider."""
+    new_pwr = st.session_state.power_slider
+    if new_pwr != _sys.power_target_pct:
+        set_power(new_pwr)
+
+
+def _on_power_input():
+    """User changed the power number input."""
+    new_pwr = st.session_state.settings_power
+    if new_pwr != _sys.power_target_pct:
+        set_power(new_pwr)
+
+
+def _on_o3_pct_input():
+    """User changed the target O3% input."""
+    new_o3 = st.session_state.settings_o3_pct
+    new_pwr = int(predict_power_from_o3(new_o3))
+    if new_pwr != _sys.power_target_pct:
+        set_power(new_pwr)
+
+
+def _on_mg_s_input():
+    """User changed the mg/s input."""
+    new_mg_s = st.session_state.settings_mg_s
+    new_o3 = mg_per_s_to_o3_pct(new_mg_s)
+    new_pwr = int(predict_power_from_o3(new_o3))
+    if new_pwr != _sys.power_target_pct:
+        set_power(new_pwr)
+
+
+def _on_g30_input():
+    """User changed the g@30min input."""
+    new_g30 = st.session_state.settings_g_30
+    new_mg = g_at_time_to_mg_per_s(new_g30, 30.0)
+    new_o3 = mg_per_s_to_o3_pct(new_mg)
+    new_pwr = int(predict_power_from_o3(new_o3))
+    if new_pwr != _sys.power_target_pct:
+        set_power(new_pwr)
+
+
+def _on_sb_lpm():
+    """User changed the sidebar LPM input."""
+    _sys.flow_lpm = st.session_state.sb_lpm
+
+
+def _on_settings_lpm():
+    """User changed the settings LPM input."""
+    _sys.flow_lpm = st.session_state.settings_lpm
+
+
+def _sync_widget_states():
+    """
+    Sync all widget session_state values FROM system state.
+    
+    Must be called BEFORE widgets render. Streamlit will override these
+    with user-interaction values when the widget is instantiated, so
+    explicit user input always takes priority.
+    """
+    # Power controls
+    st.session_state['power_slider'] = _sys.power_target_pct
+    st.session_state['settings_power'] = _sys.power_target_pct
+    
+    # Derived values from current power
+    target_o3_pct = predict_o3_from_power(_sys.power_target_pct)
+    target_mg_per_s = o3_pct_to_mg_per_s(target_o3_pct)
+    target_g_30min = mg_per_s_to_g_at_time(target_mg_per_s, 30.0)
+    st.session_state['settings_o3_pct'] = round(float(target_o3_pct), 2)
+    st.session_state['settings_mg_s'] = round(float(target_mg_per_s), 2)
+    st.session_state['settings_g_30'] = round(float(target_g_30min), 2)
+    
+    # LPM (syncs both sidebar and settings inputs)
+    st.session_state['sb_lpm'] = float(_sys.flow_lpm)
+    st.session_state['settings_lpm'] = float(_sys.flow_lpm)
+
+
 # =============================================================================
 # Data Processing
 # =============================================================================
@@ -638,17 +750,16 @@ def render_sidebar():
             st.rerun()
     
     # O2 LPM manual entry (user reads from analog meter)
-    new_lpm = st.sidebar.number_input(
+    # No value= param needed - session_state is pre-synced by _sync_widget_states()
+    st.sidebar.number_input(
         "O₂ LPM",
         min_value=1.0,
         max_value=15.0,
-        value=float(_sys.flow_lpm),
         step=0.5,
         key="sb_lpm",
+        on_change=_on_sb_lpm,
         help="Manually enter O2 flow rate from analog meter"
     )
-    if new_lpm != _sys.flow_lpm:
-        _sys.flow_lpm = new_lpm
     
     st.sidebar.divider()
     
@@ -672,14 +783,14 @@ def render_power_tab():
     graph_col, settings_col = st.columns([2, 1])
     
     with graph_col:
-        # Power slider
-        power_pct = st.slider(
+        # Power slider - on_change sends command, session_state pre-synced
+        st.slider(
             "Power (%)",
             min_value=0,
             max_value=100,
-            value=_sys.power_target_pct,
             step=1,
             key="power_slider",
+            on_change=_on_power_slider,
             help="Drag to set power level",
             label_visibility="collapsed"
         )
@@ -749,91 +860,65 @@ def render_power_tab():
     with settings_col:
         st.markdown("**Settings**")
         
-        # LPM setting
-        new_lpm = st.number_input(
+        # LPM setting - on_change syncs to _sys.flow_lpm
+        st.number_input(
             "LPM",
             min_value=1.0,
             max_value=15.0,
-            value=float(_sys.flow_lpm),
             step=0.5,
             key="settings_lpm",
+            on_change=_on_settings_lpm,
             help="O2 flow rate"
         )
-        if new_lpm != _sys.flow_lpm:
-            _sys.flow_lpm = new_lpm
-            st.rerun()
         
         st.divider()
         
-        # Current values for conversion
-        target_o3_pct = predict_o3_from_power(_sys.power_target_pct)
-        target_mg_per_s = o3_pct_to_mg_per_s(target_o3_pct)
-        target_g_30min = mg_per_s_to_g_at_time(target_mg_per_s, 30.0)
-        
-        # % Power input
-        new_power = st.number_input(
+        # % Power input - on_change sends command
+        st.number_input(
             "% Power",
             min_value=0,
             max_value=100,
-            value=_sys.power_target_pct,
             step=1,
             key="settings_power",
+            on_change=_on_power_input,
             help="Direct power setting"
         )
-        if new_power != _sys.power_target_pct:
-            if set_power(new_power):
-                st.rerun()
         
-        # % vol O3 input
-        new_o3_pct = st.number_input(
+        # % vol O3 input - on_change converts and sends
+        st.number_input(
             "% vol O₃",
             min_value=0.0,
             max_value=5.0,
-            value=float(target_o3_pct),
             step=0.01,
             format="%.2f",
             key="settings_o3_pct",
+            on_change=_on_o3_pct_input,
             help="Target O3 concentration"
         )
-        if abs(new_o3_pct - target_o3_pct) > 0.005:
-            new_pwr = int(predict_power_from_o3(new_o3_pct))
-            if set_power(new_pwr):
-                st.rerun()
         
         # mg O3/s input
-        new_mg_s = st.number_input(
+        st.number_input(
             "mg O₃/s",
             min_value=0.0,
             max_value=10.0,
-            value=float(target_mg_per_s),
             step=0.01,
             format="%.2f",
             key="settings_mg_s",
+            on_change=_on_mg_s_input,
             help="O3 mass flow rate"
         )
-        if abs(new_mg_s - target_mg_per_s) > 0.005:
-            new_o3 = mg_per_s_to_o3_pct(new_mg_s)
-            new_pwr = int(predict_power_from_o3(new_o3))
-            if set_power(new_pwr):
-                st.rerun()
         
         # g O3 @ 30min input
-        new_g_30 = st.number_input(
+        st.number_input(
             "g O₃ @ 30min",
             min_value=0.0,
             max_value=20.0,
-            value=float(target_g_30min),
             step=0.1,
             format="%.2f",
             key="settings_g_30",
+            on_change=_on_g30_input,
             help="Total O3 produced in 30 minutes"
         )
-        if abs(new_g_30 - target_g_30min) > 0.05:
-            new_mg = g_at_time_to_mg_per_s(new_g_30, 30.0)
-            new_o3 = mg_per_s_to_o3_pct(new_mg)
-            new_pwr = int(predict_power_from_o3(new_o3))
-            if set_power(new_pwr):
-                st.rerun()
     
     # =========================================================================
     # Emergency stop at bottom
@@ -1085,7 +1170,7 @@ def start_calibration():
     _sys.cal_air_state = False
     
     # Set power to 0
-    send_command("power_set:0")
+    send_command("power_set,0")
     
     # Initialize calibration timing in session state
     if 'cal_step_start' not in st.session_state:
@@ -1098,7 +1183,7 @@ def stop_calibration():
     _sys.cal_active = False
     
     # Reset to safe state
-    send_command("power_set:0")
+    send_command("power_set,0")
     send_command("relay_set,air_comp,0")
     
     # Save data if we have any
@@ -1151,16 +1236,17 @@ def calibration_step():
         # Wait for baseline duration
         _sys.cal_phase_progress = min(100, (elapsed / CAL_BASELINE_DURATION_S) * 100)
         
-        if elapsed >= CAL_STEP_DURATION_S:  # Record sample periodically
-            record_calibration_sample()
-            st.session_state['cal_step_start'] = time.time()
-        
         if elapsed >= CAL_BASELINE_DURATION_S:
-            # Move to sweep up
+            # Baseline complete → move to sweep up
+            record_calibration_sample()
             _sys.cal_phase = 'sweep_up'
             _sys.cal_current_power = 0
             st.session_state['cal_step_start'] = time.time()
-            send_command("power_set:0")
+            send_command("power_set,0")
+        elif elapsed >= CAL_STEP_DURATION_S:
+            # Record sample periodically during baseline
+            record_calibration_sample()
+            st.session_state['cal_step_start'] = time.time()
     
     elif _sys.cal_phase == 'sweep_up':
         _sys.cal_phase_progress = _sys.cal_current_power
@@ -1170,7 +1256,7 @@ def calibration_step():
             
             if _sys.cal_current_power < 100:
                 _sys.cal_current_power += 1
-                send_command(f"power_set:{_sys.cal_current_power}")
+                send_command(f"power_set,{_sys.cal_current_power}")
             else:
                 # Move to sweep down
                 _sys.cal_phase = 'sweep_down'
@@ -1186,7 +1272,7 @@ def calibration_step():
             
             if _sys.cal_current_power > 0:
                 _sys.cal_current_power -= 1
-                send_command(f"power_set:{_sys.cal_current_power}")
+                send_command(f"power_set,{_sys.cal_current_power}")
             else:
                 # Move to random pairs
                 _sys.cal_phase = 'random_pairs'
@@ -1195,7 +1281,7 @@ def calibration_step():
                 st.session_state['cal_step_start'] = time.time()
                 if _sys.cal_random_powers:
                     _sys.cal_current_power = _sys.cal_random_powers[0]
-                    send_command(f"power_set:{_sys.cal_current_power}")
+                    send_command(f"power_set,{_sys.cal_current_power}")
             
             st.session_state['cal_step_start'] = time.time()
     
@@ -1225,7 +1311,7 @@ def calibration_step():
                     return
                 else:
                     _sys.cal_current_power = _sys.cal_random_powers[_sys.cal_random_idx]
-                    send_command(f"power_set:{_sys.cal_current_power}")
+                    send_command(f"power_set,{_sys.cal_current_power}")
             
             st.session_state['cal_step_start'] = time.time()
 
@@ -1359,9 +1445,21 @@ def main():
     start_receiver(args.port)
     process_queued_data()
     
+    # Periodic relay state sync (every ~10s) to prevent drift
+    if 'last_relay_sync' not in st.session_state:
+        st.session_state['last_relay_sync'] = 0.0
+    if is_connected() and (time.time() - st.session_state['last_relay_sync'] > 10):
+        sync_relay_state()
+        st.session_state['last_relay_sync'] = time.time()
+    
     # Run calibration step if active
     if _sys.cal_active:
         calibration_step()
+    
+    # Sync all widget session_state values FROM system state BEFORE rendering.
+    # This ensures widgets show current state on autorefresh, while on_change
+    # callbacks handle explicit user interactions (which override these values).
+    _sync_widget_states()
     
     # Auto-refresh
     try:

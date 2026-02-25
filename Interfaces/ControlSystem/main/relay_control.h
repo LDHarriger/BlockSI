@@ -40,6 +40,20 @@ typedef enum {
 } relay_state_t;
 
 /**
+ * @brief Source of a relay state change (for audit logging)
+ */
+typedef enum {
+    RELAY_SRC_BOOT = 0,         ///< Initial state at startup
+    RELAY_SRC_LAN,              ///< Command from PC over LAN TCP
+    RELAY_SRC_RPC,              ///< Golioth cloud RPC
+    RELAY_SRC_INTERNAL,         ///< Internal firmware logic (e.g., safety interlock)
+    RELAY_SRC_SEQUENCE,         ///< Automated sequence (calibration, sterilization)
+    RELAY_SRC_NVS_RESTORE,      ///< Restored from NVS after watchdog/brownout reset
+    RELAY_SRC_EMERGENCY,        ///< Emergency all-off
+    RELAY_SRC_UNKNOWN           ///< Fallback
+} relay_source_t;
+
+/**
  * @brief Relay configuration
  */
 typedef struct {
@@ -60,13 +74,23 @@ typedef struct {
 esp_err_t relay_init(const relay_config_t *config);
 
 /**
- * @brief Set relay state
+ * @brief Set relay state (convenience wrapper, source = UNKNOWN)
  * 
  * @param relay Relay identifier
  * @param state Desired state (RELAY_ON or RELAY_OFF)
  * @return ESP_OK on success, ESP_ERR_INVALID_ARG for invalid relay
  */
 esp_err_t relay_set(relay_id_t relay, relay_state_t state);
+
+/**
+ * @brief Set relay state with source tracking for audit logging
+ * 
+ * @param relay Relay identifier
+ * @param state Desired state (RELAY_ON or RELAY_OFF)
+ * @param source Who/what initiated this change
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG for invalid relay
+ */
+esp_err_t relay_set_with_source(relay_id_t relay, relay_state_t state, relay_source_t source);
 
 /**
  * @brief Toggle relay state
@@ -91,6 +115,38 @@ relay_state_t relay_get_state(relay_id_t relay);
  * @return Human-readable name
  */
 const char* relay_get_name(relay_id_t relay);
+
+/**
+ * @brief Get relay name as a C string (e.g., "ozone_gen")
+ * 
+ * @param relay Relay identifier
+ * @return Name string, or "unknown" if invalid
+ */
+const char* relay_get_name_str(relay_id_t relay);
+
+/**
+ * @brief Get human-readable source name for logging
+ * 
+ * @param source Relay source enum
+ * @return Source name string (e.g., "LAN", "RPC", "BOOT")
+ */
+const char* relay_source_name(relay_source_t source);
+
+/**
+ * @brief Save current relay states to NVS (for watchdog/brownout recovery)
+ * 
+ * @return ESP_OK on success
+ */
+esp_err_t relay_save_to_nvs(void);
+
+/**
+ * @brief Restore relay states from NVS
+ * 
+ * Should only be called after relay_init() and only on watchdog/brownout resets.
+ * 
+ * @return ESP_OK on success, ESP_ERR_NOT_FOUND if no saved state
+ */
+esp_err_t relay_restore_from_nvs(void);
 
 /**
  * @brief Set all relays to OFF (emergency stop)

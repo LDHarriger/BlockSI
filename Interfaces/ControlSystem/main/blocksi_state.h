@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
+#include "relay_control.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,13 +37,20 @@ typedef struct {
 } power_state_t;
 
 /**
- * @brief Relay control state (named to avoid conflict with relay_control.h)
+ * @brief Per-relay tracked state
  */
 typedef struct {
-    bool o3_gen_target;         // Target state for O3 generator relay
-    bool o3_gen_actual;         // Actual relay state
-    bool o2_conc_target;        // Target state for O2 concentrator relay
-    bool o2_conc_actual;        // Actual relay state
+    bool target;                // Desired relay state
+    bool actual;                // Confirmed relay state
+    relay_source_t last_source; // Who last changed this relay
+    int64_t last_change_ms;     // When it was last changed (uptime ms)
+} tracked_relay_t;
+
+/**
+ * @brief Relay control state (all 3 relays tracked)
+ */
+typedef struct {
+    tracked_relay_t relays[RELAY_COUNT];  // Indexed by relay_id_t
 } blocksi_relay_state_t;
 
 /**
@@ -128,11 +136,13 @@ blocksi_state_t* blocksi_state_get_mutable(void);
 esp_err_t blocksi_state_set_power(uint8_t target_pct);
 
 /**
- * @brief Update relay target state
- * @param relay 0=O3 generator, 1=O2 concentrator
+ * @brief Update relay target state (with source tracking)
+ * @param relay Relay ID (0=O3 generator, 1=O2 concentrator, 2=Air compressor)
  * @param state true=ON, false=OFF
+ * @param source Who/what initiated this change
+ * @return ESP_OK on success
  */
-esp_err_t blocksi_state_set_relay(uint8_t relay, bool state);
+esp_err_t blocksi_state_set_relay(uint8_t relay, bool state, relay_source_t source);
 
 /**
  * @brief Update sensor readings (called from sensor callbacks)

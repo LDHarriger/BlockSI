@@ -146,29 +146,26 @@ esp_err_t blocksi_state_set_power(uint8_t target_pct)
     return ret;
 }
 
-esp_err_t blocksi_state_set_relay(uint8_t relay, bool state)
+esp_err_t blocksi_state_set_relay(uint8_t relay, bool state, relay_source_t source)
 {
-    relay_id_t relay_id;
+    if (relay >= RELAY_COUNT) {
+        ESP_LOGE(TAG, "Invalid relay ID: %d", relay);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    relay_id_t relay_id = (relay_id_t)relay;
     
     lock();
-    if (relay == 0) {
-        relay_id = RELAY_OZONE_GEN;
-        s_state_mgr.state.relays.o3_gen_target = state;
-    } else {
-        relay_id = RELAY_O2_CONC;
-        s_state_mgr.state.relays.o2_conc_target = state;
-    }
+    s_state_mgr.state.relays.relays[relay].target = state;
     unlock();
     
-    esp_err_t ret = relay_set(relay_id, state ? RELAY_ON : RELAY_OFF);
+    esp_err_t ret = relay_set_with_source(relay_id, state ? RELAY_ON : RELAY_OFF, source);
     
     if (ret == ESP_OK) {
         lock();
-        if (relay == 0) {
-            s_state_mgr.state.relays.o3_gen_actual = state;
-        } else {
-            s_state_mgr.state.relays.o2_conc_actual = state;
-        }
+        s_state_mgr.state.relays.relays[relay].actual = state;
+        s_state_mgr.state.relays.relays[relay].last_source = source;
+        s_state_mgr.state.relays.relays[relay].last_change_ms = get_uptime_ms();
         unlock();
     }
     

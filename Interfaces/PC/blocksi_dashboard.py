@@ -48,11 +48,12 @@ MAX_DATA_POINTS = 500
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "Data")
-STREAM_DIR = os.path.join(DATA_DIR, "Stream")
-CALIBRATION_DIR = os.path.join(DATA_DIR, "O3PowerCalibration")
-MODEL_DIR = os.path.join(BASE_DIR, "Model", "O3Power")
+TELEMETRY_DIR = os.path.join(DATA_DIR, "Telemetry")
+CALIBRATION_DIR = os.path.join(DATA_DIR, "Calibration")
+VALIDATION_DIR = os.path.join(DATA_DIR, "Validation")
+MODEL_DIR = os.path.join(BASE_DIR, "Models", "O3Power")
 
-for _d in (DATA_DIR, STREAM_DIR, CALIBRATION_DIR, MODEL_DIR):
+for _d in (DATA_DIR, TELEMETRY_DIR, CALIBRATION_DIR, VALIDATION_DIR, MODEL_DIR):
     os.makedirs(_d, exist_ok=True)
 
 # Power model coefficients  (O3_max = A/F + B)
@@ -63,6 +64,10 @@ DEFAULT_FLOW_LPM = 4.0
 # O3 mass-flow conversion  mg/s = %vol * LPM * K
 O3_MASS_FLOW_K = 0.357
 AIR_COMP_LPM = 10.0
+
+# O2 concentration constants (for weighted-average calculation)
+O2_CONC_PCT = 95      # O2 concentrator output purity
+AIR_COMP_O2_PCT = 21  # Atmospheric O2 from air compressor
 
 POWER_MISMATCH_THRESHOLD = 5.0
 
@@ -352,7 +357,7 @@ def _notify(msg: str, level: str = "positive") -> None:
 class _CSVLogger:
     def __init__(self) -> None:
         self._path = os.path.join(
-            STREAM_DIR, f"{datetime.now():%Y-%m-%d}_Stream.csv"
+            TELEMETRY_DIR, f"{datetime.now():%Y-%m-%d}_Stream.csv"
         )
         self._header = False
 
@@ -383,35 +388,56 @@ csv_logger = _CSVLogger()
 
 
 # =============================================================================
+# O2 concentration helpers
+# =============================================================================
+def compute_effective_o2_pct(flow_lpm: float, air_comp_on: bool) -> int:
+    """Weighted-average O2% from O2 concentrator + optional air compressor.
+
+    O2 concentrator: *flow_lpm* at ~95% O2.
+    Air compressor:  ~10 LPM at ~21% O2 (only when *air_comp_on*).
+    Returns integer O2% rounded to nearest whole number.
+    """
+    if air_comp_on:
+        total = flow_lpm + AIR_COMP_LPM
+        if total > 0:
+            return round((flow_lpm * O2_CONC_PCT + AIR_COMP_LPM * AIR_COMP_O2_PCT) / total)
+    return O2_CONC_PCT
+
+
+# =============================================================================
 # Calibration file helpers
 # =============================================================================
-def list_calibration_files() -> dict[float, list[str]]:
-    out: dict[float, list[str]] = {}
+def list_calibration_files() -> dict[tuple[float, int], list[str]]:
+    """List calibration CSVs grouped by (LPM, O2%).
+
+    Parses filenames like ``2026-02-25_143022_PowerO3Cal_4.0Lpm_95O2.csv``.
+    Falls back to O2_CONC_PCT when no O2 tag is present (legacy files).
+    """
+    out: dict[tuple[float, int], list[str]] = {}
     if not os.path.exists(CALIBRATION_DIR):
         return out
     for fn in os.listdir(CALIBRATION_DIR):
         if fn.endswith(".csv") and "PowerO3Cal" in fn:
-            m = re.search(r"_(\d+(?:\.\d+)?)Lpm", fn)
-            if m:
-                lpm = float(m.group(1))
-                out.setdefault(lpm, []).append(
+            m_lpm = re.search(r"_(\d+(?:\.\d+)?)Lpm", fn)
+            if m_lpm:
+                lpm = float(m_lpm.group(1))
+                m_o2 = re.search(r"_(\d+)O2", fn)
+                o2 = int(m_o2.group(1)) if m_o2 else O2_CONC_PCT
+                out.setdefault((lpm, o2), []).append(
                     os.path.join(CALIBRATION_DIR, fn)
                 )
     return out
 
 
-def _save_cal_csv(samples: list[dict], lpm: float) -> str:
-    """Save calibration samples to CSV, return filename."""
-    date_str = datetime.now().strftime("%Y-%m-%d")
+def _save_cal_csv(samples: list[dict], lpm: float, o2_pct: int) -> str:
+    """Save calibration samples to CSV, return filename.
+
+    Naming: ``{YYYY-MM-DD}_{HHMMSS}_PowerO3Cal_{LPM}Lpm_{O2}O2.csv``
+    """
+    now = datetime.now()
     lpm_s = f"{lpm:.0f}" if lpm == int(lpm) else f"{lpm:.1f}"
-    fname = f"{date_str}_PowerO3Cal_{lpm_s}Lpm.csv"
+    fname = f"{now:%Y-%m-%d_%H%M%S}_PowerO3Cal_{lpm_s}Lpm_{o2_pct}O2.csv"
     fpath = os.path.join(CALIBRATION_DIR, fname)
-    if os.path.exists(fpath):
-        for i in range(2, 100):
-            fname = f"{date_str}_PowerO3Cal_{lpm_s}Lpm_{i}.csv"
-            fpath = os.path.join(CALIBRATION_DIR, fname)
-            if not os.path.exists(fpath):
-                break
     if samples:
         pd.DataFrame(samples).to_csv(fpath, index=False)
         log(f"Saved {len(samples)} cal samples -> {fname}", "cal")
@@ -824,7 +850,8 @@ class TCPServer:
             # Post-sequence analysis
             if seq_type == "calibrate":
                 if S.cal_samples:
-                    S.cal_file = _save_cal_csv(S.cal_samples, S.cal_lpm)
+                    o2 = compute_effective_o2_pct(S.cal_lpm, S.relay_air_comp)
+                    S.cal_file = _save_cal_csv(S.cal_samples, S.cal_lpm, o2)
                     _notify(
                         f"Calibration: {len(S.cal_samples)} samples saved",
                         "positive",
@@ -1565,11 +1592,12 @@ async def index():
                                     "text-caption"
                                 )
                             else:
-                                for lpm in sorted(files):
+                                for (lpm, o2) in sorted(files):
+                                    flist = files[(lpm, o2)]
                                     with ui.expansion(
-                                        f"O2 @ {lpm} LPM ({len(files[lpm])} files)"
+                                        f"{lpm} LPM / {o2}% O2 ({len(flist)} files)"
                                     ):
-                                        for fp in sorted(files[lpm]):
+                                        for fp in sorted(flist):
                                             ui.label(os.path.basename(fp)).classes(
                                                 "text-caption"
                                             )
@@ -1712,7 +1740,7 @@ async def index():
                             return
                         df = pd.DataFrame(list(data_buf))
                         fname = f"{datetime.now():%Y-%m-%d_%H%M%S}_Export.csv"
-                        fpath = os.path.join(STREAM_DIR, fname)
+                        fpath = os.path.join(TELEMETRY_DIR, fname)
                         df.to_csv(fpath, index=False)
                         _notify(f"Exported {len(df)} rows to {fname}")
                         log(f"CSV export -> {fname}")

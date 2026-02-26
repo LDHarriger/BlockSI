@@ -5,9 +5,14 @@
 BlockSI is an ozone sterilization monitoring and control system for Shroom-E Co. It comprises:
 - **ESP32 Firmware** (`Interfaces/ControlSystem/`): ESP-IDF v5.4+ project controlling ozone generation, monitoring sensors, and streaming data
 - **PC Dashboard** (`Interfaces/PC/`): Being migrated from Streamlit (v9) to **NiceGUI**. The Streamlit version (`blocksi_dashboard_v9.py`) is the last working version but has fundamental limitations.
-- **Data** (`Data/`): CSV telemetry logs from sterilization runs
-- **Calibration Data** (`Data/O3PowerCalibration/`): Power-O3 characterization CSVs
-- **Models** (`Model/O3Power/`): Fitted O3 prediction models (planned)
+- **Data** (`Data/`): CSV telemetry and sequence logs, organised by type:
+  - `Data/Telemetry/` — Daily stream CSVs (renamed from `Stream/`)
+  - `Data/Calibration/` — Power-O3 characterisation CSVs (renamed from `O3PowerCalibration/`)
+  - `Data/Validation/` — Validation run CSVs
+  - `Data/Fill/`, `Data/Decay/`, `Data/Sterilization/` — Future sequence types
+- **Models** (`Models/`): Fitted prediction models (git-tracked):
+  - `Models/O3Power/` — Power→O3 models
+  - `Models/Fill/`, `Models/Decay/` — Future model families
 
 ## Collaboration Protocol
 
@@ -107,6 +112,8 @@ AIR_COMP_LPM = 10.0      # Additional LPM when air compressor on
 POWER_MODEL_A = 1.78      # O3_max = A/F + B
 POWER_MODEL_B = 1.40
 DEFAULT_FLOW_LPM = 4.0
+O2_CONC_PCT = 95          # O2 concentrator purity
+AIR_COMP_O2_PCT = 21      # Atmospheric O2
 ```
 
 ### UI layout (from hand-drawn mockup):
@@ -121,7 +128,8 @@ DEFAULT_FLOW_LPM = 4.0
 2. **Sweep Up**: 0→100% in 1% steps, 2s each (Air OFF)
 3. **Sweep Down**: 100→0% in 1% steps, 2s each (Air OFF)
 4. **Random Pairs**: 15 random power levels × (Air OFF 20s + Air ON 20s)
-- Files: `Data/O3PowerCalibration/YYYY-MM-DD_PowerO3Cal_{LPM}Lpm.csv`
+- Files: `Data/Calibration/{YYYY-MM-DD}_{HHMMSS}_PowerO3Cal_{LPM}Lpm_{O2}O2.csv`
+- O2% is the weighted-average feed O2: `(F_conc × 95 + F_air × 21) / (F_conc + F_air)` rounded to int
 - CSV columns: timestamp, power_pct, o3_pct, o2_lpm, air_comp_on, total_lpm, o2_concentration_pct, cell_temp_c, phase
 
 ## Hardware-Specific Notes

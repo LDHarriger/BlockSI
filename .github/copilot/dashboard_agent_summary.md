@@ -1,6 +1,6 @@
 # Dashboard Agent Summary
 
-> Last updated: 2026-02-26 (Session 5 — Recipe-based protocol migration)
+> Last updated: 2026-02-26 (Session 5 — Recipe protocol + data management restructure)
 
 ## Current State
 
@@ -169,11 +169,41 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 
 ## Pending Work
 
-- `[PROPOSED]` **Power model fitting UI**: After calibration CSV generated, fit piecewise model, store in `Model/O3Power/`, update constants.
-- `[PROPOSED]` **Historical data viewer**: Load and plot old CSV files from `Data/`.
+- `[PROPOSED]` **Power model fitting UI**: After calibration CSV generated, fit piecewise model, store in `Models/O3Power/`, update constants.
+- `[PROPOSED]` **Historical data viewer**: Load and plot old CSV files from `Data/Telemetry/`.
 - `[PROPOSED]` **Future sequence types**: `fill`, `decay`, `sterilize` — recipe generators to be added.
 - `[PROPOSED]` **Validation certificate**: Generate JSON certificate with 24h validity on pass.
 - `[PROPOSED]` **Migrate power curve to ECharts**: Last remaining Plotly chart.
+
+## Data Management  `[IMPLEMENTED]`
+
+### Folder Structure
+```
+Data/
+  Telemetry/       — Daily stream CSVs (was Stream/)
+  Calibration/     — Power-O3 calibration CSVs (was O3PowerCalibration/)
+  Validation/      — Validation run CSVs (new)
+  Fill/            — Future
+  Decay/           — Future
+  Sterilization/   — Future
+Models/            — Git-tracked fitted models
+  O3Power/         — Power→O3 models (was Model/O3Power/)
+  Fill/            — Future
+  Decay/           — Future
+```
+
+### File Naming Convention
+- Calibration: `{YYYY-MM-DD}_{HHMMSS}_PowerO3Cal_{LPM}Lpm_{O2}O2.csv`
+- Telemetry: `{YYYY-MM-DD}_Stream.csv` (daily, appended)
+- O2% = weighted average: `(F_conc × 95 + F_air × 21) / (F_conc + F_air)`, rounded to int
+
+### O2% Calculation
+```python
+O2_CONC_PCT = 95       # O2 concentrator purity
+AIR_COMP_O2_PCT = 21   # Atmospheric O2
+AIR_COMP_LPM = 10.0    # Air compressor flow
+compute_effective_o2_pct(flow_lpm, air_comp_on) → int
+```
 
 ## Known Caveats
 

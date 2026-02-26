@@ -431,3 +431,33 @@ architecture.  The ESP32 executes recipes blindly; the PC owns all recipe
 design, data analysis, and decision-making.
 
 **Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-02-26: Data management folder restructure and O2% in filenames
+
+**Context**: All data files lived in flat directories (`Data/Stream/`,
+`Data/O3PowerCalibration/`) or an ad-hoc `Model/O3Power/` folder.  Calibration
+filenames lacked O2 concentration info, making it impossible to distinguish
+runs at different gas blends.
+
+**Decision**:
+1. **Renamed folders**:
+   - `Data/Stream/` → `Data/Telemetry/`
+   - `Data/O3PowerCalibration/` → `Data/Calibration/`
+   - `Model/O3Power/` → `Models/O3Power/` (top-level `Models/`)
+2. **Added folders**: `Data/Validation/`, `Data/Fill/`, `Data/Decay/`,
+   `Data/Sterilization/`, `Models/Fill/`, `Models/Decay/`
+3. **Calibration filename**: `{YYYY-MM-DD}_{HHMMSS}_PowerO3Cal_{LPM}Lpm_{O2}O2.csv`
+   - Timestamp replaces dedup suffix (_2, _3)
+   - O2% is weighted-average: `(F_conc × 95 + F_air × 21) / (F_conc + F_air)`, rounded to int
+4. **Git tracking**: `Data/` remains gitignored.  `Models/` is git-tracked
+   (small JSON files, diffable, important fitted parameters).
+5. **New function**: `compute_effective_o2_pct(flow_lpm, air_comp_on) → int`
+6. **New constants**: `O2_CONC_PCT = 95`, `AIR_COMP_O2_PCT = 21`
+
+**Rationale**: Separating data by type supports future sequence types.
+O2% in filenames enables condition-specific model fitting.  Models in git
+ensures fitted parameters are versioned and recoverable.
+
+**Status**: `[IMPLEMENTED]`

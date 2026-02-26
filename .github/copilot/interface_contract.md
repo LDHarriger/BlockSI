@@ -259,7 +259,7 @@ These constants must match between ESP32 firmware and PC dashboard:
 
 > Updated: 2026-02-26.  Reflects the recipe-based executor architecture.
 > ESP32: generic `seq_executor` + `sequence_runner` lockout `[IMPLEMENTED]`.
-> Dashboard: generates recipes, parses `SEQ,<type>,SAMPLE,...` data `[NEEDS UPDATE]`.
+> Dashboard: generates recipes, parses `SEQ,<type>,SAMPLE,...` data `[IMPLEMENTED]`.
 
 ### Architecture: "ESP32 = Arms, PC = Brains"
 

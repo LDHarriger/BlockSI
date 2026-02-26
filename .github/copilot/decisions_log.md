@@ -400,3 +400,34 @@ simultaneously.  Clean O2-only data first, then optionally characterize
 air-blend as a distinct operating condition.
 
 **Status**: `[DECIDED]`
+
+---
+
+### 2026-02-26: Dashboard migrated to recipe-based sequence protocol
+
+**Context**: The ESP32 agent replaced sequence-specific firmware
+(`seq_power_cal.c`, `seq_airflow_val.c`) with a generic recipe-based
+executor (`seq_executor.c`).  The old protocol used type-specific messages
+(`CAL_START`, `CAL_DATA`, `CAL_COMPLETE`, `VAL_START`, `VAL_DATA`,
+`VAL_RESULT`, `SEQ_DONE`).  The new protocol uses generic
+`SEQ,<type>,STARTED/STEP/SAMPLE/PROMPT/COMPLETE/ABORTED` messages.
+
+**Decision**: Updated the PC dashboard to:
+1. **Generate recipes**: `generate_cal_recipe()` (~218 steps) and
+   `generate_val_recipe()` (5 steps + 2 prompts)
+2. **Send recipes**: `cmd_sequence_start()` sends the full recipe
+   (sequence_start → seq_step × N → seq_prompt × M → seq_run)
+3. **Handle generic SEQ messages**: Single `_handle_seq()` routes by
+   action (STARTED, STEP, SAMPLE, PROMPT, COMPLETE, ABORTED)
+4. **PC-side analysis**: `_analyze_validation()` computes mean/std/CV,
+   baseline check, spot correlation, target accuracy, pass/fail
+5. **Removed**: All old type-specific handlers and dispatch routes
+6. **Air compressor check**: Pre-flight validation before sending `seq_run`
+7. **Command updates**: `sequence_abort` (primary), `sequence_confirm`
+   (no prompt_id arg)
+
+**Rationale**: Aligns dashboard with the "ESP32 = Arms, PC = Brains"
+architecture.  The ESP32 executes recipes blindly; the PC owns all recipe
+design, data analysis, and decision-making.
+
+**Status**: `[IMPLEMENTED]`

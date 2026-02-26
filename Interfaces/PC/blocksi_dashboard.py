@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """
-BlockSI Dashboard — NiceGUI, Observer-Mode Sequences
+BlockSI Dashboard — NiceGUI, Recipe-Based Sequence Protocol
 Run with:  .venv\\Scripts\\python.exe blocksi_dashboard.py [--port 5000]
 
-Architecture:
+Architecture ("ESP32 = Arms, PC = Brains"):
   - ESP32 connects to PC via TCP on port 5000
-  - ESP32 owns all sequence execution (calibration, validation, etc.)
-  - PC sends CMD,sequence_start/stop/confirm — observes SEQ/CAL/VAL streams
+  - PC generates recipes (step lists, prompts) and sends to ESP32
+  - ESP32 executes blindly: set power, count samples, stream SEQ messages
+  - PC does ALL analysis: statistics, pass/fail, model fitting, CSV saving
   - PC is sole authority for power_target_pct (never from telemetry)
+
+Recipe protocol:
+  PC → CMD,sequence_start,<type>,<params>
+  PC → CMD,seq_step,<idx>,<pwr>,<hold>,<phase>  (× N)
+  PC → CMD,seq_prompt,<before>,<id>,<text>       (× M)
+  PC → CMD,seq_run
+  ESP32 → SEQ,<type>,STARTED/STEP/SAMPLE/PROMPT/COMPLETE/ABORTED
 
 CRITICAL: Commands are COMMA-separated  →  CMD,power_set,50\\n
           NEVER use colons (CMD,power_set:50) — silently fails on ESP32.
@@ -20,6 +28,7 @@ import csv
 import json
 import math
 import os
+import random
 import re
 import time
 from collections import deque
@@ -61,6 +70,27 @@ POWER_MISMATCH_THRESHOLD = 5.0
 # Prompt content mapping — rich descriptions for ESP32 prompt IDs
 # =============================================================================
 PROMPT_CONTENT: dict[str, dict[str, str]] = {
+    "check_flow": {
+        "title": "Verify O2 Flow",
+        "icon": "air",
+        "body": (
+            "<b>Check the rotameter</b> and verify the O2 flow matches the "
+            "target LPM setting.<br><br>"
+            "Ensure the gas route is connected to the 106-H sensor.<br><br>"
+            "Press <b>Confirm</b> when the flow is correct."
+        ),
+    },
+    "check_route": {
+        "title": "Confirm Gas Route",
+        "icon": "sensors",
+        "body": (
+            "<b>Confirm the gas route</b> is correctly plumbed to the 106-H "
+            "ozone sensor for measurement.<br><br>"
+            "Verify there are no leaks and all fittings are tight.<br><br>"
+            "Press <b>Confirm</b> when ready to proceed."
+        ),
+    },
+    # Legacy prompt IDs (kept for backward compatibility)
     "prompt_vessel": {
         "title": "Step 1 — Route to Vessel",
         "icon": "air",
@@ -171,15 +201,16 @@ class SystemState:
         # Connection
         self.connected: bool = False
         # ------------------------------------------------------------------
-        # Sequence observer state  (ESP32 owns execution)
+        # Sequence observer state  (ESP32 executes PC-generated recipes)
         # ------------------------------------------------------------------
         self.sequence_active: bool = False
-        self.seq_type: str = ""            # "cal", "validate", etc.
-        self.seq_phase: str = ""           # current phase name
+        self.seq_type: str = ""            # "calibrate", "validate", etc.
+        self.seq_phase: str = ""           # current phase name from step
         self.seq_progress: float = 0.0     # 0-100
         self.seq_elapsed: float = 0.0      # seconds
-        self.seq_power: float = 0.0        # power ESP32 is commanding
-        self.seq_air: bool = False         # air state during sequence
+        self.seq_power: float = 0.0        # power target at current step
+        self.seq_step_idx: int = 0         # current step index
+        self.seq_step_total: int = 0       # total steps in recipe
         # Pending prompt from ESP32
         self.pending_prompt_id: str = ""
         self.pending_prompt_text: str = ""
@@ -388,6 +419,154 @@ def _save_cal_csv(samples: list[dict], lpm: float) -> str:
 
 
 # =============================================================================
+# Recipe generation  (PC = Brains — generates step lists for ESP32)
+# =============================================================================
+def generate_cal_recipe(flow_lpm: float) -> tuple[list[tuple], list[tuple]]:
+    """Generate calibration recipe: baseline + sweep up + sweep down + random.
+
+    Returns (steps, prompts).  Each step = (idx, power_pct, hold_samples, phase).
+    Each prompt = (before_step_idx, prompt_id, text).
+    """
+    steps: list[tuple] = []
+
+    # Phase 1 — Baseline: 0% for 15 samples (~37s)
+    steps.append((len(steps), 0, 15, "baseline"))
+
+    # Phase 2 — Sweep Up: 0→100% in 1% steps, 2 samples each
+    for pwr in range(0, 101):
+        steps.append((len(steps), pwr, 2, "sweep_up"))
+
+    # Phase 3 — Sweep Down: 100→0% in 1% steps, 2 samples each
+    for pwr in range(100, -1, -1):
+        steps.append((len(steps), pwr, 2, "sweep_down"))
+
+    # Phase 4 — Random spot checks: 15 random levels, 5 samples each
+    for _ in range(15):
+        pwr = random.randint(0, 100)
+        steps.append((len(steps), pwr, 5, "random"))
+
+    prompts: list[tuple] = []  # No prompts for calibration
+    return steps, prompts
+
+
+def generate_val_recipe(
+    power_pct: float, flow_lpm: float
+) -> tuple[list[tuple], list[tuple]]:
+    """Generate validation recipe: baseline + spots + target + cooldown.
+
+    Returns (steps, prompts).
+    """
+    spot1 = max(10, int(power_pct * 0.33))
+    spot2 = max(10, int(power_pct * 0.66))
+    steps: list[tuple] = [
+        (0, 0,              15, "baseline"),    # 0% for ~37s
+        (1, spot1,           5, "spot_low"),    # ~33% for ~12s
+        (2, spot2,           5, "spot_high"),   # ~66% for ~12s
+        (3, int(power_pct), 15, "target"),      # Target power for ~37s
+        (4, 0,               5, "cooldown"),    # 0% for ~12s
+    ]
+    prompts: list[tuple] = [
+        (0, "check_flow", "Verify O2 flow matches rotameter"),
+        (1, "check_route", "Confirm gas route to 106-H sensor"),
+    ]
+    return steps, prompts
+
+
+def _analyze_validation(samples: list[dict], power_pct: float,
+                        flow_lpm: float) -> dict:
+    """Analyze validation samples and determine pass/fail.
+
+    Criteria from interface_contract.md:
+    - Baseline: mean O3 < 0.02 %vol
+    - Spot correlation: each within 0.15 %vol or 15% relative of model
+    - Target accuracy: mean within 10% relative of prediction
+    - Target stability: CV < 5%
+    """
+    result: dict[str, Any] = {
+        "power": power_pct,
+        "flow": flow_lpm,
+        "total_samples": len(samples),
+    }
+
+    # Group by phase
+    by_phase: dict[str, list[dict]] = {}
+    for s in samples:
+        phase = s.get("phase", "unknown")
+        by_phase.setdefault(phase, []).append(s)
+
+    # Baseline check
+    baseline = by_phase.get("baseline", [])
+    if baseline:
+        bl_mean = float(np.mean([s["o3_pct"] for s in baseline]))
+        result["baseline_mean"] = bl_mean
+        result["baseline_ok"] = bl_mean < 0.02
+    else:
+        result["baseline_mean"] = 0.0
+        result["baseline_ok"] = True
+
+    # Spot correlation checks
+    spot_checks = []
+    for phase_name in ("spot_low", "spot_high"):
+        phase_data = by_phase.get(phase_name, [])
+        if not phase_data:
+            continue
+        spot_mean = float(np.mean([s["o3_pct"] for s in phase_data]))
+        spot_power = phase_data[0].get("power_target", 0)
+        expected = predict_o3_from_power(spot_power, flow_lpm)
+        abs_err = abs(spot_mean - expected)
+        rel_err = (abs_err / expected * 100) if expected > 0 else 0
+        spot_ok = abs_err < 0.15 or rel_err < 15
+        spot_checks.append({
+            "phase": phase_name, "mean_o3": spot_mean,
+            "expected_o3": expected, "abs_err": abs_err,
+            "rel_err": rel_err, "ok": spot_ok,
+        })
+    result["spot_checks"] = spot_checks
+    result["spots_ok"] = all(sc["ok"] for sc in spot_checks)
+
+    # Target analysis
+    target = by_phase.get("target", [])
+    if target:
+        t_o3 = [s["o3_pct"] for s in target]
+        mean_o3 = float(np.mean(t_o3))
+        std_o3 = float(np.std(t_o3))
+        mean_temp = float(np.mean([s["temp_c"] for s in target]))
+        expected_o3 = predict_o3_from_power(power_pct, flow_lpm)
+        deviation_pct = (
+            abs(mean_o3 - expected_o3) / expected_o3 * 100
+            if expected_o3 > 0 else 0.0
+        )
+        cv = (std_o3 / mean_o3 * 100) if mean_o3 > 0 else 0.0
+
+        result.update({
+            "mean_o3": mean_o3,
+            "std_o3": std_o3,
+            "expected_o3": expected_o3,
+            "deviation_pct": deviation_pct,
+            "cv_pct": cv,
+            "mean_temp": mean_temp,
+            "target_samples": len(target),
+            "target_ok": deviation_pct < 10,
+            "stable": cv < 5.0,
+        })
+    else:
+        result.update({
+            "mean_o3": 0.0, "std_o3": 0.0, "expected_o3": 0.0,
+            "deviation_pct": 0.0, "cv_pct": 0.0, "mean_temp": 0.0,
+            "target_samples": 0, "target_ok": False, "stable": False,
+        })
+
+    # Overall pass/fail
+    result["passed"] = (
+        result.get("baseline_ok", False)
+        and result.get("spots_ok", True)
+        and result.get("target_ok", False)
+        and result.get("stable", False)
+    )
+    return result
+
+
+# =============================================================================
 # Async TCP Server — ESP32 connects to us
 # =============================================================================
 class TCPServer:
@@ -488,20 +667,6 @@ class TCPServer:
             self._handle_state(line)
         elif prefix == "SEQ":
             self._handle_seq(line)
-        elif prefix == "SEQ_DONE":
-            self._handle_seq_done(line)
-        elif prefix == "CAL_START":
-            self._handle_cal_start(line)
-        elif prefix == "CAL_DATA":
-            self._handle_cal_data(line)
-        elif prefix == "CAL_COMPLETE":
-            self._handle_cal_complete(line)
-        elif prefix == "VAL_START":
-            self._handle_val_start(line)
-        elif prefix == "VAL_DATA":
-            self._handle_val_data(line)
-        elif prefix == "VAL_RESULT":
-            self._handle_val_result(line)
         else:
             log(f"Unknown line: {line[:80]}", "warn")
 
@@ -558,167 +723,154 @@ class TCPServer:
                 pass
         log("STATE sync from ESP32", "state")
 
-    # -- SEQ status updates -----------------------------------------------
+    # -- SEQ message handler (generic recipe protocol) ---------------------
     def _handle_seq(self, line: str) -> None:
+        """Handle all SEQ,<type>,<action>,... messages from recipe executor."""
         parts = line.split(",")
-        # SEQ,prompt,<id>,<text> — special case: interactive prompt
-        if len(parts) >= 3 and parts[1] == "prompt":
-            S.pending_prompt_id = parts[2] if len(parts) > 2 else ""
-            S.pending_prompt_text = ",".join(parts[3:]) if len(parts) > 3 else ""
-            log(f"Prompt requested: {S.pending_prompt_id}", "seq")
+        if len(parts) < 3:
+            log(f"Malformed SEQ: {line[:80]}", "warn")
             return
-        # SEQ,<phase>,<progress>,<power>,<air>,<elapsed>
-        if not S.sequence_active:
+
+        seq_type = parts[1]   # e.g., "calibrate", "validate"
+        action = parts[2]     # STARTED, STEP, SAMPLE, PROMPT, COMPLETE, ABORTED
+
+        if action == "STARTED":
+            # SEQ,calibrate,STARTED,steps=203,flow=4.0
             S.sequence_active = True
-        if len(parts) >= 6:
-            S.seq_phase = parts[1]
-            try:
-                S.seq_progress = float(parts[2])
-            except ValueError:
-                S.seq_progress = 0.0
-            try:
-                S.seq_power = float(parts[3])
-            except ValueError:
-                pass
-            S.seq_air = parts[4].strip() == "1"
-            try:
-                S.seq_elapsed = float(parts[5])
-            except ValueError:
-                pass
-        log(f"SEQ: {S.seq_phase} {S.seq_progress:.0f}%", "seq")
-
-    # -- SEQ_DONE ---------------------------------------------------------
-    def _handle_seq_done(self, line: str) -> None:
-        parts = line.split(",")
-        seq_type = parts[1] if len(parts) > 1 else S.seq_type or "?"
-        result = parts[2] if len(parts) > 2 else "unknown"
-        log(f"Sequence '{seq_type}' done: {result}", "seq")
-
-        S.sequence_active = False
-        S.pending_prompt_id = ""
-        S.pending_prompt_text = ""
-
-        if result == "ok":
-            _notify(f"Sequence '{seq_type}' completed successfully", "positive")
-        elif result == "aborted":
-            _notify(f"Sequence '{seq_type}' aborted", "warning")
-        else:
-            _notify(f"Sequence '{seq_type}' error: {result}", "negative")
-
-    # -- CAL messages (calibration data stream) ---------------------------
-    def _handle_cal_start(self, line: str) -> None:
-        # CAL_START,o2_lpm=<val>,random_count=<n>,step_pct=<n>
-        log(f"CAL_START: {line}", "cal")
-        S.cal_samples = []
-        S.cal_file = ""
-        for part in line.split(","):
-            if "=" not in part:
-                continue
-            k, v = part.split("=", 1)
-            if k.strip() == "o2_lpm":
+            S.seq_type = seq_type
+            S.seq_phase = "started"
+            S.seq_progress = 0.0
+            S.seq_elapsed = 0.0
+            S.seq_step_idx = 0
+            for part in parts[3:]:
+                if "=" not in part:
+                    continue
+                k, v = part.split("=", 1)
                 try:
-                    S.cal_lpm = float(v)
+                    if k.strip() == "steps":
+                        S.seq_step_total = int(v)
+                    elif k.strip() == "flow":
+                        if seq_type == "calibrate":
+                            S.cal_lpm = float(v)
+                        elif seq_type == "validate":
+                            S.val_lpm = float(v)
                 except ValueError:
                     pass
-        _notify(f"Calibration started @ {S.cal_lpm} LPM")
-
-    def _handle_cal_data(self, line: str) -> None:
-        parts = line.split(",")
-        # CAL_DATA,ts,power,actual,o3,o2_lpm,air,total_lpm,temp,phase
-        if len(parts) >= 10:
-            try:
-                sample = {
-                    "timestamp": parts[1],
-                    "power_pct": float(parts[2]),
-                    "actual_pct": float(parts[3]),
-                    "o3_pct": float(parts[4]),
-                    "o2_lpm": float(parts[5]),
-                    "air_comp_on": parts[6].strip() == "1",
-                    "total_lpm": float(parts[7]),
-                    "cell_temp_c": float(parts[8]),
-                    "phase": parts[9].strip(),
-                }
-                S.cal_samples.append(sample)
-            except (ValueError, IndexError):
-                log(f"Bad CAL_DATA: {line[:80]}", "error")
-
-    def _handle_cal_complete(self, line: str) -> None:
-        # CAL_COMPLETE,total=<n>,baseline=<n>,sweep_up=<n>,...
-        log(f"CAL_COMPLETE: {line}", "cal")
-        if S.cal_samples:
-            S.cal_file = _save_cal_csv(S.cal_samples, S.cal_lpm)
-            _notify(
-                f"Calibration complete: {len(S.cal_samples)} samples saved",
-                "positive",
+            log(
+                f"Sequence '{seq_type}' started ({S.seq_step_total} steps)",
+                "seq",
             )
-        else:
-            _notify("Calibration complete (no samples)", "warning")
+            _notify(f"{seq_type.title()} sequence started")
 
-    # -- VAL messages (validation data stream) ----------------------------
-    def _handle_val_start(self, line: str) -> None:
-        # VAL_START,power=<pct>,o2_lpm=<lpm>
-        log(f"VAL_START: {line}", "val")
-        S.val_samples = []
-        S.val_result = {}
-        for part in line.split(","):
-            if "=" not in part:
-                continue
-            k, v = part.split("=", 1)
-            try:
-                if k.strip() == "power":
-                    S.val_power = float(v)
-                elif k.strip() == "o2_lpm":
-                    S.val_lpm = float(v)
-            except ValueError:
-                pass
-        _notify(f"Validation started @ {S.val_power:.0f}% / {S.val_lpm} LPM")
+        elif action == "STEP":
+            # SEQ,calibrate,STEP,45,22,sweep_up
+            if len(parts) >= 6:
+                try:
+                    S.seq_step_idx = int(parts[3])
+                    S.seq_power = float(parts[4])
+                    S.seq_phase = parts[5].strip()
+                    if S.seq_step_total > 0:
+                        S.seq_progress = (
+                            S.seq_step_idx / S.seq_step_total
+                        ) * 100
+                except (ValueError, IndexError):
+                    pass
+            log(
+                f"STEP {S.seq_step_idx}/{S.seq_step_total}: "
+                f"{S.seq_phase} @ {S.seq_power:.0f}%",
+                "seq",
+            )
 
-    def _handle_val_data(self, line: str) -> None:
-        parts = line.split(",")
-        # VAL_DATA,ts,power,actual,o3,o2_lpm,temp
-        if len(parts) >= 7:
-            try:
-                S.val_samples.append({
-                    "timestamp": parts[1],
-                    "power_pct": float(parts[2]),
-                    "actual_pct": float(parts[3]),
-                    "o3_pct": float(parts[4]),
-                    "o2_lpm": float(parts[5]),
-                    "cell_temp_c": float(parts[6]),
-                })
-            except (ValueError, IndexError):
-                log(f"Bad VAL_DATA: {line[:80]}", "error")
+        elif action == "SAMPLE":
+            # SEQ,calibrate,SAMPLE,step_idx,sample_num,o3_pct,temp_c,power_actual
+            if len(parts) >= 8:
+                try:
+                    sample = {
+                        "step_idx": int(parts[3]),
+                        "sample_num": int(parts[4]),
+                        "o3_pct": float(parts[5]),
+                        "temp_c": float(parts[6]),
+                        "power_actual": float(parts[7]),
+                        "phase": S.seq_phase,
+                        "power_target": S.seq_power,
+                    }
+                    if seq_type == "calibrate":
+                        S.cal_samples.append(sample)
+                    elif seq_type == "validate":
+                        S.val_samples.append(sample)
+                except (ValueError, IndexError):
+                    log(f"Bad SAMPLE: {line[:80]}", "error")
 
-    def _handle_val_result(self, line: str) -> None:
-        # VAL_RESULT,power=<>,o2_lpm=<>,mean_o3=<>,std_o3=<>,expected_o3=<>,
-        #            mean_temp=<>,samples=<>,elapsed=<>
-        log(f"VAL_RESULT: {line}", "val")
-        result: dict[str, Any] = {}
-        for part in line.split(","):
-            if "=" not in part:
-                continue
-            k, v = part.split("=", 1)
-            k = k.strip()
-            try:
-                result[k] = float(v)
-            except ValueError:
-                result[k] = v.strip()
-        # Compute deviation
-        mean_o3 = result.get("mean_o3", 0.0)
-        expected = result.get("expected_o3", 0.0)
-        if isinstance(mean_o3, (int, float)) and isinstance(expected, (int, float)):
-            if expected > 0:
-                result["deviation_pct"] = abs(mean_o3 - expected) / expected * 100
+        elif action == "PROMPT":
+            # SEQ,calibrate,PROMPT,check_flow,Verify O2 flow
+            S.pending_prompt_id = parts[3] if len(parts) > 3 else ""
+            S.pending_prompt_text = (
+                ",".join(parts[4:]) if len(parts) > 4 else ""
+            )
+            log(f"Prompt requested: {S.pending_prompt_id}", "seq")
+
+        elif action == "COMPLETE":
+            # SEQ,calibrate,COMPLETE,1020
+            elapsed = 0.0
+            if len(parts) > 3:
+                try:
+                    elapsed = float(parts[3])
+                except ValueError:
+                    pass
+            S.seq_elapsed = elapsed
+            log(
+                f"Sequence '{seq_type}' complete ({elapsed:.0f}s)", "seq"
+            )
+            # Post-sequence analysis
+            if seq_type == "calibrate":
+                if S.cal_samples:
+                    S.cal_file = _save_cal_csv(S.cal_samples, S.cal_lpm)
+                    _notify(
+                        f"Calibration: {len(S.cal_samples)} samples saved",
+                        "positive",
+                    )
+                else:
+                    _notify("Calibration complete (no samples)", "warning")
+            elif seq_type == "validate":
+                S.val_result = _analyze_validation(
+                    S.val_samples, S.val_power, S.val_lpm
+                )
+                dev = S.val_result.get("deviation_pct", 0.0)
+                if S.val_result.get("passed"):
+                    _notify(
+                        f"Validation PASSED — {dev:.1f}% deviation",
+                        "positive",
+                    )
+                elif dev < 20:
+                    _notify(
+                        f"Validation marginal — {dev:.1f}% deviation",
+                        "warning",
+                    )
+                else:
+                    _notify(
+                        f"Validation FAILED — {dev:.1f}% deviation",
+                        "negative",
+                    )
             else:
-                result["deviation_pct"] = 0.0
-        S.val_result = result
-        dev = result.get("deviation_pct", 0.0)
-        if dev < 10:
-            _notify(f"Validation passed - {dev:.1f}% deviation", "positive")
-        elif dev < 20:
-            _notify(f"Validation marginal - {dev:.1f}% deviation", "warning")
+                _notify(
+                    f"{seq_type.title()} completed ({elapsed:.0f}s)",
+                    "positive",
+                )
+            S.sequence_active = False
+            S.pending_prompt_id = ""
+            S.pending_prompt_text = ""
+
+        elif action == "ABORTED":
+            # SEQ,calibrate,ABORTED,user_request
+            reason = ",".join(parts[3:]) if len(parts) > 3 else "unknown"
+            log(f"Sequence '{seq_type}' aborted: {reason}", "seq")
+            S.sequence_active = False
+            S.pending_prompt_id = ""
+            S.pending_prompt_text = ""
+            _notify(f"{seq_type.title()} aborted: {reason}", "warning")
+
         else:
-            _notify(f"Validation failed - {dev:.1f}% deviation", "negative")
+            log(f"Unknown SEQ action: {action} in {line[:80]}", "warn")
 
     # -- sending ----------------------------------------------------------
     async def _send_raw(self, text: str) -> bool:
@@ -785,45 +937,114 @@ async def cmd_sync_relays() -> None:
 
 async def cmd_emergency_stop() -> None:
     if S.sequence_active:
-        await cmd_sequence_stop()
+        await cmd_sequence_abort()
     await cmd_set_power(0)
     await cmd_set_relay("ozone_gen", False)
 
 
-async def cmd_sequence_start(seq_type: str, *params) -> bool:
-    """Send CMD,sequence_start,<type>,<params>."""
-    param_str = ",".join(str(p) for p in params)
-    cmd = f"sequence_start,{seq_type}"
-    if param_str:
-        cmd += f",{param_str}"
+async def cmd_sequence_start(seq_type: str, **kwargs) -> bool:
+    """Generate a recipe and send it to ESP32.
+
+    Protocol: sequence_start → seq_step × N → seq_prompt × M → seq_run.
+    Steps are sent via raw TCP (no individual response wait) for speed.
+    """
+    if not S.connected:
+        _notify("Not connected to ESP32", "negative")
+        return False
+
+    # Generate recipe based on type
+    if seq_type == "calibrate":
+        flow = kwargs.get("flow", DEFAULT_FLOW_LPM)
+        steps, prompts = generate_cal_recipe(flow)
+        param_str = f"flow={flow}"
+    elif seq_type == "validate":
+        power = kwargs.get("power", 75.0)
+        flow = kwargs.get("flow", DEFAULT_FLOW_LPM)
+        steps, prompts = generate_val_recipe(power, flow)
+        param_str = f"power={power},flow={flow}"
+        S.val_power = power
+        S.val_lpm = flow
+    else:
+        log(f"Unknown sequence type: {seq_type}", "error")
+        return False
+
+    # Pre-flight: verify air compressor is OFF
+    if S.relay_air_comp:
+        _notify(
+            "Air compressor must be OFF for calibration/validation",
+            "negative",
+        )
+        return False
+
+    # Enter loading state
     S.sequence_active = True
     S.seq_type = seq_type
-    S.seq_phase = "starting"
+    S.seq_phase = "loading"
     S.seq_progress = 0.0
     S.seq_elapsed = 0.0
+    S.seq_step_idx = 0
+    S.seq_step_total = len(steps)
     S.pending_prompt_id = ""
     S.pending_prompt_text = ""
-    resp = await tcp.send_command(cmd)
+    if seq_type == "calibrate":
+        S.cal_samples = []
+        S.cal_file = ""
+        S.cal_lpm = kwargs.get("flow", DEFAULT_FLOW_LPM)
+    elif seq_type == "validate":
+        S.val_samples = []
+        S.val_result = {}
+
+    # 1. Send sequence_start (wait for RSP)
+    resp = await tcp.send_command(f"sequence_start,{seq_type},{param_str}")
+    if not resp or "OK" not in resp:
+        log(f"sequence_start failed: {resp}", "error")
+        S.sequence_active = False
+        return False
+
+    # 2. Send all steps via raw TCP (fire-and-forget for speed)
+    log(f"Sending {len(steps)} recipe steps...", "seq")
+    for idx, pwr, hold, phase in steps:
+        await tcp._send_raw(f"CMD,seq_step,{idx},{pwr},{hold},{phase}\n")
+        await asyncio.sleep(0.005)  # brief yield to avoid buffer overflow
+
+    # 3. Send prompts via raw TCP
+    for before, pid, text in prompts:
+        await tcp._send_raw(f"CMD,seq_prompt,{before},{pid},{text}\n")
+        await asyncio.sleep(0.005)
+
+    # Brief pause for ESP32 to process buffered commands
+    await asyncio.sleep(0.1)
+
+    # 4. Send seq_run (wait for RSP — validates recipe loaded OK)
+    resp = await tcp.send_command("seq_run")
     if resp and "OK" in resp:
+        log(f"Recipe running: {len(steps)} steps", "seq")
         return True
+
+    log(f"seq_run failed: {resp}", "error")
     S.sequence_active = False
     return False
 
 
-async def cmd_sequence_stop() -> bool:
-    """Send CMD,sequence_stop. State cleared by SEQ_DONE handler."""
-    resp = await tcp.send_command("sequence_stop")
+async def cmd_sequence_abort(reason: str = "") -> bool:
+    """Send CMD,sequence_abort[,reason]."""
+    cmd = "sequence_abort"
+    if reason:
+        cmd += f",{reason}"
+    resp = await tcp.send_command(cmd)
     return resp is not None and "OK" in resp
 
 
-async def cmd_sequence_confirm(prompt_id: str, value: str = "") -> bool:
-    """Send CMD,sequence_confirm,<prompt_id>[,<value>]."""
-    cmd = f"sequence_confirm,{prompt_id}"
-    if value:
-        cmd += f",{value}"
+async def cmd_sequence_stop() -> bool:
+    """Legacy alias — sends sequence_abort."""
+    return await cmd_sequence_abort()
+
+
+async def cmd_sequence_confirm() -> bool:
+    """Send CMD,sequence_confirm (no args — unblocks pending prompt)."""
     S.pending_prompt_id = ""
     S.pending_prompt_text = ""
-    resp = await tcp.send_command(cmd)
+    resp = await tcp.send_command("sequence_confirm")
     return resp is not None and "OK" in resp
 
 
@@ -1162,13 +1383,11 @@ async def index():
             with ui.row().classes("justify-end w-full q-gutter-sm"):
                 ui.button("Abort Sequence", color="red", on_click=lambda: (
                     prompt_dialog.close(),
-                    asyncio.create_task(cmd_sequence_stop()),
+                    asyncio.create_task(cmd_sequence_abort()),
                 )).props("flat")
                 ui.button("Confirm", color="green", icon="check", on_click=lambda: (
                     prompt_dialog.close(),
-                    asyncio.create_task(
-                        cmd_sequence_confirm(S.pending_prompt_id)
-                    ),
+                    asyncio.create_task(cmd_sequence_confirm()),
                 )).props("unelevated")
 
         # -- TABS ---------------------------------------------------------
@@ -1263,8 +1482,9 @@ async def index():
                     "w-full q-mb-sm"
                 ):
                     ui.markdown(
-                        "ESP32-owned sequence (~17 min): Baseline -> Sweep Up -> "
-                        "Sweep Down -> Random Pairs"
+                        "PC-generated recipe (~17 min): Baseline → Sweep Up "
+                        "(0→100%) → Sweep Down (100→0%) → Random Spots. "
+                        "Air compressor must be OFF."
                     ).classes("text-caption text-grey q-mb-sm")
 
                     with ui.row().classes("q-gutter-sm items-end q-mb-sm"):
@@ -1274,11 +1494,10 @@ async def index():
                         ).classes("w-24")
 
                         async def _start_cal():
-                            if not S.connected:
-                                _notify("Not connected to ESP32", "negative")
-                                return
                             lpm = float(cal_lpm_input.value or DEFAULT_FLOW_LPM)
-                            await cmd_sequence_start("cal", lpm)
+                            await cmd_sequence_start(
+                                "calibrate", flow=lpm,
+                            )
 
                         cal_start_btn = ui.button(
                             "Start", icon="play_arrow",
@@ -1286,16 +1505,18 @@ async def index():
                         )
                         cal_stop_btn = ui.button(
                             "Stop", icon="stop",
-                            on_click=lambda: asyncio.create_task(cmd_sequence_stop()),
+                            on_click=lambda: asyncio.create_task(
+                                cmd_sequence_abort()
+                            ),
                             color="grey",
                         )
 
                     # Phase stepper cards
                     CAL_PHASES_DEF = [
-                        ("baseline", "Baseline", "30s @ 0%"),
-                        ("sweep_up", "Sweep Up", "0 -> 100%"),
-                        ("sweep_down", "Sweep Down", "100 -> 0%"),
-                        ("random_pairs", "Random Pairs", "15 levels x Air"),
+                        ("baseline", "Baseline", "~37s @ 0%"),
+                        ("sweep_up", "Sweep Up", "0 → 100%"),
+                        ("sweep_down", "Sweep Down", "100 → 0%"),
+                        ("random", "Random Spots", "15 random levels"),
                     ]
                     cal_step_cards: dict[str, Any] = {}
                     with ui.row().classes("w-full q-gutter-xs q-mb-sm"):
@@ -1313,19 +1534,21 @@ async def index():
                     ).classes("q-mb-xs")
                     cal_info_lbl = ui.label("").classes("text-caption")
 
-                    # Live scatter (ECharts)
+                    # Live scatter (ECharts) — colored by phase
                     cal_chart = ui.echart({
                         "darkMode": True,
                         "tooltip": {"trigger": "item"},
-                        "legend": {"data": ["Air OFF", "Air ON"]},
+                        "legend": {"data": ["Sweep Up", "Sweep Down", "Random"]},
                         "xAxis": {"type": "value", "name": "Power %",
                                   "min": 0, "max": 100},
                         "yAxis": {"type": "value", "name": "O3 %vol"},
                         "series": [
-                            {"name": "Air OFF", "type": "scatter", "data": [],
+                            {"name": "Sweep Up", "type": "scatter", "data": [],
                              "itemStyle": {"color": "#42A5F5"}},
-                            {"name": "Air ON", "type": "scatter", "data": [],
+                            {"name": "Sweep Down", "type": "scatter", "data": [],
                              "itemStyle": {"color": "#FFA726"}},
+                            {"name": "Random", "type": "scatter", "data": [],
+                             "itemStyle": {"color": "#66BB6A"}},
                         ],
                     }).classes("w-full").style("height: 280px")
 
@@ -1358,9 +1581,9 @@ async def index():
                     "w-full q-mb-sm"
                 ):
                     ui.markdown(
-                        "Pre-flight check: measures actual O3 output at a set "
-                        "power level and compares to the predicted value. "
-                        "Requires operator to route L-valve at two points."
+                        "Pre-flight check: PC generates a recipe with baseline, "
+                        "spot checks, and target power hold. Compares measured "
+                        "O3 to model prediction. Air compressor must be OFF."
                     ).classes("text-caption text-grey q-mb-sm")
 
                     with ui.row().classes("q-gutter-sm items-end q-mb-sm"):
@@ -1374,12 +1597,11 @@ async def index():
                         ).classes("w-24")
 
                         async def _start_val():
-                            if not S.connected:
-                                _notify("Not connected to ESP32", "negative")
-                                return
                             pwr = float(val_pwr_input.value or 75)
                             lpm = float(val_lpm_input.value or DEFAULT_FLOW_LPM)
-                            await cmd_sequence_start("validate", pwr, lpm)
+                            await cmd_sequence_start(
+                                "validate", power=pwr, flow=lpm,
+                            )
 
                         val_start_btn = ui.button(
                             "Validate", icon="play_arrow",
@@ -1621,8 +1843,14 @@ async def index():
         # -- sequence banner + control lock --------------------------------
         seq_banner.visible = S.sequence_active
         if S.sequence_active:
-            type_names = {"cal": "Calibration", "validate": "Validation"}
-            seq_name_lbl.text = type_names.get(S.seq_type, S.seq_type)
+            type_names = {
+                "calibrate": "CALIBRATE",
+                "validate": "VALIDATE",
+            }
+            display_name = type_names.get(S.seq_type, S.seq_type.upper())
+            seq_name_lbl.text = (
+                f"{display_name} — Step {S.seq_step_idx}/{S.seq_step_total}"
+            )
             seq_phase_lbl.text = S.seq_phase.replace("_", " ").title()
             seq_progress_bar.value = S.seq_progress / 100
             mins = int(S.seq_elapsed) // 60
@@ -1703,18 +1931,23 @@ async def index():
             raw_table.update()
 
         # -- calibration observer UI --------------------------------------
-        if S.sequence_active and S.seq_type == "cal":
-            cal_phase_lbl.text = f"Phase: {S.seq_phase.replace('_', ' ').title()}"
+        if S.sequence_active and S.seq_type == "calibrate":
+            cal_phase_lbl.text = (
+                f"Phase: {S.seq_phase.replace('_', ' ').title()}  "
+                f"Step {S.seq_step_idx}/{S.seq_step_total}"
+            )
             cal_progress.value = S.seq_progress / 100
             cal_info_lbl.text = (
                 f"Power={S.seq_power:.0f}%  "
                 f"O3={S.vessel_o3_pct:.2f}%  "
-                f"Air={'ON' if S.seq_air else 'OFF'}  "
                 f"Samples={len(S.cal_samples)}"
             )
             # Highlight active/completed phase cards
-            phase_order = ["baseline", "sweep_up", "sweep_down", "random_pairs"]
-            active_idx = phase_order.index(S.seq_phase) if S.seq_phase in phase_order else -1
+            phase_order = ["baseline", "sweep_up", "sweep_down", "random"]
+            active_idx = (
+                phase_order.index(S.seq_phase)
+                if S.seq_phase in phase_order else -1
+            )
             for i, pk in enumerate(phase_order):
                 card = cal_step_cards.get(pk)
                 if card is None:
@@ -1735,14 +1968,23 @@ async def index():
             for card in cal_step_cards.values():
                 card.style("opacity: 0.4; border: 1px solid #555")
 
-        # Cal scatter chart
+        # Cal scatter chart — by phase (air compressor OFF during cal)
         if S.cal_samples:
-            air_off = [[s["power_pct"], s["o3_pct"]]
-                       for s in S.cal_samples if not s.get("air_comp_on")]
-            air_on = [[s["power_pct"], s["o3_pct"]]
-                      for s in S.cal_samples if s.get("air_comp_on")]
-            cal_chart.options["series"][0]["data"] = air_off
-            cal_chart.options["series"][1]["data"] = air_on
+            sweep_up = [
+                [s["power_actual"], s["o3_pct"]]
+                for s in S.cal_samples if s.get("phase") == "sweep_up"
+            ]
+            sweep_down = [
+                [s["power_actual"], s["o3_pct"]]
+                for s in S.cal_samples if s.get("phase") == "sweep_down"
+            ]
+            rand_pts = [
+                [s["power_actual"], s["o3_pct"]]
+                for s in S.cal_samples if s.get("phase") == "random"
+            ]
+            cal_chart.options["series"][0]["data"] = sweep_up
+            cal_chart.options["series"][1]["data"] = sweep_down
+            cal_chart.options["series"][2]["data"] = rand_pts
             cal_chart.update()
 
         # -- validation observer UI ---------------------------------------
@@ -1756,24 +1998,23 @@ async def index():
         if S.val_result:
             val_result_card.visible = True
             r = S.val_result
+            passed = r.get("passed", False)
             dev = r.get("deviation_pct", 0.0)
-            if isinstance(dev, (int, float)):
-                if dev < 10:
-                    color, icon_name = "green", "check_circle"
-                elif dev < 20:
-                    color, icon_name = "amber", "warning"
-                else:
-                    color, icon_name = "red", "error"
+            cv = r.get("cv_pct", 0.0)
+            if passed:
+                color, icon_name = "green", "check_circle"
+            elif isinstance(dev, (int, float)) and dev < 20:
+                color, icon_name = "amber", "warning"
             else:
-                color, icon_name = "grey", "help"
-                dev = 0.0
+                color, icon_name = "red", "error"
             val_result_icon.name = icon_name
             val_result_icon._classes = [f"text-h3 text-{color}"]
             val_result_icon.update()
-            val_result_title.text = f"Deviation: {dev:.1f}%"
+            status = "PASSED" if passed else "FAILED"
+            val_result_title.text = f"{status} — {dev:.1f}% deviation"
             val_mean_lbl.text = f"Mean O3: {r.get('mean_o3', 0):.3f}%"
             val_expected_lbl.text = f"Expected: {r.get('expected_o3', 0):.3f}%"
-            val_dev_lbl.text = f"Deviation: {dev:.1f}%"
+            val_dev_lbl.text = f"CV: {cv:.1f}%"
             val_std_lbl.text = f"Std: {r.get('std_o3', 0):.4f}%"
 
         # -- debug state dump ---------------------------------------------
@@ -1794,10 +2035,12 @@ async def index():
             "sequence_active": S.sequence_active,
             "seq_type": S.seq_type,
             "seq_phase": S.seq_phase,
+            "seq_step": f"{S.seq_step_idx}/{S.seq_step_total}",
             "seq_progress": round(S.seq_progress, 1),
             "pending_prompt": S.pending_prompt_id,
             "cal_samples": len(S.cal_samples),
             "val_samples": len(S.val_samples),
+            "val_passed": S.val_result.get("passed", None),
             "data_buf": len(data_buf),
             "last_update": str(S.last_update) if S.last_update else None,
         }, indent=2)

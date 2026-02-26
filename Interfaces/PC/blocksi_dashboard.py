@@ -1,41 +1,38 @@
 #!/usr/bin/env python3
 """
-BlockSI Dashboard -- NiceGUI Version
-Migrated from Streamlit v9.  Run with:  python blocksi_dashboard.py [--port 5000]
+BlockSI Dashboard — NiceGUI, Observer-Mode Sequences
+Run with:  .venv\\Scripts\\python.exe blocksi_dashboard.py [--port 5000]
 
-Solves four Streamlit limitations:
-  1. No full-script rerun  ->  incremental DOM via WebSocket
-  2. bind_value()          ->  multiple controls for the same value stay synced
-  3. asyncio TCP           ->  non-blocking I/O, instant push to UI
-  4. ui.timer()            ->  calibration sequences run without page flicker
+Architecture:
+  - ESP32 connects to PC via TCP on port 5000
+  - ESP32 owns all sequence execution (calibration, validation, etc.)
+  - PC sends CMD,sequence_start/stop/confirm — observes SEQ/CAL/VAL streams
+  - PC is sole authority for power_target_pct (never from telemetry)
 
-DATA format from ESP32 (v2):
-  DATA,esp_timestamp_ms,vessel_o3_pct,temp_c,pressure_mbar,sample_v,ref_v,
-       day,month,year,hour,minute,second,room_o3_ppm,vessel_temp_c,
-       power_target_pct,power_actual_pct,wiper_voltage
-
-CRITICAL: Commands are COMMA-separated  ->  CMD,power_set,50\\n
-          NEVER use colons (CMD,power_set:50) -- silently fails on ESP32.
+CRITICAL: Commands are COMMA-separated  →  CMD,power_set,50\\n
+          NEVER use colons (CMD,power_set:50) — silently fails on ESP32.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
+import json
+import math
 import os
 import re
 import time
 from collections import deque
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-
 from nicegui import ui, app
 
 # =============================================================================
-# Configuration
+# Configuration & Paths
 # =============================================================================
 DEFAULT_PORT = 5000
 MAX_DATA_POINTS = 500
@@ -56,22 +53,43 @@ DEFAULT_FLOW_LPM = 4.0
 
 # O3 mass-flow conversion  mg/s = %vol * LPM * K
 O3_MASS_FLOW_K = 0.357
-
-# Calibration timing
-CAL_STEP_DURATION_S = 2.0
-CAL_BASELINE_DURATION_S = 30.0
-CAL_AIR_DWELL_TIME_S = 20.0
-CAL_NUM_RANDOM_POINTS = 15
 AIR_COMP_LPM = 10.0
 
 POWER_MISMATCH_THRESHOLD = 5.0
 
+# =============================================================================
+# Prompt content mapping — rich descriptions for ESP32 prompt IDs
+# =============================================================================
+PROMPT_CONTENT: dict[str, dict[str, str]] = {
+    "prompt_vessel": {
+        "title": "Step 1 — Route to Vessel",
+        "icon": "air",
+        "body": (
+            "<b>Turn the L-valve</b> so airflow goes through the sterilization "
+            "vessel.<br><br>"
+            "Verify the rotameter reads the target LPM.<br><br>"
+            "Press <b>Confirm</b> when ready."
+        ),
+    },
+    "prompt_direct": {
+        "title": "Step 2 — Route Direct to Sensor",
+        "icon": "sensors",
+        "body": (
+            "<b>Turn the L-valve</b> so airflow goes directly to the 106-H "
+            "sensor, bypassing the vessel.<br><br>"
+            "Adjust the needle valve until the rotameter matches the vessel "
+            "route flow.<br><br>"
+            "Press <b>Confirm</b> when ready."
+        ),
+    },
+}
+
 
 # =============================================================================
-# Conversion helpers  (pure functions -- ported verbatim from v9)
+# Conversion helpers  (pure functions — ported from v9)
 # =============================================================================
 def predict_o3_from_power(power_pct: float, flow_lpm: float) -> float:
-    """Piecewise model: threshold -> linear ramp -> saturation."""
+    """Piecewise model: threshold → linear ramp → saturation."""
     if power_pct <= 0 or flow_lpm <= 0:
         return 0.0
     o3_max = POWER_MODEL_A / flow_lpm + POWER_MODEL_B
@@ -125,18 +143,16 @@ def generate_power_curve(flow_lpm: float):
 
 
 # =============================================================================
-# SystemState  (single source of truth -- same fields as v9)
+# SystemState  (single source of truth)
 # =============================================================================
 class SystemState:
-    """Mutable singleton; survives the whole process -- no cache eviction."""
-
     def __init__(self) -> None:
-        # Power
+        # Power — PC is sole authority for target
         self.power_target_pct: int = 0
         self.power_actual_pct: float = 0.0
         self.wiper_voltage: float = 0.0
         self.power_error: bool = False
-        # Flow (user-entered from analog meter)
+        # Flow
         self.flow_lpm: float = DEFAULT_FLOW_LPM
         # Relays
         self.relay_o3_gen: bool = False
@@ -152,26 +168,32 @@ class SystemState:
         self.esp_time_offset_ms: int = 0
         self.time_synced: bool = False
         self.last_update: Optional[datetime] = None
-        # Calibration
-        self.cal_active: bool = False
-        self.cal_phase: Optional[str] = None
-        self.cal_phase_progress: float = 0.0
-        self.cal_current_power: int = 0
-        self.cal_air_state: bool = False
-        self.cal_start_time: float = 0.0
-        self.cal_step_start: float = 0.0
-        self.cal_data: list[dict] = []
-        self.cal_random_powers: list[int] = []
-        self.cal_random_idx: int = 0
-        self.cal_o2_lpm: float = DEFAULT_FLOW_LPM
         # Connection
         self.connected: bool = False
-        # Sequence tracking (visual indicator + authority model)
+        # ------------------------------------------------------------------
+        # Sequence observer state  (ESP32 owns execution)
+        # ------------------------------------------------------------------
         self.sequence_active: bool = False
-        self.sequence_name: str = ""
-        self.sequence_description: str = ""
-        # Notification preference: "all", "errors", "none"
-        self.notify_level: str = "all"
+        self.seq_type: str = ""            # "cal", "validate", etc.
+        self.seq_phase: str = ""           # current phase name
+        self.seq_progress: float = 0.0     # 0-100
+        self.seq_elapsed: float = 0.0      # seconds
+        self.seq_power: float = 0.0        # power ESP32 is commanding
+        self.seq_air: bool = False         # air state during sequence
+        # Pending prompt from ESP32
+        self.pending_prompt_id: str = ""
+        self.pending_prompt_text: str = ""
+        # Calibration observer
+        self.cal_samples: list[dict] = []
+        self.cal_lpm: float = DEFAULT_FLOW_LPM
+        self.cal_file: str = ""
+        # Validation observer
+        self.val_power: float = 75.0
+        self.val_lpm: float = DEFAULT_FLOW_LPM
+        self.val_samples: list[dict] = []
+        self.val_result: dict = {}
+        # Settings
+        self.notify_level: str = "all"     # "all" | "errors" | "none"
         # Derived (kept in sync by update_derived)
         self.target_o3_pct: float = 0.0
         self.target_mg_per_s: float = 0.0
@@ -189,7 +211,7 @@ class SystemState:
         )
 
 
-S = SystemState()  # singleton
+S = SystemState()
 
 
 # =============================================================================
@@ -252,9 +274,7 @@ def apply_telemetry(sample: dict) -> None:
     S.cell_temp_c = sample.get("cell_temp_c", 0.0)
     S.pressure_mbar = sample.get("pressure_mbar", 0.0)
     S.last_update = sample.get("timestamp")
-    # power_target_pct: PC is sole authority -- never accept from
-    # telemetry.  Avoids stale-DATA feedback loops where old ESP32
-    # readings overwrite the value the user just commanded.
+    # power_target_pct: PC is sole authority — never accept from telemetry
     S.update_derived()
     S.power_error = (
         abs(S.power_target_pct - S.power_actual_pct) > POWER_MISMATCH_THRESHOLD
@@ -262,11 +282,115 @@ def apply_telemetry(sample: dict) -> None:
 
 
 # =============================================================================
-# Async TCP Server
+# Shared buffers / logging
+# =============================================================================
+data_buf: deque[dict] = deque(maxlen=MAX_DATA_POINTS)
+debug_log: deque[tuple[str, str, str]] = deque(maxlen=200)
+
+# Log categories and their CSS colors
+LOG_CAT_COLORS = {
+    "send": "#42A5F5",
+    "recv": "#66BB6A",
+    "error": "#EF5350",
+    "warn": "#FFA726",
+    "info": "#BDBDBD",
+    "seq": "#CE93D8",
+    "cal": "#4DD0E1",
+    "val": "#AED581",
+    "state": "#FFEE58",
+}
+
+
+def log(msg: str, cat: str = "info") -> None:
+    ts = datetime.now().strftime("%H:%M:%S")
+    debug_log.appendleft((ts, cat, msg))
+
+
+def _notify(msg: str, level: str = "positive") -> None:
+    """Show toast notification respecting user preference."""
+    if S.notify_level == "none":
+        return
+    if S.notify_level == "errors" and level == "positive":
+        return
+    ui.notify(msg, type=level, position="bottom-right", timeout=3000)
+
+
+# =============================================================================
+# CSV logger  (stream telemetry to daily files)
+# =============================================================================
+class _CSVLogger:
+    def __init__(self) -> None:
+        self._path = os.path.join(
+            STREAM_DIR, f"{datetime.now():%Y-%m-%d}_Stream.csv"
+        )
+        self._header = False
+
+    def write(self, s: dict) -> None:
+        try:
+            if not self._header:
+                with open(self._path, "w") as f:
+                    f.write(
+                        "timestamp,esp_ts_ms,vessel_o3_pct,cell_temp_c,"
+                        "pressure_mbar,room_o3_ppm,vessel_temp_c,"
+                        "power_target,power_actual,wiper_v\n"
+                    )
+                self._header = True
+            with open(self._path, "a") as f:
+                f.write(
+                    f"{s['timestamp']},{s['esp_ts_ms']},"
+                    f"{s['vessel_o3_pct']},{s['cell_temp_c']},"
+                    f"{s['pressure_mbar']},{s['room_o3_ppm']},"
+                    f"{s['vessel_temp_c']},{s.get('power_target_pct', 0)},"
+                    f"{s.get('power_actual_pct', 0)},"
+                    f"{s.get('wiper_voltage', 0)}\n"
+                )
+        except Exception:
+            pass
+
+
+csv_logger = _CSVLogger()
+
+
+# =============================================================================
+# Calibration file helpers
+# =============================================================================
+def list_calibration_files() -> dict[float, list[str]]:
+    out: dict[float, list[str]] = {}
+    if not os.path.exists(CALIBRATION_DIR):
+        return out
+    for fn in os.listdir(CALIBRATION_DIR):
+        if fn.endswith(".csv") and "PowerO3Cal" in fn:
+            m = re.search(r"_(\d+(?:\.\d+)?)Lpm", fn)
+            if m:
+                lpm = float(m.group(1))
+                out.setdefault(lpm, []).append(
+                    os.path.join(CALIBRATION_DIR, fn)
+                )
+    return out
+
+
+def _save_cal_csv(samples: list[dict], lpm: float) -> str:
+    """Save calibration samples to CSV, return filename."""
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    lpm_s = f"{lpm:.0f}" if lpm == int(lpm) else f"{lpm:.1f}"
+    fname = f"{date_str}_PowerO3Cal_{lpm_s}Lpm.csv"
+    fpath = os.path.join(CALIBRATION_DIR, fname)
+    if os.path.exists(fpath):
+        for i in range(2, 100):
+            fname = f"{date_str}_PowerO3Cal_{lpm_s}Lpm_{i}.csv"
+            fpath = os.path.join(CALIBRATION_DIR, fname)
+            if not os.path.exists(fpath):
+                break
+    if samples:
+        pd.DataFrame(samples).to_csv(fpath, index=False)
+        log(f"Saved {len(samples)} cal samples -> {fname}", "cal")
+    return fname
+
+
+# =============================================================================
+# Async TCP Server — ESP32 connects to us
 # =============================================================================
 class TCPServer:
-    """asyncio TCP server -- ESP32 connects to us on *port*."""
-
     def __init__(self, port: int = DEFAULT_PORT) -> None:
         self.port = port
         self._server: Optional[asyncio.AbstractServer] = None
@@ -275,7 +399,7 @@ class TCPServer:
         self._response_q: asyncio.Queue[str] = asyncio.Queue(maxsize=50)
         self._running = False
 
-    # -- lifecycle ---------------------------------------------------------
+    # -- lifecycle --------------------------------------------------------
     async def start(self) -> None:
         if self._running:
             return
@@ -304,7 +428,7 @@ class TCPServer:
             self._reader = None
         S.connected = False
 
-    # -- connection handler ------------------------------------------------
+    # -- connection handler -----------------------------------------------
     async def _on_connect(
         self,
         reader: asyncio.StreamReader,
@@ -336,24 +460,53 @@ class TCPServer:
                     line = line.strip()
                     if not line:
                         continue
-                    if line.startswith("DATA,"):
-                        sample = parse_data_line(line)
-                        if sample:
-                            apply_telemetry(sample)
-                            data_buf.append(sample)
-                            csv_logger.write(sample)
-                    elif line.startswith("STATE,"):
-                        self._handle_state(line)
-                    elif line.startswith("RSP,"):
-                        self._handle_response(line)
+                    self._dispatch(line)
         except Exception as exc:
             log(f"TCP read error: {exc}", "error")
         finally:
             log("ESP32 disconnected", "warn")
             await self._close_client()
+            # Abort sequence observer state on disconnect
+            if S.sequence_active:
+                S.sequence_active = False
+                S.pending_prompt_id = ""
+                S.pending_prompt_text = ""
+                _notify("Sequence aborted — ESP32 disconnected", "negative")
 
-    def _handle_response(self, line: str) -> None:
-        # Time-sync parsing
+    # -- dispatch (routes all incoming lines) ------------------------------
+    def _dispatch(self, line: str) -> None:
+        prefix = line.split(",", 1)[0]
+        if prefix == "DATA":
+            sample = parse_data_line(line)
+            if sample:
+                apply_telemetry(sample)
+                data_buf.append(sample)
+                csv_logger.write(sample)
+        elif prefix == "RSP":
+            self._handle_rsp(line)
+        elif prefix == "STATE":
+            self._handle_state(line)
+        elif prefix == "SEQ":
+            self._handle_seq(line)
+        elif prefix == "SEQ_DONE":
+            self._handle_seq_done(line)
+        elif prefix == "CAL_START":
+            self._handle_cal_start(line)
+        elif prefix == "CAL_DATA":
+            self._handle_cal_data(line)
+        elif prefix == "CAL_COMPLETE":
+            self._handle_cal_complete(line)
+        elif prefix == "VAL_START":
+            self._handle_val_start(line)
+        elif prefix == "VAL_DATA":
+            self._handle_val_data(line)
+        elif prefix == "VAL_RESULT":
+            self._handle_val_result(line)
+        else:
+            log(f"Unknown line: {line[:80]}", "warn")
+
+    # -- RSP handler -------------------------------------------------------
+    def _handle_rsp(self, line: str) -> None:
         if "time_sync" in line and "esp=" in line:
             m_esp = re.search(r"esp=(\d+)", line)
             m_pc = re.search(r"pc=(\d+)", line)
@@ -363,14 +516,27 @@ class TCPServer:
                 )
                 S.time_synced = True
                 log(f"Time synced (offset={S.esp_time_offset_ms} ms)")
+        # Relay-get parsing
+        if "relay_get" in line:
+            for part in line.split(","):
+                if "=" not in part:
+                    continue
+                k, v = part.split("=", 1)
+                on = v.strip() == "1"
+                if k == "ozone_gen":
+                    S.relay_o3_gen = on
+                elif k == "o2_conc":
+                    S.relay_o2_conc = on
+                elif k == "air_comp":
+                    S.relay_air_comp = on
+        log(f"<- {line}", "recv")
         try:
             self._response_q.put_nowait(line)
         except asyncio.QueueFull:
             pass
 
+    # -- STATE push (on connect/reconnect) --------------------------------
     def _handle_state(self, line: str) -> None:
-        """Parse STATE push from ESP32 on connect/reconnect."""
-        # STATE,ozone_gen=0,o2_conc=1,air_comp=0,power=50,flow=4.0
         for part in line.split(","):
             if "=" not in part:
                 continue
@@ -390,9 +556,171 @@ class TCPServer:
                     S.flow_lpm = float(v)
             except (ValueError, IndexError):
                 pass
-        log("STATE sync from ESP32")
+        log("STATE sync from ESP32", "state")
 
-    # -- sending -----------------------------------------------------------
+    # -- SEQ status updates -----------------------------------------------
+    def _handle_seq(self, line: str) -> None:
+        parts = line.split(",")
+        # SEQ,prompt,<id>,<text> — special case: interactive prompt
+        if len(parts) >= 3 and parts[1] == "prompt":
+            S.pending_prompt_id = parts[2] if len(parts) > 2 else ""
+            S.pending_prompt_text = ",".join(parts[3:]) if len(parts) > 3 else ""
+            log(f"Prompt requested: {S.pending_prompt_id}", "seq")
+            return
+        # SEQ,<phase>,<progress>,<power>,<air>,<elapsed>
+        if not S.sequence_active:
+            S.sequence_active = True
+        if len(parts) >= 6:
+            S.seq_phase = parts[1]
+            try:
+                S.seq_progress = float(parts[2])
+            except ValueError:
+                S.seq_progress = 0.0
+            try:
+                S.seq_power = float(parts[3])
+            except ValueError:
+                pass
+            S.seq_air = parts[4].strip() == "1"
+            try:
+                S.seq_elapsed = float(parts[5])
+            except ValueError:
+                pass
+        log(f"SEQ: {S.seq_phase} {S.seq_progress:.0f}%", "seq")
+
+    # -- SEQ_DONE ---------------------------------------------------------
+    def _handle_seq_done(self, line: str) -> None:
+        parts = line.split(",")
+        seq_type = parts[1] if len(parts) > 1 else S.seq_type or "?"
+        result = parts[2] if len(parts) > 2 else "unknown"
+        log(f"Sequence '{seq_type}' done: {result}", "seq")
+
+        S.sequence_active = False
+        S.pending_prompt_id = ""
+        S.pending_prompt_text = ""
+
+        if result == "ok":
+            _notify(f"Sequence '{seq_type}' completed successfully", "positive")
+        elif result == "aborted":
+            _notify(f"Sequence '{seq_type}' aborted", "warning")
+        else:
+            _notify(f"Sequence '{seq_type}' error: {result}", "negative")
+
+    # -- CAL messages (calibration data stream) ---------------------------
+    def _handle_cal_start(self, line: str) -> None:
+        # CAL_START,o2_lpm=<val>,random_count=<n>,step_pct=<n>
+        log(f"CAL_START: {line}", "cal")
+        S.cal_samples = []
+        S.cal_file = ""
+        for part in line.split(","):
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            if k.strip() == "o2_lpm":
+                try:
+                    S.cal_lpm = float(v)
+                except ValueError:
+                    pass
+        _notify(f"Calibration started @ {S.cal_lpm} LPM")
+
+    def _handle_cal_data(self, line: str) -> None:
+        parts = line.split(",")
+        # CAL_DATA,ts,power,actual,o3,o2_lpm,air,total_lpm,temp,phase
+        if len(parts) >= 10:
+            try:
+                sample = {
+                    "timestamp": parts[1],
+                    "power_pct": float(parts[2]),
+                    "actual_pct": float(parts[3]),
+                    "o3_pct": float(parts[4]),
+                    "o2_lpm": float(parts[5]),
+                    "air_comp_on": parts[6].strip() == "1",
+                    "total_lpm": float(parts[7]),
+                    "cell_temp_c": float(parts[8]),
+                    "phase": parts[9].strip(),
+                }
+                S.cal_samples.append(sample)
+            except (ValueError, IndexError):
+                log(f"Bad CAL_DATA: {line[:80]}", "error")
+
+    def _handle_cal_complete(self, line: str) -> None:
+        # CAL_COMPLETE,total=<n>,baseline=<n>,sweep_up=<n>,...
+        log(f"CAL_COMPLETE: {line}", "cal")
+        if S.cal_samples:
+            S.cal_file = _save_cal_csv(S.cal_samples, S.cal_lpm)
+            _notify(
+                f"Calibration complete: {len(S.cal_samples)} samples saved",
+                "positive",
+            )
+        else:
+            _notify("Calibration complete (no samples)", "warning")
+
+    # -- VAL messages (validation data stream) ----------------------------
+    def _handle_val_start(self, line: str) -> None:
+        # VAL_START,power=<pct>,o2_lpm=<lpm>
+        log(f"VAL_START: {line}", "val")
+        S.val_samples = []
+        S.val_result = {}
+        for part in line.split(","):
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            try:
+                if k.strip() == "power":
+                    S.val_power = float(v)
+                elif k.strip() == "o2_lpm":
+                    S.val_lpm = float(v)
+            except ValueError:
+                pass
+        _notify(f"Validation started @ {S.val_power:.0f}% / {S.val_lpm} LPM")
+
+    def _handle_val_data(self, line: str) -> None:
+        parts = line.split(",")
+        # VAL_DATA,ts,power,actual,o3,o2_lpm,temp
+        if len(parts) >= 7:
+            try:
+                S.val_samples.append({
+                    "timestamp": parts[1],
+                    "power_pct": float(parts[2]),
+                    "actual_pct": float(parts[3]),
+                    "o3_pct": float(parts[4]),
+                    "o2_lpm": float(parts[5]),
+                    "cell_temp_c": float(parts[6]),
+                })
+            except (ValueError, IndexError):
+                log(f"Bad VAL_DATA: {line[:80]}", "error")
+
+    def _handle_val_result(self, line: str) -> None:
+        # VAL_RESULT,power=<>,o2_lpm=<>,mean_o3=<>,std_o3=<>,expected_o3=<>,
+        #            mean_temp=<>,samples=<>,elapsed=<>
+        log(f"VAL_RESULT: {line}", "val")
+        result: dict[str, Any] = {}
+        for part in line.split(","):
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            k = k.strip()
+            try:
+                result[k] = float(v)
+            except ValueError:
+                result[k] = v.strip()
+        # Compute deviation
+        mean_o3 = result.get("mean_o3", 0.0)
+        expected = result.get("expected_o3", 0.0)
+        if isinstance(mean_o3, (int, float)) and isinstance(expected, (int, float)):
+            if expected > 0:
+                result["deviation_pct"] = abs(mean_o3 - expected) / expected * 100
+            else:
+                result["deviation_pct"] = 0.0
+        S.val_result = result
+        dev = result.get("deviation_pct", 0.0)
+        if dev < 10:
+            _notify(f"Validation passed - {dev:.1f}% deviation", "positive")
+        elif dev < 20:
+            _notify(f"Validation marginal - {dev:.1f}% deviation", "warning")
+        else:
+            _notify(f"Validation failed - {dev:.1f}% deviation", "negative")
+
+    # -- sending ----------------------------------------------------------
     async def _send_raw(self, text: str) -> bool:
         if self._writer is None:
             return False
@@ -407,7 +735,6 @@ class TCPServer:
         """Send ``CMD,<cmd>\\n`` and wait for the matching RSP."""
         if not S.connected:
             return None
-        # flush stale responses
         while not self._response_q.empty():
             try:
                 self._response_q.get_nowait()
@@ -418,18 +745,17 @@ class TCPServer:
         log(f"-> {cmd}", "send")
         try:
             resp = await asyncio.wait_for(self._response_q.get(), timeout)
-            log(f"<- {resp}", "recv")
             return resp
         except asyncio.TimeoutError:
             log(f"timeout: {cmd}", "error")
             return None
 
 
-tcp = TCPServer()
+tcp: TCPServer  # assigned in startup
 
 
 # =============================================================================
-# Command helpers  (all async; COMMA-separated -- never colons)
+# Command helpers  (all async; COMMA-separated — never colons)
 # =============================================================================
 async def cmd_set_power(pct: int) -> bool:
     S.power_target_pct = int(pct)
@@ -454,278 +780,51 @@ async def cmd_set_relay(name: str, on: bool) -> bool:
 async def cmd_sync_relays() -> None:
     if not S.connected:
         return
-    resp = await tcp.send_command("relay_get", timeout=1.0)
-    if not resp or "OK" not in resp:
-        return
-    for part in resp.split(","):
-        if "=" not in part:
-            continue
-        k, v = part.split("=", 1)
-        on = v.strip() == "1"
-        if k == "ozone_gen":
-            S.relay_o3_gen = on
-        elif k == "o2_conc":
-            S.relay_o2_conc = on
-        elif k == "air_comp":
-            S.relay_air_comp = on
+    await tcp.send_command("relay_get", timeout=1.0)
 
 
 async def cmd_emergency_stop() -> None:
+    if S.sequence_active:
+        await cmd_sequence_stop()
     await cmd_set_power(0)
     await cmd_set_relay("ozone_gen", False)
 
 
-# =============================================================================
-# CSV logger
-# =============================================================================
-class _CSVLogger:
-    def __init__(self) -> None:
-        self._path = os.path.join(
-            STREAM_DIR, f"{datetime.now():%Y-%m-%d}_Stream.csv"
-        )
-        self._header = False
-
-    def write(self, s: dict) -> None:
-        try:
-            if not self._header:
-                with open(self._path, "w") as f:
-                    f.write(
-                        "timestamp,esp_ts_ms,vessel_o3_pct,cell_temp_c,"
-                        "pressure_mbar,room_o3_ppm,vessel_temp_c,"
-                        "power_target,power_actual,wiper_v\n"
-                    )
-                self._header = True
-            with open(self._path, "a") as f:
-                f.write(
-                    f"{s['timestamp']},{s['esp_ts_ms']},"
-                    f"{s['vessel_o3_pct']},{s['cell_temp_c']},"
-                    f"{s['pressure_mbar']},{s['room_o3_ppm']},"
-                    f"{s['vessel_temp_c']},{s.get('power_target_pct',0)},"
-                    f"{s.get('power_actual_pct',0)},"
-                    f"{s.get('wiper_voltage',0)}\n"
-                )
-        except Exception:
-            pass
+async def cmd_sequence_start(seq_type: str, *params) -> bool:
+    """Send CMD,sequence_start,<type>,<params>."""
+    param_str = ",".join(str(p) for p in params)
+    cmd = f"sequence_start,{seq_type}"
+    if param_str:
+        cmd += f",{param_str}"
+    S.sequence_active = True
+    S.seq_type = seq_type
+    S.seq_phase = "starting"
+    S.seq_progress = 0.0
+    S.seq_elapsed = 0.0
+    S.pending_prompt_id = ""
+    S.pending_prompt_text = ""
+    resp = await tcp.send_command(cmd)
+    if resp and "OK" in resp:
+        return True
+    S.sequence_active = False
+    return False
 
 
-csv_logger = _CSVLogger()
+async def cmd_sequence_stop() -> bool:
+    """Send CMD,sequence_stop. State cleared by SEQ_DONE handler."""
+    resp = await tcp.send_command("sequence_stop")
+    return resp is not None and "OK" in resp
 
 
-# =============================================================================
-# Calibration runner  (async, same state machine as v9)
-# =============================================================================
-class CalibrationRunner:
-
-    async def start(self) -> None:
-        S.cal_active = True
-        S.sequence_active = True
-        S.sequence_name = "Power-O3 Calibration"
-        S.sequence_description = "Characterizing O3 output vs power"
-        S.cal_phase = "baseline"
-        S.cal_phase_progress = 0.0
-        S.cal_current_power = 0
-        S.cal_air_state = False
-        S.cal_start_time = time.time()
-        S.cal_step_start = time.time()
-        S.cal_data = []
-        S.cal_o2_lpm = S.flow_lpm
-        np.random.seed(int(time.time()))
-        S.cal_random_powers = sorted(
-            np.random.randint(5, 96, CAL_NUM_RANDOM_POINTS).tolist()
-        )
-        S.cal_random_idx = 0
-        await tcp.send_command("relay_set,air_comp,0")
-        S.cal_air_state = False
-        S.power_target_pct = 0
-        await tcp.send_command("power_set,0")
-        S.update_derived()
-        log("Calibration started")
-
-    async def stop(self) -> None:
-        S.cal_active = False
-        S.sequence_active = False
-        S.sequence_name = ""
-        S.sequence_description = ""
-        S.power_target_pct = 0
-        await tcp.send_command("power_set,0")
-        await tcp.send_command("relay_set,air_comp,0")
-        S.update_derived()
-        if S.cal_data:
-            path = self._save()
-            log(f"Calibration saved -> {path}")
-        S.cal_phase = None
-        S.cal_data = []
-        log("Calibration stopped")
-
-    async def step(self) -> None:
-        """Called every ~1 s from UI timer."""
-        if not S.cal_active:
-            return
-        # Abort if connection lost mid-sequence
-        if not S.connected:
-            log("Connection lost during calibration -- aborting")
-            await self.stop()
-            return
-        # Keep slider/UI in sync with calibration power target
-        S.power_target_pct = S.cal_current_power
-        S.update_derived()
-        elapsed = time.time() - S.cal_step_start
-
-        if S.cal_phase == "baseline":
-            S.cal_phase_progress = min(
-                100.0, elapsed / CAL_BASELINE_DURATION_S * 100
-            )
-            if elapsed >= CAL_BASELINE_DURATION_S:
-                self._record()
-                S.cal_phase = "sweep_up"
-                S.cal_current_power = 0
-                S.cal_step_start = time.time()
-                await tcp.send_command("power_set,0")
-            elif elapsed >= CAL_STEP_DURATION_S:
-                self._record()
-                S.cal_step_start = time.time()
-
-        elif S.cal_phase == "sweep_up":
-            S.cal_phase_progress = S.cal_current_power
-            if elapsed >= CAL_STEP_DURATION_S:
-                self._record()
-                if S.cal_current_power < 100:
-                    S.cal_current_power += 1
-                    await tcp.send_command(
-                        f"power_set,{S.cal_current_power}"
-                    )
-                else:
-                    S.cal_phase = "sweep_down"
-                    S.cal_current_power = 100
-                S.cal_step_start = time.time()
-
-        elif S.cal_phase == "sweep_down":
-            S.cal_phase_progress = 100 - S.cal_current_power
-            if elapsed >= CAL_STEP_DURATION_S:
-                self._record()
-                if S.cal_current_power > 0:
-                    S.cal_current_power -= 1
-                    await tcp.send_command(
-                        f"power_set,{S.cal_current_power}"
-                    )
-                else:
-                    S.cal_phase = "random_pairs"
-                    S.cal_random_idx = 0
-                    S.cal_air_state = False
-                    if S.cal_random_powers:
-                        S.cal_current_power = S.cal_random_powers[0]
-                        await tcp.send_command(
-                            f"power_set,{S.cal_current_power}"
-                        )
-                S.cal_step_start = time.time()
-
-        elif S.cal_phase == "random_pairs":
-            total = CAL_NUM_RANDOM_POINTS * 2
-            cur = S.cal_random_idx * 2 + (1 if S.cal_air_state else 0)
-            S.cal_phase_progress = cur / total * 100
-            if elapsed >= CAL_AIR_DWELL_TIME_S:
-                self._record()
-                if not S.cal_air_state:
-                    S.cal_air_state = True
-                    await tcp.send_command("relay_set,air_comp,1")
-                else:
-                    S.cal_air_state = False
-                    await tcp.send_command("relay_set,air_comp,0")
-                    S.cal_random_idx += 1
-                    if S.cal_random_idx >= len(S.cal_random_powers):
-                        await self.stop()
-                        return
-                    S.cal_current_power = S.cal_random_powers[
-                        S.cal_random_idx
-                    ]
-                    await tcp.send_command(
-                        f"power_set,{S.cal_current_power}"
-                    )
-                S.cal_step_start = time.time()
-
-    # -- helpers -----------------------------------------------------------
-    def _record(self) -> None:
-        total_lpm = S.cal_o2_lpm + (
-            AIR_COMP_LPM if S.cal_air_state else 0
-        )
-        o2_frac = (
-            S.cal_o2_lpm * 0.93
-            + (AIR_COMP_LPM * 0.21 if S.cal_air_state else 0)
-        ) / total_lpm
-        S.cal_data.append(
-            {
-                "timestamp": datetime.now().isoformat(),
-                "power_pct": S.cal_current_power,
-                "o3_pct": S.vessel_o3_pct,
-                "o2_lpm": S.cal_o2_lpm,
-                "air_comp_on": S.cal_air_state,
-                "total_lpm": total_lpm,
-                "o2_concentration_pct": o2_frac * 100,
-                "cell_temp_c": S.cell_temp_c,
-                "phase": S.cal_phase,
-            }
-        )
-
-    def _save(self) -> Optional[str]:
-        if not S.cal_data:
-            return None
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        lpm_s = (
-            f"{S.cal_o2_lpm:.0f}"
-            if S.cal_o2_lpm == int(S.cal_o2_lpm)
-            else f"{S.cal_o2_lpm:.1f}"
-        )
-        fname = f"{date_str}_PowerO3Cal_{lpm_s}Lpm.csv"
-        fpath = os.path.join(CALIBRATION_DIR, fname)
-        if os.path.exists(fpath):
-            for i in range(2, 100):
-                fname = f"{date_str}_PowerO3Cal_{lpm_s}Lpm_{i}.csv"
-                fpath = os.path.join(CALIBRATION_DIR, fname)
-                if not os.path.exists(fpath):
-                    break
-        pd.DataFrame(S.cal_data).to_csv(fpath, index=False)
-        return fname
-
-
-cal = CalibrationRunner()
-
-
-def list_calibration_files() -> dict[float, list[str]]:
-    out: dict[float, list[str]] = {}
-    if not os.path.exists(CALIBRATION_DIR):
-        return out
-    for fn in os.listdir(CALIBRATION_DIR):
-        if fn.endswith(".csv") and "PowerO3Cal" in fn:
-            m = re.search(r"_(\d+(?:\.\d+)?)Lpm", fn)
-            if m:
-                lpm = float(m.group(1))
-                out.setdefault(lpm, []).append(
-                    os.path.join(CALIBRATION_DIR, fn)
-                )
-    return out
-
-
-# =============================================================================
-# Shared buffers / logging
-# =============================================================================
-data_buf: deque[dict] = deque(maxlen=MAX_DATA_POINTS)
-debug_log: deque[tuple[str, str, str]] = deque(maxlen=200)
-# Each entry: (timestamp_str, category, message)
-# category: "send", "recv", "info", "error", "warn"
-
-
-def log(msg: str, cat: str = "info") -> None:
-    ts = datetime.now().strftime("%H:%M:%S")
-    debug_log.appendleft((ts, cat, msg))
-
-
-def _notify(msg: str, level: str = "positive") -> None:
-    """Show toast notification respecting user preference."""
-    if S.notify_level == "none":
-        return
-    if S.notify_level == "errors" and level == "positive":
-        return
-    ui.notify(msg, type=level, position="bottom-right", timeout=3000)
+async def cmd_sequence_confirm(prompt_id: str, value: str = "") -> bool:
+    """Send CMD,sequence_confirm,<prompt_id>[,<value>]."""
+    cmd = f"sequence_confirm,{prompt_id}"
+    if value:
+        cmd += f",{value}"
+    S.pending_prompt_id = ""
+    S.pending_prompt_text = ""
+    resp = await tcp.send_command(cmd)
+    return resp is not None and "OK" in resp
 
 
 # =============================================================================
@@ -733,13 +832,10 @@ def _notify(msg: str, level: str = "positive") -> None:
 # =============================================================================
 @ui.page("/")
 async def index():
-    # Guard against circular update cascades when we programmatically
-    # update bound inputs after a user-initiated change.
     _updating = False
 
-    # -- helper to recalc derived settings and push to UI ------------------
+    # -- derived settings sync -------------------------------------------
     def _sync_derived_to_ui() -> None:
-        """Recompute derived values from power_target_pct and push them."""
         S.update_derived()
         if inp_o3 is not None:
             inp_o3.value = round(S.target_o3_pct, 2)
@@ -748,7 +844,7 @@ async def index():
         if inp_g30 is not None:
             inp_g30.value = round(S.target_g_30min, 2)
 
-    # -- callbacks ---------------------------------------------------------
+    # -- power callbacks --------------------------------------------------
     async def _on_power_slide(e) -> None:
         nonlocal _updating
         if _updating or S.sequence_active:
@@ -759,6 +855,7 @@ async def index():
         if inp_pwr is not None:
             inp_pwr.value = pct
         _sync_derived_to_ui()
+        _update_power_curve()
         _updating = False
 
     async def _on_power_input(e) -> None:
@@ -771,6 +868,7 @@ async def index():
         if slider is not None:
             slider.value = pct
         _sync_derived_to_ui()
+        _update_power_curve()
         _updating = False
 
     async def _on_o3_input(e) -> None:
@@ -854,31 +952,17 @@ async def index():
         _update_power_curve()
         _updating = False
 
-    # -- relay callbacks ---------------------------------------------------
+    # -- relay callbacks --------------------------------------------------
     async def _toggle_air() -> None:
-        new = not S.relay_air_comp
-        if await cmd_set_relay("air_comp", new):
-            btn_air.props(
-                f'color={"green" if S.relay_air_comp else "grey"}'
-            )
+        await cmd_set_relay("air_comp", not S.relay_air_comp)
 
     async def _toggle_o2() -> None:
-        new = not S.relay_o2_conc
-        if await cmd_set_relay("o2_conc", new):
-            btn_o2.props(
-                f'color={"green" if S.relay_o2_conc else "grey"}'
-            )
+        await cmd_set_relay("o2_conc", not S.relay_o2_conc)
 
     async def _toggle_o3() -> None:
-        new = not S.relay_o3_gen
-        if await cmd_set_relay("ozone_gen", new):
-            btn_o3.props(
-                f'color={"green" if S.relay_o3_gen else "grey"}'
-            )
+        await cmd_set_relay("ozone_gen", not S.relay_o3_gen)
 
     async def _estop() -> None:
-        if S.sequence_active:
-            await cal.stop()
         await cmd_emergency_stop()
         if slider is not None:
             slider.value = 0
@@ -893,27 +977,10 @@ async def index():
         resp = await tcp.send_command(cmd)
         debug_resp_label.text = resp or "No response"
 
-    # -- calibration callbacks ---------------------------------------------
-    async def _cal_start() -> None:
-        if not S.connected:
-            ui.notify("Not connected to ESP32", type="negative")
-            return
-        if not S.relay_o2_conc:
-            ui.notify(
-                "O2 Concentrator should be ON first", type="warning"
-            )
-        await cal.start()
-
-    async def _cal_stop() -> None:
-        await cal.stop()
-        ui.notify("Calibration stopped", type="info")
-
-    # -- chart update helpers ----------------------------------------------
+    # -- chart update helpers ---------------------------------------------
     def _update_power_curve() -> None:
         pwr, o3 = generate_power_curve(S.flow_lpm)
-        target_o3 = predict_o3_from_power(
-            S.power_target_pct, S.flow_lpm
-        )
+        target_o3 = predict_o3_from_power(S.power_target_pct, S.flow_lpm)
         fig = _make_power_fig(
             pwr, o3,
             S.power_target_pct, target_o3,
@@ -924,36 +991,26 @@ async def index():
 
     def _make_power_fig(pwr, o3, tgt_pct, tgt_o3, act_pct, act_o3):
         fig = go.Figure()
-        fig.add_trace(
-            go.Scatter(
-                x=pwr, y=o3, mode="lines",
-                line=dict(color="royalblue", width=2),
-                showlegend=False, name="Model",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=[tgt_pct], y=[tgt_o3], mode="markers",
-                marker=dict(
-                    color="rgba(0,0,0,0)", size=18,
-                    line=dict(color="black", width=3),
-                ),
-                showlegend=False, name="Target",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=[act_pct], y=[act_o3], mode="markers",
-                marker=dict(color="limegreen", size=14),
-                showlegend=False, name="Actual",
-            )
-        )
+        fig.add_trace(go.Scatter(
+            x=pwr, y=o3, mode="lines",
+            line=dict(color="royalblue", width=2),
+            showlegend=False, name="Model",
+        ))
+        fig.add_trace(go.Scatter(
+            x=[tgt_pct], y=[tgt_o3], mode="markers",
+            marker=dict(color="rgba(0,0,0,0)", size=18,
+                        line=dict(color="black", width=3)),
+            showlegend=False, name="Target",
+        ))
+        fig.add_trace(go.Scatter(
+            x=[act_pct], y=[act_o3], mode="markers",
+            marker=dict(color="limegreen", size=14),
+            showlegend=False, name="Actual",
+        ))
         y_max = max(o3) * 1.1 if max(o3) > 0 else 1
         fig.update_layout(
-            xaxis_title="Power %",
-            yaxis_title="O3 %vol",
-            height=340,
-            margin=dict(l=50, r=20, t=10, b=50),
+            xaxis_title="Power %", yaxis_title="O3 %vol",
+            height=300, margin=dict(l=50, r=20, t=10, b=50),
             xaxis=dict(range=[0, 105], dtick=10),
             yaxis=dict(range=[0, y_max]),
         )
@@ -965,7 +1022,7 @@ async def index():
     ui.page_title("BlockSI Control")
     dark = ui.dark_mode(True)
 
-    # -- Custom CSS --------------------------------------------------------
+    # -- Custom CSS -------------------------------------------------------
     ui.add_head_html("""
     <style>
     @keyframes blink-disconnect {
@@ -978,28 +1035,30 @@ async def index():
       min-width: 170px; padding: 8px 12px;
       border-radius: 6px; border-left: 3px solid;
     }
-    .sensor-card-o3  { border-left-color: #2196F3; }
-    .sensor-card-room { border-left-color: #4CAF50; }
-    .sensor-card-temp { border-left-color: #FF9800; }
-    .sensor-card-flow { border-left-color: #9C27B0; }
-    .log-send { color: #42A5F5; }
-    .log-recv { color: #66BB6A; }
+    .sensor-card-o3   { border-left-color: #2196F3; }
+    .sensor-card-room  { border-left-color: #4CAF50; }
+    .sensor-card-temp  { border-left-color: #FF9800; }
+    .sensor-card-flow  { border-left-color: #9C27B0; }
+    .log-send  { color: #42A5F5; }
+    .log-recv  { color: #66BB6A; }
     .log-error { color: #EF5350; }
-    .log-warn { color: #FFA726; }
-    .log-info { color: #BDBDBD; }
-    /* Enhanced slider track */
+    .log-warn  { color: #FFA726; }
+    .log-info  { color: #BDBDBD; }
+    .log-seq   { color: #CE93D8; }
+    .log-cal   { color: #4DD0E1; }
+    .log-val   { color: #AED581; }
+    .log-state { color: #FFEE58; }
     .power-slider .q-slider__track-container { height: 8px !important; }
     .power-slider .q-slider__thumb { width: 24px !important; height: 24px !important; }
     </style>
     """)
 
-    # -- LEFT DRAWER (sidebar) --------------------------------------------
+    # -- LEFT DRAWER (sidebar) -------------------------------------------
     with ui.left_drawer(value=True).classes(
         "bg-dark q-pa-md"
     ).style("width:240px") as drawer:
         ui.label("BlockSI v2").classes("text-h6 text-weight-bold q-mb-sm")
 
-        # Connection badge
         conn_badge = ui.badge("Disconnected", color="red").classes(
             "q-mb-sm conn-blink"
         )
@@ -1008,19 +1067,19 @@ async def index():
         # Relay toggles
         ui.label("Relays").classes("text-subtitle2 q-mt-sm")
         with ui.row().classes("q-gutter-xs"):
-            btn_air = ui.button(
-                "Air", on_click=_toggle_air
-            ).props("dense color=grey size=sm")
-            btn_o2 = ui.button(
-                "O2", on_click=_toggle_o2
-            ).props("dense color=grey size=sm")
-            btn_o3 = ui.button(
-                "O3", on_click=_toggle_o3
-            ).props("dense color=grey size=sm")
+            btn_air = ui.button("Air", on_click=_toggle_air).props(
+                "dense color=grey size=sm"
+            )
+            btn_o2 = ui.button("O2", on_click=_toggle_o2).props(
+                "dense color=grey size=sm"
+            )
+            btn_o3 = ui.button("O3", on_click=_toggle_o3).props(
+                "dense color=grey size=sm"
+            )
 
         ui.separator().classes("q-my-sm")
 
-        # O2 LPM (manual meter reading)
+        # O2 LPM
         ui.label("O2 LPM").classes("text-caption")
         inp_lpm_sb = ui.number(
             value=S.flow_lpm, min=1.0, max=15.0, step=0.5,
@@ -1029,77 +1088,93 @@ async def index():
 
         ui.separator().classes("q-my-sm")
 
-        # Sensor reading cards
+        # Sensor cards
         ui.label("Readings").classes("text-subtitle2")
-
         with ui.card().classes("sensor-card sensor-card-flow q-mb-xs").props("flat bordered"):
             ui.label("O2 Flow").classes("text-caption text-grey")
             card_flow_val = ui.label(f"{S.flow_lpm:.1f}").classes("text-h5 text-purple")
             ui.label("LPM").classes("text-caption text-grey")
-
         with ui.card().classes("sensor-card sensor-card-o3 q-mb-xs").props("flat bordered"):
             ui.label("Vessel O3").classes("text-caption text-grey")
             card_o3_val = ui.label(f"{S.vessel_o3_pct:.3f}").classes("text-h5 text-blue")
             ui.label("%vol").classes("text-caption text-grey")
-
         with ui.card().classes("sensor-card sensor-card-room q-mb-xs").props("flat bordered"):
             ui.label("Room O3").classes("text-caption text-grey")
             card_room_val = ui.label(f"{S.room_o3_ppm:.3f}").classes("text-h5 text-green")
             ui.label("ppm").classes("text-caption text-grey")
-
         with ui.card().classes("sensor-card sensor-card-temp q-mb-xs").props("flat bordered"):
             ui.label("Vessel Temp").classes("text-caption text-grey")
             card_vtemp_val = ui.label("N/A").classes("text-h5 text-orange")
-            ui.label("C").classes("text-caption text-grey")
-
+            ui.label("\u00b0C").classes("text-caption text-grey")
         with ui.card().classes("sensor-card sensor-card-temp q-mb-xs").props("flat bordered"):
             ui.label("Cell Temp").classes("text-caption text-grey")
             card_ctemp_val = ui.label(f"{S.cell_temp_c:.1f}").classes("text-h5 text-orange")
-            ui.label("C").classes("text-caption text-grey")
+            ui.label("\u00b0C").classes("text-caption text-grey")
 
-    # -- HEADER ------------------------------------------------------------
+    # -- HEADER -----------------------------------------------------------
     with ui.header().classes("bg-primary items-center q-px-md"):
-        ui.button(
-            icon="menu", on_click=lambda: drawer.toggle()
-        ).props("flat dense round color=white")
+        ui.button(icon="menu", on_click=lambda: drawer.toggle()).props(
+            "flat dense round color=white"
+        )
         ui.label("BlockSI Control").classes("text-h6 q-ml-md")
         ui.space()
-        ui.button(
-            icon="dark_mode",
-            on_click=lambda: dark.toggle()
-        ).props("flat dense round color=white").tooltip("Toggle dark/light")
+        ui.button(icon="dark_mode", on_click=lambda: dark.toggle()).props(
+            "flat dense round color=white"
+        ).tooltip("Toggle dark/light")
 
-    # -- TABS --------------------------------------------------------------
+    # -- SEQUENCE BANNER (visible during sequences) -----------------------
     with ui.column().classes("w-full q-pa-md"):
-        # -- SEQUENCE BANNER (visible during automated sequences) ------
         with ui.row().classes(
             "w-full items-center q-pa-sm q-px-md q-gutter-md"
         ).style(
-            "background: #F57F17; border-radius: 4px;"
-            " min-height: 44px"
+            "background: #F57F17; border-radius: 4px; min-height: 44px"
         ) as seq_banner:
             ui.icon("science", size="sm").classes("text-white")
-            seq_name_lbl = ui.label("").classes(
-                "text-white text-weight-bold"
-            )
-            seq_phase_lbl = ui.label("").classes(
-                "text-white-50 text-caption"
-            )
+            seq_name_lbl = ui.label("").classes("text-white text-weight-bold")
+            seq_phase_lbl = ui.label("").classes("text-white-50 text-caption")
             seq_progress_bar = ui.linear_progress(
                 value=0, show_value=False,
-            ).props(
-                "color=white track-color=amber-4"
-            ).classes("col-grow").style("max-width: 220px")
+            ).props("color=white track-color=amber-4").classes(
+                "col-grow"
+            ).style("max-width: 220px")
+            seq_elapsed_lbl = ui.label("").classes("text-white text-caption")
             ui.button(
                 "ABORT", icon="stop",
-                on_click=_cal_stop, color="red-10",
+                on_click=lambda: asyncio.create_task(cmd_sequence_stop()),
+                color="red-10",
             ).props("dense size=sm")
         seq_banner.visible = False
 
+        # -- PROMPT DIALOG (modal — shown when ESP32 needs user action) ---
+        prompt_dialog = ui.dialog().props("persistent")
+        prompt_icon_ref: list = []
+        prompt_title_ref: list = []
+        prompt_body_ref: list = []
+
+        with prompt_dialog, ui.card().classes("q-pa-lg").style("min-width: 420px"):
+            p_icon = ui.icon("help").classes("text-h3 text-amber q-mb-sm")
+            prompt_icon_ref.append(p_icon)
+            p_title = ui.label("Action Required").classes("text-h5 q-mb-sm")
+            prompt_title_ref.append(p_title)
+            p_body = ui.html("").classes("text-body1 q-mb-lg")
+            prompt_body_ref.append(p_body)
+
+            with ui.row().classes("justify-end w-full q-gutter-sm"):
+                ui.button("Abort Sequence", color="red", on_click=lambda: (
+                    prompt_dialog.close(),
+                    asyncio.create_task(cmd_sequence_stop()),
+                )).props("flat")
+                ui.button("Confirm", color="green", icon="check", on_click=lambda: (
+                    prompt_dialog.close(),
+                    asyncio.create_task(
+                        cmd_sequence_confirm(S.pending_prompt_id)
+                    ),
+                )).props("unelevated")
+
+        # -- TABS ---------------------------------------------------------
         with ui.tabs().classes("w-full") as tabs:
             tab_power = ui.tab("Power", icon="bolt")
             tab_telem = ui.tab("Telemetry", icon="show_chart")
-            tab_cal = ui.tab("Calibration", icon="tune")
             tab_debug = ui.tab("Debug", icon="bug_report")
             tab_settings = ui.tab("Settings", icon="settings")
 
@@ -1109,109 +1184,240 @@ async def index():
             # POWER TAB
             # =============================================================
             with ui.tab_panel(tab_power):
-                with ui.row().classes("w-full items-start q-gutter-md"):
-                    # -- left: slider + presets + curve --------------------
-                    with ui.column().classes("col-8"):
-                        ui.label("Power (%)").classes("text-subtitle2")
-                        slider = ui.slider(
-                            min=0, max=100, step=1,
-                            value=S.power_target_pct,
-                            on_change=_on_power_slide,
-                        ).classes("w-full power-slider")
 
-                        # Graduated preset buttons
-                        preset_btns = []
-                        with ui.row().classes("q-gutter-xs q-mt-xs"):
-                            for p in range(0, 110, 10):
-                                _p = p  # capture
-                                _btn = ui.button(
-                                    str(_p),
-                                    on_click=lambda _p=_p: _preset_click(
-                                        _p
-                                    ),
-                                ).props("dense flat size=sm")
-                                preset_btns.append(_btn)
+                # ---- Power Control section ------------------------------
+                with ui.expansion("Power Control", icon="speed",
+                                  value=True).classes("w-full q-mb-sm"):
+                    with ui.row().classes("w-full items-start q-gutter-md"):
+                        with ui.column().classes("col-8"):
+                            ui.label("Power (%)").classes("text-subtitle2")
+                            slider = ui.slider(
+                                min=0, max=100, step=1,
+                                value=S.power_target_pct,
+                                on_change=_on_power_slide,
+                            ).classes("w-full power-slider")
 
-                        # Power-O3 curve
-                        init_pwr, init_o3 = generate_power_curve(
-                            S.flow_lpm
-                        )
-                        tgt_o3_init = predict_o3_from_power(
-                            S.power_target_pct, S.flow_lpm
-                        )
-                        power_plot = ui.plotly(
-                            _make_power_fig(
-                                init_pwr, init_o3,
-                                S.power_target_pct, tgt_o3_init,
-                                S.power_actual_pct, S.vessel_o3_pct,
+                            preset_btns = []
+                            with ui.row().classes("q-gutter-xs q-mt-xs"):
+                                for p in range(0, 110, 10):
+                                    _p = p
+                                    _btn = ui.button(
+                                        str(_p),
+                                        on_click=lambda _p=_p: _preset_click(_p),
+                                    ).props("dense flat size=sm")
+                                    preset_btns.append(_btn)
+
+                            init_pwr, init_o3 = generate_power_curve(S.flow_lpm)
+                            tgt_o3_init = predict_o3_from_power(
+                                S.power_target_pct, S.flow_lpm
                             )
-                        ).classes("w-full")
+                            power_plot = ui.plotly(
+                                _make_power_fig(
+                                    init_pwr, init_o3,
+                                    S.power_target_pct, tgt_o3_init,
+                                    S.power_actual_pct, S.vessel_o3_pct,
+                                )
+                            ).classes("w-full")
 
-                    # -- right: linked settings boxes ----------------------
-                    with ui.column().classes("col-3"):
-                        ui.label("Settings").classes(
-                            "text-subtitle2 q-mb-sm"
+                        with ui.column().classes("col-3"):
+                            ui.label("Settings").classes("text-subtitle2 q-mb-sm")
+                            ui.label("LPM").classes("text-caption")
+                            inp_lpm_settings = ui.number(
+                                value=S.flow_lpm, min=1.0, max=15.0,
+                                step=0.5, format="%.1f",
+                                on_change=_on_lpm_change,
+                            )
+                            ui.label("% Power").classes("text-caption q-mt-sm")
+                            inp_pwr = ui.number(
+                                value=S.power_target_pct,
+                                min=0, max=100, step=1,
+                                on_change=_on_power_input,
+                            )
+                            ui.label("% vol O3").classes("text-caption q-mt-sm")
+                            inp_o3 = ui.number(
+                                value=round(S.target_o3_pct, 2),
+                                min=0.0, max=5.0, step=0.01, format="%.2f",
+                                on_change=_on_o3_input,
+                            )
+                            ui.label("mg O3/s").classes("text-caption q-mt-sm")
+                            inp_mg = ui.number(
+                                value=round(S.target_mg_per_s, 2),
+                                min=0.0, max=10.0, step=0.01, format="%.2f",
+                                on_change=_on_mg_input,
+                            )
+                            ui.label("g O3 @ 30 min").classes("text-caption q-mt-sm")
+                            inp_g30 = ui.number(
+                                value=round(S.target_g_30min, 2),
+                                min=0.0, max=20.0, step=0.1, format="%.2f",
+                                on_change=_on_g30_input,
+                            )
+
+                    ui.separator().classes("q-my-sm")
+                    ui.button(
+                        "EMERGENCY STOP", icon="dangerous",
+                        on_click=_estop, color="red",
+                    ).props("size=lg")
+
+                # ---- Calibration section --------------------------------
+                with ui.expansion("Calibration", icon="tune").classes(
+                    "w-full q-mb-sm"
+                ):
+                    ui.markdown(
+                        "ESP32-owned sequence (~17 min): Baseline -> Sweep Up -> "
+                        "Sweep Down -> Random Pairs"
+                    ).classes("text-caption text-grey q-mb-sm")
+
+                    with ui.row().classes("q-gutter-sm items-end q-mb-sm"):
+                        cal_lpm_input = ui.number(
+                            label="O2 LPM", value=DEFAULT_FLOW_LPM,
+                            min=0.5, max=15, step=0.5, format="%.1f",
+                        ).classes("w-24")
+
+                        async def _start_cal():
+                            if not S.connected:
+                                _notify("Not connected to ESP32", "negative")
+                                return
+                            lpm = float(cal_lpm_input.value or DEFAULT_FLOW_LPM)
+                            await cmd_sequence_start("cal", lpm)
+
+                        cal_start_btn = ui.button(
+                            "Start", icon="play_arrow",
+                            on_click=_start_cal, color="primary",
+                        )
+                        cal_stop_btn = ui.button(
+                            "Stop", icon="stop",
+                            on_click=lambda: asyncio.create_task(cmd_sequence_stop()),
+                            color="grey",
                         )
 
-                        ui.label("LPM").classes("text-caption")
-                        inp_lpm_settings = ui.number(
-                            value=S.flow_lpm,
-                            min=1.0, max=15.0, step=0.5,
-                            format="%.1f",
-                            on_change=_on_lpm_change,
+                    # Phase stepper cards
+                    CAL_PHASES_DEF = [
+                        ("baseline", "Baseline", "30s @ 0%"),
+                        ("sweep_up", "Sweep Up", "0 -> 100%"),
+                        ("sweep_down", "Sweep Down", "100 -> 0%"),
+                        ("random_pairs", "Random Pairs", "15 levels x Air"),
+                    ]
+                    cal_step_cards: dict[str, Any] = {}
+                    with ui.row().classes("w-full q-gutter-xs q-mb-sm"):
+                        for phase_key, name, desc in CAL_PHASES_DEF:
+                            with ui.card().classes("col q-pa-xs text-center").style(
+                                "opacity: 0.4; border: 1px solid #555"
+                            ) as sc:
+                                ui.label(name).classes("text-caption text-weight-bold")
+                                ui.label(desc).classes("text-caption text-grey")
+                            cal_step_cards[phase_key] = sc
+
+                    cal_phase_lbl = ui.label("Phase: --").classes("text-body2")
+                    cal_progress = ui.linear_progress(
+                        value=0, show_value=False
+                    ).classes("q-mb-xs")
+                    cal_info_lbl = ui.label("").classes("text-caption")
+
+                    # Live scatter (ECharts)
+                    cal_chart = ui.echart({
+                        "darkMode": True,
+                        "tooltip": {"trigger": "item"},
+                        "legend": {"data": ["Air OFF", "Air ON"]},
+                        "xAxis": {"type": "value", "name": "Power %",
+                                  "min": 0, "max": 100},
+                        "yAxis": {"type": "value", "name": "O3 %vol"},
+                        "series": [
+                            {"name": "Air OFF", "type": "scatter", "data": [],
+                             "itemStyle": {"color": "#42A5F5"}},
+                            {"name": "Air ON", "type": "scatter", "data": [],
+                             "itemStyle": {"color": "#FFA726"}},
+                        ],
+                    }).classes("w-full").style("height: 280px")
+
+                    ui.separator().classes("q-my-sm")
+                    ui.label("Calibration Files").classes("text-subtitle2")
+                    cal_files_container = ui.column().classes("w-full")
+
+                    def _render_cal_files() -> None:
+                        cal_files_container.clear()
+                        files = list_calibration_files()
+                        with cal_files_container:
+                            if not files:
+                                ui.label("No calibration files found").classes(
+                                    "text-caption"
+                                )
+                            else:
+                                for lpm in sorted(files):
+                                    with ui.expansion(
+                                        f"O2 @ {lpm} LPM ({len(files[lpm])} files)"
+                                    ):
+                                        for fp in sorted(files[lpm]):
+                                            ui.label(os.path.basename(fp)).classes(
+                                                "text-caption"
+                                            )
+
+                    _render_cal_files()
+
+                # ---- Validation section ---------------------------------
+                with ui.expansion("Validation", icon="verified").classes(
+                    "w-full q-mb-sm"
+                ):
+                    ui.markdown(
+                        "Pre-flight check: measures actual O3 output at a set "
+                        "power level and compares to the predicted value. "
+                        "Requires operator to route L-valve at two points."
+                    ).classes("text-caption text-grey q-mb-sm")
+
+                    with ui.row().classes("q-gutter-sm items-end q-mb-sm"):
+                        val_pwr_input = ui.number(
+                            label="Power %", value=75.0,
+                            min=10, max=100, step=5, format="%.0f",
+                        ).classes("w-24")
+                        val_lpm_input = ui.number(
+                            label="O2 LPM", value=DEFAULT_FLOW_LPM,
+                            min=0.5, max=15, step=0.5, format="%.1f",
+                        ).classes("w-24")
+
+                        async def _start_val():
+                            if not S.connected:
+                                _notify("Not connected to ESP32", "negative")
+                                return
+                            pwr = float(val_pwr_input.value or 75)
+                            lpm = float(val_lpm_input.value or DEFAULT_FLOW_LPM)
+                            await cmd_sequence_start("validate", pwr, lpm)
+
+                        val_start_btn = ui.button(
+                            "Validate", icon="play_arrow",
+                            on_click=_start_val, color="blue",
                         )
 
-                        ui.label("% Power").classes(
-                            "text-caption q-mt-sm"
-                        )
-                        inp_pwr = ui.number(
-                            value=S.power_target_pct,
-                            min=0, max=100, step=1,
-                            on_change=_on_power_input,
-                        )
+                    # Validation result card (hidden until result)
+                    val_result_card = ui.card().classes(
+                        "w-full q-pa-md q-mt-sm"
+                    )
+                    val_result_card.visible = False
+                    with val_result_card:
+                        val_result_icon = ui.icon("check_circle").classes("text-h3")
+                        val_result_title = ui.label("").classes("text-h6")
+                        with ui.row().classes("q-gutter-md q-mt-sm"):
+                            val_mean_lbl = ui.label("")
+                            val_expected_lbl = ui.label("")
+                            val_dev_lbl = ui.label("")
+                            val_std_lbl = ui.label("")
 
-                        ui.label("% vol O3").classes(
-                            "text-caption q-mt-sm"
-                        )
-                        inp_o3 = ui.number(
-                            value=round(S.target_o3_pct, 2),
-                            min=0.0, max=5.0, step=0.01,
-                            format="%.2f",
-                            on_change=_on_o3_input,
-                        )
-
-                        ui.label("mg O3/s").classes(
-                            "text-caption q-mt-sm"
-                        )
-                        inp_mg = ui.number(
-                            value=round(S.target_mg_per_s, 2),
-                            min=0.0, max=10.0, step=0.01,
-                            format="%.2f",
-                            on_change=_on_mg_input,
-                        )
-
-                        ui.label("g O3 @ 30 min").classes(
-                            "text-caption q-mt-sm"
-                        )
-                        inp_g30 = ui.number(
-                            value=round(S.target_g_30min, 2),
-                            min=0.0, max=20.0, step=0.1,
-                            format="%.2f",
-                            on_change=_on_g30_input,
-                        )
-
-                # E-stop
-                ui.separator().classes("q-my-md")
-                ui.button(
-                    "EMERGENCY STOP", icon="dangerous",
-                    on_click=_estop, color="red",
-                ).classes("q-mt-sm").props("size=lg")
+                    # Live O3 chart during validation
+                    val_chart = ui.echart({
+                        "darkMode": True,
+                        "tooltip": {"trigger": "axis"},
+                        "xAxis": {"type": "category", "name": "Sample",
+                                  "data": []},
+                        "yAxis": {"type": "value", "name": "O3 (%vol)"},
+                        "series": [
+                            {"name": "O3", "type": "line", "smooth": True,
+                             "data": [], "showSymbol": False,
+                             "areaStyle": {"opacity": 0.1}},
+                        ],
+                    }).classes("w-full").style("height: 220px")
 
             # =============================================================
             # TELEMETRY TAB
             # =============================================================
             with ui.tab_panel(tab_telem):
-                # Metrics row
                 with ui.row().classes("q-gutter-md q-mb-md"):
                     met_o3 = ui.label(
                         f"Vessel O3: {S.vessel_o3_pct:.4f} %vol"
@@ -1219,14 +1425,11 @@ async def index():
                     met_room = ui.label(
                         f"Room O3: {S.room_o3_ppm:.3f} ppm"
                     ).classes("text-body1")
-                    met_vt = ui.label("Vessel T: N/A").classes(
-                        "text-body1"
-                    )
+                    met_vt = ui.label("Vessel T: N/A").classes("text-body1")
                     met_ct = ui.label(
-                        f"Cell T: {S.cell_temp_c:.1f} C"
+                        f"Cell T: {S.cell_temp_c:.1f} \u00b0C"
                     ).classes("text-body1")
 
-                # Skeleton placeholder (shown until first data)
                 telem_skeleton = ui.column().classes("w-full")
                 with telem_skeleton:
                     for _ in range(2):
@@ -1235,7 +1438,6 @@ async def index():
                         ).style("height: 200px")
                 telem_skeleton.visible = True
 
-                # ECharts time-series (hidden until data arrives)
                 echart_o3 = ui.echart({
                     "darkMode": True,
                     "tooltip": {"trigger": "axis"},
@@ -1261,18 +1463,17 @@ async def index():
                 echart_pwr = ui.echart({
                     "darkMode": True,
                     "tooltip": {"trigger": "axis"},
-                    "legend": {"data": ["Power (%)", "Cell Temp (C)"]},
+                    "legend": {"data": ["Power (%)", "Cell Temp (\u00b0C)"]},
                     "xAxis": {"type": "time", "name": "Time"},
                     "yAxis": [
-                        {"type": "value", "name": "Power %", "position": "left",
-                         "max": 105},
-                        {"type": "value", "name": "C", "position": "right"},
+                        {"type": "value", "name": "Power %", "position": "left", "max": 105},
+                        {"type": "value", "name": "\u00b0C", "position": "right"},
                     ],
                     "series": [
                         {"name": "Power (%)", "type": "line", "smooth": True,
                          "yAxisIndex": 0, "data": [], "showSymbol": False,
                          "lineStyle": {"width": 2, "color": "#FFA726"}},
-                        {"name": "Cell Temp (C)", "type": "line", "smooth": True,
+                        {"name": "Cell Temp (\u00b0C)", "type": "line", "smooth": True,
                          "yAxisIndex": 1, "data": [], "showSymbol": False,
                          "lineStyle": {"width": 2, "color": "#EF5350"}},
                     ],
@@ -1280,10 +1481,9 @@ async def index():
                 }).classes("w-full").style("height: 260px")
                 echart_pwr.visible = False
 
-                # CSV export + raw data table
-                with ui.expansion(
-                    "Raw data", icon="table_chart"
-                ).classes("w-full q-mt-sm"):
+                with ui.expansion("Raw data", icon="table_chart").classes(
+                    "w-full q-mt-sm"
+                ):
                     async def _export_csv():
                         if not data_buf:
                             _notify("No data to export", "warning")
@@ -1296,164 +1496,44 @@ async def index():
                         log(f"CSV export -> {fname}")
 
                     ui.button(
-                        "Export CSV", icon="download",
-                        on_click=_export_csv,
+                        "Export CSV", icon="download", on_click=_export_csv,
                     ).props("dense flat size=sm").classes("q-mb-sm")
 
                     raw_table = ui.table(
                         columns=[
-                            {
-                                "name": "timestamp",
-                                "label": "Time",
-                                "field": "timestamp",
-                                "align": "left",
-                                "sortable": True,
-                            },
-                            {
-                                "name": "vessel_o3_pct",
-                                "label": "O3 %",
-                                "field": "vessel_o3_pct",
-                                "sortable": True,
-                            },
-                            {
-                                "name": "room_o3_ppm",
-                                "label": "Room ppm",
-                                "field": "room_o3_ppm",
-                                "sortable": True,
-                            },
-                            {
-                                "name": "power_actual_pct",
-                                "label": "Power %",
-                                "field": "power_actual_pct",
-                                "sortable": True,
-                            },
-                            {
-                                "name": "cell_temp_c",
-                                "label": "Cell C",
-                                "field": "cell_temp_c",
-                                "sortable": True,
-                            },
+                            {"name": "timestamp", "label": "Time",
+                             "field": "timestamp", "align": "left", "sortable": True},
+                            {"name": "vessel_o3_pct", "label": "O3 %",
+                             "field": "vessel_o3_pct", "sortable": True},
+                            {"name": "room_o3_ppm", "label": "Room ppm",
+                             "field": "room_o3_ppm", "sortable": True},
+                            {"name": "power_actual_pct", "label": "Power %",
+                             "field": "power_actual_pct", "sortable": True},
+                            {"name": "cell_temp_c", "label": "Cell \u00b0C",
+                             "field": "cell_temp_c", "sortable": True},
                         ],
                         rows=[],
                         pagination={"rowsPerPage": 15},
                     ).classes("w-full")
 
             # =============================================================
-            # CALIBRATION TAB
-            # =============================================================
-            with ui.tab_panel(tab_cal):
-                ui.label("Power → O₃ Calibration").classes(
-                    "text-h6 q-mb-sm"
-                )
-
-                # Phase stepper (all 4 visible, current highlighted)
-                CAL_PHASES = [
-                    ("Baseline", "30 s @ 0 % power"),
-                    ("Sweep Up", "0 → 100 % in 1 % steps"),
-                    ("Sweep Down", "100 → 0 % in 1 % steps"),
-                    ("Random Pairs", "15 levels × Air OFF/ON"),
-                ]
-                cal_stepper_container = ui.row().classes(
-                    "w-full q-gutter-sm q-my-md"
-                )
-                cal_step_cards: list = []
-                with cal_stepper_container:
-                    for i, (phase_name, phase_desc) in enumerate(
-                        CAL_PHASES
-                    ):
-                        with ui.card().classes(
-                            "cal-step-card"
-                        ).style(
-                            "flex: 1; min-width: 150px; opacity: 0.4"
-                        ) as step_card:
-                            with ui.row().classes(
-                                "items-center no-wrap q-mb-xs"
-                            ):
-                                ui.badge(
-                                    str(i + 1), color="primary"
-                                ).props("rounded")
-                                ui.label(phase_name).classes(
-                                    "text-subtitle2"
-                                )
-                            ui.label(phase_desc).classes(
-                                "text-caption text-grey"
-                            )
-                        cal_step_cards.append(step_card)
-
-                with ui.row().classes("q-gutter-sm q-my-sm"):
-                    cal_start_btn = ui.button(
-                        "Start", icon="play_arrow",
-                        on_click=_cal_start, color="primary",
-                    )
-                    cal_stop_btn = ui.button(
-                        "Stop", icon="stop",
-                        on_click=_cal_stop, color="grey",
-                    )
-
-                cal_phase_lbl = ui.label("Phase: --").classes(
-                    "text-body2"
-                )
-                cal_progress = ui.linear_progress(
-                    value=0, show_value=False
-                ).classes("q-mb-sm")
-                cal_info_lbl = ui.label("").classes("text-caption")
-
-                # Live scatter (Plotly kept)
-                cal_plot = ui.plotly(go.Figure()).classes(
-                    "w-full q-mt-sm"
-                )
-
-                ui.separator().classes("q-my-md")
-                ui.label("Calibration Files").classes("text-subtitle2")
-                cal_files_container = ui.column().classes("w-full")
-
-                def _render_cal_files() -> None:
-                    cal_files_container.clear()
-                    files = list_calibration_files()
-                    with cal_files_container:
-                        if not files:
-                            ui.label(
-                                "No calibration files found"
-                            ).classes("text-caption")
-                        else:
-                            for lpm in sorted(files):
-                                with ui.expansion(
-                                    f"O₂ @ {lpm} LPM  "
-                                    f"({len(files[lpm])} files)"
-                                ):
-                                    for fp in sorted(files[lpm]):
-                                        ui.label(
-                                            os.path.basename(fp)
-                                        ).classes("text-caption")
-
-                _render_cal_files()
-
-            # =============================================================
             # DEBUG TAB
             # =============================================================
             with ui.tab_panel(tab_debug):
                 ui.label("Debug Console").classes("text-h6 q-mb-sm")
-                with ui.row().classes(
-                    "w-full q-gutter-sm items-end"
-                ):
+                with ui.row().classes("w-full q-gutter-sm items-end"):
                     debug_input = ui.input(
                         "Command", placeholder="status"
                     ).classes("col-9")
-                    ui.button(
-                        "Send", on_click=_send_debug_cmd
-                    ).classes("col-2")
-                debug_resp_label = ui.label("").classes(
-                    "text-body2 q-mt-sm"
-                )
+                    ui.button("Send", on_click=_send_debug_cmd).classes("col-2")
+                debug_resp_label = ui.label("").classes("text-body2 q-mt-sm")
 
                 ui.separator().classes("q-my-md")
                 ui.label("System State").classes("text-subtitle2")
                 dbg_state_lbl = ui.code("").classes("w-full")
 
                 ui.label("Log").classes("text-subtitle2 q-mt-md")
-                dbg_log_html = ui.html("").classes(
-                    "w-full"
-                ).style(
+                dbg_log_html = ui.html("").classes("w-full").style(
                     "max-height: 320px; overflow-y: auto; "
                     "font-family: monospace; font-size: 0.82rem; "
                     "background: var(--q-dark-page, #1d1d1d); "
@@ -1466,9 +1546,7 @@ async def index():
             with ui.tab_panel(tab_settings):
                 ui.label("Settings").classes("text-h6 q-mb-md")
                 with ui.card().classes("q-pa-md"):
-                    ui.label("Toast Notifications").classes(
-                        "text-subtitle2 q-mb-sm"
-                    )
+                    ui.label("Toast Notifications").classes("text-subtitle2 q-mb-sm")
                     ui.label(
                         "Control which notifications appear as pop-ups"
                     ).classes("text-caption text-grey q-mb-sm")
@@ -1480,39 +1558,31 @@ async def index():
 
                     def _on_notify_change(e):
                         S.notify_level = e.value
-                        log(
-                            f"Notification level -> {e.value}",
-                            cat="info",
-                        )
+                        log(f"Notification level -> {e.value}")
 
-                    notify_select.on("update:model-value",
-                                     _on_notify_change)
+                    notify_select.on("update:model-value", _on_notify_change)
 
     # =====================================================================
-    # PERIODIC UI REFRESH  (runs every 1 s via NiceGUI timer)
+    # PERIODIC UI REFRESH  (1s timer)
     # =====================================================================
     _relay_ts: float = 0.0
     _echart_has_data: bool = False
+    _last_prompt_id: str = ""
 
     async def _tick() -> None:
-        nonlocal _updating, _relay_ts, _echart_has_data
+        nonlocal _updating, _relay_ts, _echart_has_data, _last_prompt_id
 
-        # -- run calibration step ------------------------------------------
-        if S.cal_active:
-            await cal.step()
-
-        # -- sync relays every ~10 s ---------------------------------------
+        # -- sync relays every ~10 s --------------------------------------
         if S.connected and time.time() - _relay_ts > 10:
             await cmd_sync_relays()
             _relay_ts = time.time()
 
-        # -- update sidebar status -----------------------------------------
+        # -- sidebar status -----------------------------------------------
         if S.connected:
             conn_badge.text = "Connected"
             conn_badge.props('color="green"')
             conn_badge._classes = [
-                c for c in conn_badge._classes
-                if c != "blink-disconnect"
+                c for c in conn_badge._classes if c != "conn-blink"
             ]
             if "conn-steady" not in conn_badge._classes:
                 conn_badge._classes.append("conn-steady")
@@ -1520,34 +1590,25 @@ async def index():
             conn_badge.text = "Disconnected"
             conn_badge.props('color="red"')
             conn_badge._classes = [
-                c for c in conn_badge._classes
-                if c != "conn-steady"
+                c for c in conn_badge._classes if c != "conn-steady"
             ]
-            if "blink-disconnect" not in conn_badge._classes:
-                conn_badge._classes.append("blink-disconnect")
+            if "conn-blink" not in conn_badge._classes:
+                conn_badge._classes.append("conn-blink")
         conn_badge.update()
 
-        btn_air.props(
-            f'color={"green" if S.relay_air_comp else "grey"}'
-        )
-        btn_o2.props(
-            f'color={"green" if S.relay_o2_conc else "grey"}'
-        )
-        btn_o3.props(
-            f'color={"green" if S.relay_o3_gen else "grey"}'
-        )
+        btn_air.props(f'color={"green" if S.relay_air_comp else "grey"}')
+        btn_o2.props(f'color={"green" if S.relay_o2_conc else "grey"}')
+        btn_o3.props(f'color={"green" if S.relay_o3_gen else "grey"}')
 
         card_flow_val.text = f"{S.flow_lpm:.1f}"
         card_o3_val.text = f"{S.vessel_o3_pct:.3f}"
         card_room_val.text = f"{S.room_o3_ppm:.3f}"
         card_vtemp_val.text = (
-            f"{S.vessel_temp_c:.1f}"
-            if S.vessel_temp_c > -900
-            else "N/A"
+            f"{S.vessel_temp_c:.1f}" if S.vessel_temp_c > -900 else "N/A"
         )
         card_ctemp_val.text = f"{S.cell_temp_c:.1f}"
 
-        # -- sync power slider & inputs to SystemState -----------------
+        # -- sync power slider & inputs ------------------------------------
         if not _updating:
             _updating = True
             if slider.value != S.power_target_pct:
@@ -1560,211 +1621,187 @@ async def index():
         # -- sequence banner + control lock --------------------------------
         seq_banner.visible = S.sequence_active
         if S.sequence_active:
-            seq_name_lbl.text = S.sequence_name
-            _p_desc = {
-                "baseline": "Baseline (0%)",
-                "sweep_up": (
-                    f"Sweep Up ({S.cal_current_power}%)"
-                ),
-                "sweep_down": (
-                    f"Sweep Down ({S.cal_current_power}%)"
-                ),
-                "random_pairs": (
-                    f"Random Pairs"
-                    f" ({S.cal_random_idx + 1}"
-                    f"/{CAL_NUM_RANDOM_POINTS})"
-                ),
-            }
-            seq_phase_lbl.text = _p_desc.get(
-                S.cal_phase, S.cal_phase or ""
-            )
-            seq_progress_bar.value = (
-                S.cal_phase_progress / 100
-            )
-        for _el in [slider, inp_pwr, inp_o3, inp_mg, inp_g30]:
+            type_names = {"cal": "Calibration", "validate": "Validation"}
+            seq_name_lbl.text = type_names.get(S.seq_type, S.seq_type)
+            seq_phase_lbl.text = S.seq_phase.replace("_", " ").title()
+            seq_progress_bar.value = S.seq_progress / 100
+            mins = int(S.seq_elapsed) // 60
+            secs = int(S.seq_elapsed) % 60
+            seq_elapsed_lbl.text = f"{mins}:{secs:02d}"
+
+        # Lock controls during sequences (power + relays + O2 input)
+        lockable = [slider, inp_pwr, inp_o3, inp_mg, inp_g30,
+                     btn_air, btn_o2, btn_o3, inp_lpm_sb,
+                     cal_start_btn, val_start_btn]
+        lockable.extend(preset_btns)
+        for _el in lockable:
             if S.sequence_active:
                 _el.props("disable")
             else:
                 _el.props(remove="disable")
-        for _btn in preset_btns:
-            if S.sequence_active:
-                _btn.props("disable")
-            else:
-                _btn.props(remove="disable")
 
-        # -- power curve (target + actual markers) -------------------------
+        # -- prompt dialog ------------------------------------------------
+        if S.pending_prompt_id and S.pending_prompt_id != _last_prompt_id:
+            _last_prompt_id = S.pending_prompt_id
+            content = PROMPT_CONTENT.get(S.pending_prompt_id, {
+                "title": "Action Required",
+                "icon": "help",
+                "body": S.pending_prompt_text or "Please confirm to continue.",
+            })
+            prompt_icon_ref[0].name = content.get("icon", "help")
+            prompt_icon_ref[0].update()
+            prompt_title_ref[0].text = content["title"]
+            prompt_body_ref[0].content = content["body"]
+            prompt_dialog.open()
+        elif not S.pending_prompt_id:
+            _last_prompt_id = ""
+
+        # -- power curve ---------------------------------------------------
         _update_power_curve()
 
-        # -- telemetry charts (ECharts) ------------------------------------
+        # -- telemetry ECharts ---------------------------------------------
         if data_buf:
             met_o3.text = f"Vessel O3: {S.vessel_o3_pct:.4f} %vol"
             met_room.text = f"Room O3: {S.room_o3_ppm:.3f} ppm"
             met_vt.text = (
-                f"Vessel T: {S.vessel_temp_c:.1f} C"
-                if S.vessel_temp_c > -900
-                else "Vessel T: N/A"
+                f"Vessel T: {S.vessel_temp_c:.1f} \u00b0C"
+                if S.vessel_temp_c > -900 else "Vessel T: N/A"
             )
-            met_ct.text = f"Cell T: {S.cell_temp_c:.1f} C"
+            met_ct.text = f"Cell T: {S.cell_temp_c:.1f} \u00b0C"
 
-            # Show charts, hide skeleton on first data
             if not _echart_has_data:
                 telem_skeleton.visible = False
                 echart_o3.visible = True
                 echart_pwr.visible = True
                 _echart_has_data = True
 
-            # Build data arrays for ECharts
-            o3_data = []
-            room_data = []
-            pwr_data = []
-            temp_data = []
+            o3_data, room_data, pwr_data, temp_data = [], [], [], []
             for s in data_buf:
                 ts_ms = int(s["timestamp"].timestamp() * 1000)
                 o3_data.append([ts_ms, s["vessel_o3_pct"]])
                 room_data.append([ts_ms, s["room_o3_ppm"]])
-                pwr_data.append(
-                    [ts_ms, s.get("power_actual_pct", 0)]
-                )
-                temp_data.append(
-                    [ts_ms, s.get("cell_temp_c", 0)]
-                )
+                pwr_data.append([ts_ms, s.get("power_actual_pct", 0)])
+                temp_data.append([ts_ms, s.get("cell_temp_c", 0)])
 
             echart_o3.options["series"][0]["data"] = o3_data
             echart_o3.options["series"][1]["data"] = room_data
             echart_o3.update()
-
             echart_pwr.options["series"][0]["data"] = pwr_data
             echart_pwr.options["series"][1]["data"] = temp_data
             echart_pwr.update()
 
-            # raw table (latest 20)
             rows = []
             for s in list(data_buf)[-20:]:
-                rows.append(
-                    {
-                        "timestamp": str(
-                            s["timestamp"].strftime("%H:%M:%S")
-                        ),
-                        "vessel_o3_pct": f"{s['vessel_o3_pct']:.4f}",
-                        "room_o3_ppm": f"{s['room_o3_ppm']:.3f}",
-                        "power_actual_pct": (
-                            f"{s.get('power_actual_pct', 0):.1f}"
-                        ),
-                        "cell_temp_c": (
-                            f"{s.get('cell_temp_c', 0):.1f}"
-                        ),
-                    }
-                )
+                rows.append({
+                    "timestamp": str(s["timestamp"].strftime("%H:%M:%S")),
+                    "vessel_o3_pct": f"{s['vessel_o3_pct']:.4f}",
+                    "room_o3_ppm": f"{s['room_o3_ppm']:.3f}",
+                    "power_actual_pct": f"{s.get('power_actual_pct', 0):.1f}",
+                    "cell_temp_c": f"{s.get('cell_temp_c', 0):.1f}",
+                })
             raw_table.rows = rows
             raw_table.update()
 
-        # -- calibration UI refresh ----------------------------------------
-        if S.cal_active:
-            phase_labels = {
-                "baseline": "Baseline (0 %)",
-                "sweep_up": "Sweep Up (0→100 %)",
-                "sweep_down": "Sweep Down (100→0 %)",
-                "random_pairs": "Random Pairs",
-            }
-            cal_phase_lbl.text = (
-                f"Phase: "
-                f"{phase_labels.get(S.cal_phase, S.cal_phase or '--')}"
-            )
-            cal_progress.value = S.cal_phase_progress / 100
-            info = (
-                f"Power={S.cal_current_power}%  "
+        # -- calibration observer UI --------------------------------------
+        if S.sequence_active and S.seq_type == "cal":
+            cal_phase_lbl.text = f"Phase: {S.seq_phase.replace('_', ' ').title()}"
+            cal_progress.value = S.seq_progress / 100
+            cal_info_lbl.text = (
+                f"Power={S.seq_power:.0f}%  "
                 f"O3={S.vessel_o3_pct:.2f}%  "
-                f"Air={'ON' if S.cal_air_state else 'OFF'}  "
-                f"Samples={len(S.cal_data)}"
+                f"Air={'ON' if S.seq_air else 'OFF'}  "
+                f"Samples={len(S.cal_samples)}"
             )
-            if S.cal_phase == "random_pairs" and S.cal_random_powers:
-                idx = min(
-                    S.cal_random_idx,
-                    len(S.cal_random_powers) - 1,
-                )
-                info += (
-                    f"  (point {S.cal_random_idx+1}"
-                    f"/{CAL_NUM_RANDOM_POINTS}: "
-                    f"{S.cal_random_powers[idx]}%)"
-                )
-            cal_info_lbl.text = info
-
-            # Highlight active step card
-            phase_idx = {
-                "baseline": 0, "sweep_up": 1,
-                "sweep_down": 2, "random_pairs": 3,
-            }
-            active_i = phase_idx.get(S.cal_phase, -1)
-            for i, sc in enumerate(cal_step_cards):
-                if i < active_i:
-                    sc.style("opacity: 0.6; border-left: 3px solid green")
-                elif i == active_i:
-                    sc.style(
-                        "opacity: 1.0; border-left: 3px solid #42A5F5; "
+            # Highlight active/completed phase cards
+            phase_order = ["baseline", "sweep_up", "sweep_down", "random_pairs"]
+            active_idx = phase_order.index(S.seq_phase) if S.seq_phase in phase_order else -1
+            for i, pk in enumerate(phase_order):
+                card = cal_step_cards.get(pk)
+                if card is None:
+                    continue
+                if i < active_idx:
+                    card.style("opacity: 0.7; border: 1px solid #66BB6A")
+                elif i == active_idx:
+                    card.style(
+                        "opacity: 1.0; border: 2px solid #42A5F5; "
                         "box-shadow: 0 0 8px rgba(66,165,245,0.4)"
                     )
                 else:
-                    sc.style("opacity: 0.4; border-left: none")
-        else:
+                    card.style("opacity: 0.4; border: 1px solid #555")
+        elif not S.sequence_active:
             cal_phase_lbl.text = "Phase: --"
             cal_progress.value = 0
             cal_info_lbl.text = ""
-            for sc in cal_step_cards:
-                sc.style("opacity: 0.4; border-left: none")
+            for card in cal_step_cards.values():
+                card.style("opacity: 0.4; border: 1px solid #555")
 
-        # Live calibration scatter
-        if S.cal_data:
-            cdf = pd.DataFrame(S.cal_data)
-            cfig = go.Figure()
-            off = cdf[~cdf["air_comp_on"]]
-            if len(off):
-                cfig.add_trace(
-                    go.Scatter(
-                        x=off["power_pct"], y=off["o3_pct"],
-                        mode="markers", name="Air OFF",
-                        marker=dict(color="royalblue", size=6),
-                    )
-                )
-            on = cdf[cdf["air_comp_on"]]
-            if len(on):
-                cfig.add_trace(
-                    go.Scatter(
-                        x=on["power_pct"], y=on["o3_pct"],
-                        mode="markers", name="Air ON",
-                        marker=dict(color="orange", size=6),
-                    )
-                )
-            cfig.update_layout(
-                xaxis_title="Power %",
-                yaxis_title="O3 %vol",
-                height=340, showlegend=True,
-                margin=dict(l=50, r=20, t=10, b=50),
-            )
-            cal_plot.figure = cfig
-            cal_plot.update()
+        # Cal scatter chart
+        if S.cal_samples:
+            air_off = [[s["power_pct"], s["o3_pct"]]
+                       for s in S.cal_samples if not s.get("air_comp_on")]
+            air_on = [[s["power_pct"], s["o3_pct"]]
+                      for s in S.cal_samples if s.get("air_comp_on")]
+            cal_chart.options["series"][0]["data"] = air_off
+            cal_chart.options["series"][1]["data"] = air_on
+            cal_chart.update()
 
-        # -- debug state dump ----------------------------------------------
-        dbg_state_lbl.content = (
-            f"connected={S.connected}  "
-            f"time_synced={S.time_synced}\n"
-            f"power_target={S.power_target_pct}%  "
-            f"power_actual={S.power_actual_pct:.1f}%  "
-            f"error={S.power_error}\n"
-            f"relays: o3_gen={S.relay_o3_gen}  "
-            f"o2_conc={S.relay_o2_conc}  "
-            f"air_comp={S.relay_air_comp}\n"
-            f"flow_lpm={S.flow_lpm}  "
-            f"vessel_o3={S.vessel_o3_pct:.4f}  "
-            f"room_o3={S.room_o3_ppm:.3f}\n"
-            f"sequence={S.sequence_name or 'none'}  "
-            f"cal_active={S.cal_active}  "
-            f"cal_phase={S.cal_phase}  "
-            f"samples={len(S.cal_data)}\n"
-            f"data_buf={len(data_buf)}  "
-            f"last_update={S.last_update}"
-        )
+        # -- validation observer UI ---------------------------------------
+        if S.val_samples:
+            val_chart.options["xAxis"]["data"] = list(range(len(S.val_samples)))
+            val_chart.options["series"][0]["data"] = [
+                s["o3_pct"] for s in S.val_samples
+            ]
+            val_chart.update()
 
-        # -- colored debug log HTML ----------------------------------------
+        if S.val_result:
+            val_result_card.visible = True
+            r = S.val_result
+            dev = r.get("deviation_pct", 0.0)
+            if isinstance(dev, (int, float)):
+                if dev < 10:
+                    color, icon_name = "green", "check_circle"
+                elif dev < 20:
+                    color, icon_name = "amber", "warning"
+                else:
+                    color, icon_name = "red", "error"
+            else:
+                color, icon_name = "grey", "help"
+                dev = 0.0
+            val_result_icon.name = icon_name
+            val_result_icon._classes = [f"text-h3 text-{color}"]
+            val_result_icon.update()
+            val_result_title.text = f"Deviation: {dev:.1f}%"
+            val_mean_lbl.text = f"Mean O3: {r.get('mean_o3', 0):.3f}%"
+            val_expected_lbl.text = f"Expected: {r.get('expected_o3', 0):.3f}%"
+            val_dev_lbl.text = f"Deviation: {dev:.1f}%"
+            val_std_lbl.text = f"Std: {r.get('std_o3', 0):.4f}%"
+
+        # -- debug state dump ---------------------------------------------
+        dbg_state_lbl.content = json.dumps({
+            "connected": S.connected,
+            "time_synced": S.time_synced,
+            "power_target": S.power_target_pct,
+            "power_actual": round(S.power_actual_pct, 1),
+            "power_error": S.power_error,
+            "relays": {
+                "o3_gen": S.relay_o3_gen,
+                "o2_conc": S.relay_o2_conc,
+                "air_comp": S.relay_air_comp,
+            },
+            "flow_lpm": S.flow_lpm,
+            "vessel_o3": round(S.vessel_o3_pct, 4),
+            "room_o3": round(S.room_o3_ppm, 3),
+            "sequence_active": S.sequence_active,
+            "seq_type": S.seq_type,
+            "seq_phase": S.seq_phase,
+            "seq_progress": round(S.seq_progress, 1),
+            "pending_prompt": S.pending_prompt_id,
+            "cal_samples": len(S.cal_samples),
+            "val_samples": len(S.val_samples),
+            "data_buf": len(data_buf),
+            "last_update": str(S.last_update) if S.last_update else None,
+        }, indent=2)
+
         lines_html = []
         for ts, cat, msg in list(debug_log):
             css_cls = f"log-{cat}" if cat else "log-info"

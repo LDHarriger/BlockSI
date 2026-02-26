@@ -274,4 +274,72 @@ duplicating work or leaving gaps.  The Dashboard agent needs to build substantia
 UI (prompt dialogs, observer banner, live charts, result displays) and should
 not have to reverse-engineer the protocol from ESP32 source code.
 
-**Status**: `[DECIDED]`
+**Status**: `[DECIDED]` → `[IMPLEMENTED]` (Dashboard agent, session 4)
+
+---
+
+### 2026-02-25: Dashboard observer-mode rewrite (CalibrationRunner deleted)
+
+**Context**: The PC dashboard had a `CalibrationRunner` class (~175 lines) that
+drove calibration sequences PC-side by sending individual `CMD,power_set,N`
+commands every 2 seconds.  The ESP32 agent implemented a generic sequence runner
+framework with autonomous execution, interactive prompts, and data streaming.
+The dashboard needed to transition from "driver" to "observer."
+
+**Decision**: Complete rewrite of `blocksi_dashboard.py` to observer mode:
+1. **Deleted CalibrationRunner** entirely — no PC-driven sequence logic remains
+2. Added 12 TCP message handlers in `_dispatch()`: DATA, RSP, STATE, SEQ,
+   SEQ_DONE, CAL_START, CAL_DATA, CAL_COMPLETE, VAL_START, VAL_DATA, VAL_RESULT,
+   plus SEQ,prompt special case
+3. Added 3 new command helpers: `cmd_sequence_start()`, `cmd_sequence_stop()`,
+   `cmd_sequence_confirm()`
+4. SystemState rewritten: removed PC-driven cal fields, added observer fields
+   (`seq_type`, `seq_phase`, `seq_progress`, `cal_samples`, `val_result`,
+   `pending_prompt_id`, etc.)
+5. `_tick()` rewritten: handles control lockout, prompt dialog triggering,
+   cal/val observer UI updates
+6. Pre-rewrite backup saved to `Interfaces/PC/Old/blocksi_dashboard_pre_observer.py`
+
+**Rationale**: ESP32 has deterministic timing, direct hardware access, and no
+network dependency during execution.  PC is better suited as monitoring/
+visualization layer.  User explicitly chose to do the full rewrite in one pass
+to avoid loose ends ("not addressing it all together would leave loose ends").
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-02-25: Calibration and Validation in Power tab (not separate tabs)
+
+**Context**: The old dashboard had a standalone "Calibration" tab.  With the
+addition of a Validation sequence, the question arose of where to place UI
+for both sequences.
+
+**Decision**: Both Calibration and Validation are placed in the **Power tab**
+as `ui.expansion()` sections, alongside the Power Control expansion.  The
+standalone Calibration tab was removed.  Tab count reduced from 5 to 4:
+Power, Telemetry, Debug, Settings.
+
+**Rationale**: User preference — "Perhaps we could have BOTH the calibration
+sequence and validation accessed as in the power tab since that is what it is
+being calibrated or validated."  Future sequence types (fill, decay, sterilize)
+will get their own tabs when implemented.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-02-25: CalibrationRunner deletion (recoverable from git)
+
+**Context**: The CalibrationRunner was ~175 lines of PC-driven calibration
+state machine.  With the ESP32 owning sequence execution via the sequence
+runner framework, this code became dead.
+
+**Decision**: Deleted CalibrationRunner entirely rather than keeping it as
+fallback.  Pre-rewrite file saved to `Old/blocksi_dashboard_pre_observer.py`.
+
+**Rationale**: User explicitly said "Delete it. If we need to fall back we
+can recover it from github."  Keeping dead code creates confusion and
+maintenance burden.
+
+**Status**: `[IMPLEMENTED]`

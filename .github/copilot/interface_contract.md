@@ -256,10 +256,12 @@ These constants must match between ESP32 firmware and PC dashboard:
 
 ---
 
-## Sequence Integration Guide  `[DECIDED]`
+## Sequence Integration Guide  `[IMPLEMENTED]`
 
 > This section defines how the ESP32 sequence framework and the PC dashboard
-> interact.  Both agents MUST follow these conventions.
+> interact.  Both agents follow these conventions.
+> ESP32: sequence_runner framework `[IMPLEMENTED]`.
+> Dashboard: observer mode, 12 handlers, prompt dialog `[IMPLEMENTED]`.
 
 ### Architecture: ESP32 Executes, Dashboard Observes
 
@@ -360,11 +362,14 @@ When `sequence_active=True`:
 - **Phase label and progress** updated from `SEQ,...` lines
 - **Abort** sends `CMD,sequence_stop` and dashboard waits for `SEQ_DONE,...,aborted`
 
-### Dashboard: Refactoring `CalibrationRunner`
+### Dashboard: Refactoring `CalibrationRunner`  `[IMPLEMENTED]`
 
-The existing `CalibrationRunner` class (~175 lines) runs calibration **PC-side**
-by sending individual `CMD,power_set,N` commands.  It must be refactored to
-**observer mode**:
+The `CalibrationRunner` class has been **deleted** and replaced by observer mode.
+The dashboard now sends `CMD,sequence_start,cal,<lpm>` and parses `CAL_START`,
+`CAL_DATA`, `CAL_COMPLETE` messages from the ESP32.  Pre-rewrite backup is in
+`Interfaces/PC/Old/blocksi_dashboard_pre_observer.py`.
+
+Previous PC-driven approach (for reference):
 
 | Current (PC-driven) | Target (ESP32-driven) |
 |---|---|

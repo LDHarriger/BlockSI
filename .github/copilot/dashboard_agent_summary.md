@@ -1,133 +1,187 @@
 # Dashboard Agent Summary
 
-> Last updated: 2026-02-25 (Session 3 — GUI aesthetic overhaul)
+> Last updated: 2026-02-25 (Session 4 — Observer-mode rewrite)
 
 ## Current State
 
-The PC dashboard has been **fully migrated from Streamlit to NiceGUI** and undergone a comprehensive **GUI aesthetic overhaul**.
+The PC dashboard has been **fully rewritten to observer mode**.  The ESP32 now
+owns all sequence execution (calibration, validation).  The dashboard sends
+start/stop/confirm commands and observes SEQ/CAL/VAL data streams.
 
 | Property | Value |
 |----------|-------|
-| File | `Interfaces/PC/blocksi_dashboard.py` (~1750 lines) |
+| File | `Interfaces/PC/blocksi_dashboard.py` (~1530 lines) |
 | Framework | NiceGUI 3.8.0 (Quasar UI components, WebSocket push) |
 | Python | 3.14 in `.venv` |
 | Dependencies | nicegui, numpy, pandas, plotly |
 | Run command | `.venv\Scripts\python.exe Interfaces\PC\blocksi_dashboard.py [--port 5000]` |
 | UI port | http://localhost:8080 |
-| Old versions | Deleted (v4-v7, v9). v8 archived in `Interfaces/PC/Old/` |
+| Backup | `Interfaces/PC/Old/blocksi_dashboard_pre_observer.py` (pre-rewrite) |
+| Old versions | v4-v7 deleted, v8 in `Old/`, v9 deleted |
 
 ## Code Structure
 
 | Section | Lines (approx) | Purpose |
 |---------|--------|---------|
-| Constants + conversions | 1-130 | Power model, O3 math, flow constants, `STREAM_DIR`, `CAL_DATA_DIR` |
-| `SystemState` class | 130-200 | Singleton: power, relays, sensors, sequence, calibration, `notify_level` |
-| `parse_data_line()` | ~200-240 | Parse 17-field DATA CSV from ESP32 |
-| `apply_telemetry()` | ~243-270 | Update SystemState from DATA (never touches `power_target`) |
-| `TCPServer` class | ~280-420 | asyncio server, handles connect/DATA/RSP/**STATE** |
-| `_handle_state()` | ~420 | Parses `STATE,...` push from ESP32 on reconnect |
-| Command helpers | ~440-490 | `cmd_set_power()`, `cmd_set_relay()`, `cmd_sync_relays()`, `cmd_emergency_stop()` |
-| `_CSVLogger` class | ~493-530 | Auto-logging to `Data/Stream/YYYY-MM-DD_Stream.csv` |
-| `log()` + `_notify()` | ~530-570 | Categorized logging (tuple: ts, cat, msg) + toast helper |
-| `CalibrationRunner` class | ~575-750 | PC-driven calibration state machine (4 phases) |
-| `index()` page | ~800-1490 | Full UI: drawer, header, sequence banner, **5** tab panels, CSS |
-| `_tick()` timer | ~1500-1750 | 1s periodic refresh: sidebar, banner, **ECharts**, stepper, colored log |
+| Constants + conversions | 1-140 | Power model, O3 math, paths, `PROMPT_CONTENT` mapping |
+| `SystemState` class | 140-220 | Singleton: power, relays, sensors, **sequence observer fields**, validation, calibration |
+| `parse_data_line()` / `apply_telemetry()` | ~220-280 | Parse 17-field DATA CSV, update state (never touches `power_target`) |
+| Logging + buffers | ~280-320 | `debug_log` deque (ts, cat, msg), `_notify()` toast helper, 9 log categories |
+| `_CSVLogger` | ~320-360 | Auto-logging to `Data/Stream/YYYY-MM-DD_Stream.csv` |
+| Cal file helpers | ~360-400 | `list_calibration_files()`, `_save_cal_csv()` |
+| `TCPServer` class | ~400-600 | asyncio server with **12 message handlers** in `_dispatch()` |
+| Command helpers | ~600-670 | `cmd_set_power`, `cmd_set_relay`, `cmd_sync_relays`, `cmd_emergency_stop`, **`cmd_sequence_start`**, **`cmd_sequence_stop`**, **`cmd_sequence_confirm`** |
+| `index()` page | ~670-1400 | Full UI: drawer, header, **sequence banner**, **prompt dialog**, **4 tab panels**, CSS |
+| `_tick()` timer | ~1400-1530 | 1s periodic refresh: sidebar, banner, **control lockout**, **prompt dialog opening**, ECharts, **cal/val observer UI** |
 
-## Recent Changes (Session 3) `[IMPLEMENTED]`
-
-### Infrastructure
-- **`STREAM_DIR`**: Telemetry CSVs now saved to `Data/Stream/` (auto-created)
-- **STATE parser**: `_handle_state()` processes `STATE,ozone_gen=...,o2_conc=...,air_comp=...,power=...,flow=...` from ESP32 reconnect push
-- **Categorized logging**: `debug_log` stores `(timestamp, category, message)` tuples. Categories: `send`, `recv`, `info`, `error`, `warn`
-- **Toast notifications**: `_notify()` helper respects `S.notify_level` (`all`/`errors`/`none`)
-
-### UI Overhaul
-- **Connection badge**: `ui.badge` with CSS glow (`conn-steady`) when connected, rapid blink animation (`blink-disconnect`) when disconnected — replaces `conn_icon` + `conn_label`
-- **Sensor cards**: 5 bordered cards (Flow LPM, Vessel O3, Room O3, Vessel Temp, Cell Temp) with large value + unit labels — replaces `lbl_*` plain text
-- **Dark mode toggle**: Button in header bar, uses `dark.toggle()`
-- **Enhanced slider**: Thicker track + larger thumb via `power-slider` CSS class
-- **ECharts telemetry**: Replaced Plotly `make_subplots` with 2 `ui.echart()` charts (O3+Room, Power+Temp). Features: `dataZoom` (inside + slider), dark mode, streaming updates, area fill
-- **Skeleton placeholders**: Two large rect skeletons shown until first data arrives, then hidden
-- **CSV export**: Download button above raw data table, exports to `Data/Stream/` 
-- **Calibration stepper**: 4 phase cards (Baseline, Sweep Up, Sweep Down, Random Pairs) — completed phases dim with green border, active phase highlighted with blue glow
-- **Colored debug log**: HTML-based log with CSS classes per category (`log-send`, `log-recv`, `log-error`, `log-warn`, `log-info`)
-- **Settings tab**: New 5th tab with notification level selector (`all`/`errors`/`none`)
-- **CSS block**: Custom `<style>` with `blink-disconnect` keyframe, `conn-steady`, `sensor-card*`, `log-*`, `power-slider`, `cal-step-card` styles
-
-## Authority Model  `[IMPLEMENTED]`
+## Architecture: Observer Mode  `[IMPLEMENTED]`
 
 ```
 Manual mode (sequence_active=False):
-  PC owns power_target_pct -- telemetry NEVER overwrites it
-  User controls slider/inputs freely
-  _tick() syncs slider to S.power_target_pct (always in agreement)
+  PC owns power_target_pct — telemetry NEVER overwrites it
+  User controls slider/inputs/relays freely
+  _tick() syncs all UI widgets to SystemState
 
 Sequence mode (sequence_active=True):
-  CalibrationRunner sets S.power_target_pct directly + sends CMD,power_set,N
-  Power controls disabled in UI (slider, presets, linked inputs)
-  Amber banner shows: sequence name, phase, progress bar, ABORT button
-  E-STOP always active (also aborts running sequence)
+  ESP32 owns all execution — PC is read-only observer
+  PC sent CMD,sequence_start,<type>,<params> to initiate
+  ESP32 streams SEQ,<phase>,<progress>,... every ~1s
+  ESP32 streams type-specific data (CAL_DATA, VAL_DATA)
+  ESP32 may send SEQ,prompt,<id>,<msg> for operator interaction
+  PC shows prompt dialog, operator clicks Confirm
+  PC sends CMD,sequence_confirm,<prompt_id>
+  ALL power/relay/preset controls locked (disabled via Quasar props)
+  E-STOP always active: sends sequence_stop THEN power_set,0
   Auto-abort if ESP32 disconnects mid-sequence
+  SEQ_DONE clears sequence_active, re-enables controls
 ```
 
-## SystemState Key Fields
+## TCP Message Handlers (12 total)  `[IMPLEMENTED]`
+
+| Message | Handler | Dashboard Action |
+|---------|---------|------------------|
+| `DATA,...` | `_dispatch` | Parse telemetry → state → data_buf → CSV |
+| `RSP,...` | `_handle_rsp` | Time sync, relay get, response queue |
+| `STATE,...` | `_handle_state` | Reconnect sync — relay/power/flow state |
+| `SEQ,...` | `_handle_seq` | Update phase/progress/power/air/elapsed |
+| `SEQ,prompt,...` | `_handle_seq` | Set pending_prompt_id/text |
+| `SEQ_DONE,...` | `_handle_seq_done` | Clear sequence state, toast, re-enable controls |
+| `CAL_START,...` | `_handle_cal_start` | Clear samples, record LPM |
+| `CAL_DATA,...` | `_handle_cal_data` | Append to cal_samples (scatter chart) |
+| `CAL_COMPLETE,...` | `_handle_cal_complete` | Save CSV, toast summary |
+| `VAL_START,...` | `_handle_val_start` | Clear samples, record power/LPM |
+| `VAL_DATA,...` | `_handle_val_data` | Append to val_samples (line chart) |
+| `VAL_RESULT,...` | `_handle_val_result` | Compute deviation, show pass/fail card, toast |
+
+## SystemState Key Fields  `[IMPLEMENTED]`
 
 ```python
-# Power
-power_target_pct: int       # PC-authoritative, never from telemetry
-power_actual_pct: float     # From telemetry
-wiper_voltage: float        # From telemetry
-power_error: bool           # |target - actual| > 5%
+# Power — PC is sole authority for target
+power_target_pct: int
+power_actual_pct: float
+wiper_voltage: float
+power_error: bool         # |target - actual| > 5%
 
-# Sequence tracking
-sequence_active: bool       # True when any automated sequence running
-sequence_name: str          # e.g., "Power-O3 Calibration"
-sequence_description: str
+# Sequence observer (ESP32 owns execution)
+sequence_active: bool     # True during any ESP32-driven sequence
+seq_type: str             # "cal", "validate", etc.
+seq_phase: str            # Current phase name
+seq_progress: float       # 0-100
+seq_elapsed: float        # Seconds
+seq_power: float          # Power ESP32 is commanding
+seq_air: bool             # Air compressor state during sequence
 
-# Calibration (subset of sequence state)
-cal_active: bool
-cal_phase: str              # baseline | sweep_up | sweep_down | random_pairs
-cal_phase_progress: float   # 0-100 within current phase
-cal_current_power: int
-cal_air_state: bool
+# Prompt (interactive sequences)
+pending_prompt_id: str    # e.g., "prompt_vessel", "prompt_direct"
+pending_prompt_text: str  # ESP32's fallback text
+
+# Calibration observer
+cal_samples: list[dict]   # Streamed from CAL_DATA
+cal_lpm: float
+cal_file: str             # Saved filename after CAL_COMPLETE
+
+# Validation observer
+val_power: float
+val_lpm: float
+val_samples: list[dict]   # Streamed from VAL_DATA
+val_result: dict          # From VAL_RESULT (mean_o3, std_o3, deviation_pct, ...)
 
 # Settings
-notify_level: str           # "all" | "errors" | "none"
+notify_level: str         # "all" | "errors" | "none"
 
-# Relays, sensors, connection, timing -- see code for full list
+# Relays, sensors, connection, timing — see code for full list
 ```
 
-## CalibrationRunner Phases (~17 min total)
+## UI Layout (4 tabs)  `[IMPLEMENTED]`
 
-1. **baseline**: 30s at 0% power, air OFF
-2. **sweep_up**: 0->100% in 1% steps, 2s each, air OFF
-3. **sweep_down**: 100->0% in 1% steps, 2s each, air OFF
-4. **random_pairs**: 15 random power levels x (20s air OFF + 20s air ON)
+### Sidebar (Left Drawer, 240px)
+- Connection badge (green steady / red blink)
+- Relay toggle buttons (Air / O2 / O3) — locked during sequences
+- O2 LPM input — locked during sequences
+- 5 sensor cards: Flow LPM, Vessel O3, Room O3, Vessel Temp, Cell Temp
 
-Output: `Data/O3PowerCalibration/YYYY-MM-DD_PowerO3Cal_{LPM}Lpm.csv`
+### Header
+- Menu toggle + title + dark mode toggle
 
-## UI Layout
+### Sequence Banner (top of page, hidden when no sequence)
+- Amber bar: sequence name, phase label, progress bar, elapsed time, ABORT button
 
-- **Left Drawer (240px sidebar)**: Connection badge, relay toggle buttons (Air/O₂/O₃), O₂ LPM input, 5 sensor cards
-- **Header**: Menu toggle + title + dark mode toggle button
-- **Sequence Banner**: Amber bar (hidden when no sequence running) — sequence name, phase label, progress bar, ABORT button
-- **Power Tab**: Slider 0-100% (enhanced CSS), 11 preset buttons, Power-O₃ curve (Plotly), linked settings boxes (LPM, %Power, %vol O₃, mg/s, g@30min), E-STOP
-- **Telemetry Tab**: Metric labels, skeleton placeholder (until data), 2 ECharts time-series (O₃+Room, Power+Temp) with dataZoom, CSV export button, raw data table
-- **Calibration Tab**: 4-phase stepper cards, Start/Stop buttons, phase label, progress bar, info text, live scatter plot (Plotly), file browser
-- **Debug Tab**: Manual command input, response label, system state dump, colored HTML log
-- **Settings Tab**: Notification level selector
+### Prompt Dialog (modal, shown when ESP32 sends SEQ,prompt,...)
+- Persistent dialog with icon, title, rich HTML body
+- Maps `prompt_vessel` → "Step 1 — Route to Vessel" with instructions
+- Maps `prompt_direct` → "Step 2 — Route Direct to Sensor" with instructions
+- Unknown prompt IDs fall back to ESP32's text
+- Confirm button → `CMD,sequence_confirm,<id>`
+- Abort button → `CMD,sequence_stop`
+
+### Power Tab (3 expansions)
+1. **Power Control**: Slider 0-100%, 11 preset buttons, Power-O3 curve (Plotly),
+   linked settings boxes (LPM, %Power, %vol O3, mg/s, g@30min), E-STOP
+2. **Calibration**: LPM input, Start/Stop buttons, 4-phase stepper cards
+   (Baseline, Sweep Up, Sweep Down, Random Pairs) with active highlighting,
+   progress bar, info text, live ECharts scatter (Air OFF vs Air ON), file browser
+3. **Validation**: Power % + LPM inputs, Validate button, pass/fail result card
+   (green <10%, amber 10-20%, red >20%), live ECharts O3 line chart
+
+### Telemetry Tab
+- Metric labels (O3, Room O3, Vessel Temp, Cell Temp)
+- Skeleton placeholders until first data
+- 2 ECharts time-series: O3+Room, Power+Temp (with dataZoom)
+- CSV export + raw data table
+
+### Debug Tab
+- Manual command input/send
+- System state JSON dump (includes all sequence fields)
+- Colored HTML log (9 categories: send, recv, error, warn, info, seq, cal, val, state)
+
+### Settings Tab
+- Notification level selector (all / errors / none)
+
+## What Was Deleted  `[IMPLEMENTED]`
+
+- **CalibrationRunner class** (~175 lines): PC-driven calibration state machine
+  that sent individual `CMD,power_set,N` commands. Replaced by observer mode
+  parsing CAL_START/CAL_DATA/CAL_COMPLETE from ESP32 sequence runner.
+- **Standalone Calibration tab**: Merged into Power tab as an expansion section.
+- **PC-side calibration state fields**: `cal_active`, `cal_phase`, `cal_current_power`,
+  `cal_step_start`, `cal_phase_progress`, `cal_air_state`, `cal_data[]`, etc.
 
 ## Pending Work (Dashboard-Specific)
 
-- `[DECIDED]` **ESP32-owned sequences**: Refactor CalibrationRunner to observer mode — PC sends `CMD,sequence_start,cal,...`, ESP32 runs autonomously, PC shows progress from `SEQ,...` lines. Currently CalibrationRunner does it all PC-side.
-- `[PROPOSED]` **Power model fitting UI**: After calibration CSV generated, fit piecewise model, store in `Model/O3Power/`, update constants.
+- `[PROPOSED]` **Power model fitting UI**: After calibration CSV generated, fit
+  piecewise model, store in `Model/O3Power/`, update constants.
 - `[PROPOSED]` **Historical data viewer**: Load and plot old CSV files from `Data/`.
+- `[PROPOSED]` **Future sequence types**: `fill`, `decay`, `sterilize` — UI shells
+  to be added when ESP32 implements them.
+- `[PROPOSED]` **Prompt value input**: Add optional numeric input (LPM reading)
+  to prompt dialog for `sequence_confirm` value parameter.
 
 ## Known Caveats
 
 1. **Venv required**: Must use `.venv\Scripts\python.exe`, not system Python
-2. **NiceGUI visibility**: `element.visible = True/False` toggles sequence banner, skeleton
+2. **NiceGUI visibility**: `element.visible` toggles sequence banner, skeleton, result card
 3. **Quasar disable pattern**: `.props("disable")` / `.props(remove="disable")`
-4. **CalibrationRunner bypasses `cmd_set_power()`**: Sends `tcp.send_command("power_set,N")` directly and manages `S.power_target_pct` itself in `step()`
-5. **ECharts dark mode**: Charts have `darkMode: True` — works with NiceGUI dark mode toggle
-6. **Connection badge CSS**: Uses `._classes` list manipulation (not ideal but functional for NiceGUI badge animation toggling)
+4. **Connection badge CSS**: Uses `._classes` list manipulation for animation toggling
+5. **ECharts dark mode**: All ECharts have `darkMode: True`
+6. **Plotly retained**: Power curve still uses `ui.plotly` (single Plotly chart remaining)
+7. **Relay lockout**: During sequences, relay buttons + O2 LPM input are disabled alongside power controls

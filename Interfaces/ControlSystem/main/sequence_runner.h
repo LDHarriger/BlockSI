@@ -270,6 +270,30 @@ esp_err_t seq_prompt_user(const char *prompt_id, const char *message,
  */
 esp_err_t sequence_runner_provide_confirmation(const char *prompt_id, const char *value);
 
+// =============================================================================
+// Bridge Functions for External Executors (seq_executor.c)
+// =============================================================================
+// These allow the new recipe-based executor to manage the sequence runner's
+// lockout state without going through the full register/start/stop lifecycle.
+
+/**
+ * @brief Force the runner into active (RUNNING) state
+ * 
+ * Used by seq_executor so that sequence_runner_is_active() returns true
+ * during recipe execution, providing UI lockout for power controls.
+ * 
+ * @param type  Type name to display in status queries
+ * @return ESP_OK, ESP_ERR_INVALID_STATE if already running a registered sequence
+ */
+esp_err_t sequence_runner_force_active(const char *type);
+
+/**
+ * @brief Force the runner back to IDLE state
+ * 
+ * Called by seq_executor when recipe completes or aborts.
+ */
+void sequence_runner_force_idle(void);
+
 #ifdef __cplusplus
 }
 #endif

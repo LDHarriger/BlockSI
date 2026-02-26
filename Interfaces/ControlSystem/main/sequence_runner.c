@@ -526,3 +526,47 @@ esp_err_t sequence_runner_provide_confirmation(const char *prompt_id, const char
              prompt_id ? prompt_id : "?", value ? value : "");
     return ESP_OK;
 }
+
+// =============================================================================
+// Bridge Functions for External Executors
+// =============================================================================
+
+esp_err_t sequence_runner_force_active(const char *type)
+{
+    if (s_seq.mutex == NULL) return ESP_ERR_INVALID_STATE;
+
+    xSemaphoreTake(s_seq.mutex, portMAX_DELAY);
+
+    // Don't allow if a registered sequence is already running
+    if (s_seq.active_impl != NULL &&
+        (s_seq.state == SEQ_STATE_RUNNING || s_seq.state == SEQ_STATE_STOPPING)) {
+        xSemaphoreGive(s_seq.mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_seq.state = SEQ_STATE_RUNNING;
+    s_seq.active_impl = NULL;  // No registered impl — external executor
+    s_seq.stop_requested = false;
+    s_seq.start_time_us = esp_timer_get_time();
+    strncpy(s_seq.type_name, type ? type : "ext", SEQ_TYPE_NAME_MAX - 1);
+    s_seq.type_name[SEQ_TYPE_NAME_MAX - 1] = '\0';
+
+    xSemaphoreGive(s_seq.mutex);
+
+    ESP_LOGI(TAG, "External executor activated: %s", s_seq.type_name);
+    return ESP_OK;
+}
+
+void sequence_runner_force_idle(void)
+{
+    if (s_seq.mutex == NULL) return;
+
+    xSemaphoreTake(s_seq.mutex, portMAX_DELAY);
+    s_seq.state = SEQ_STATE_IDLE;
+    s_seq.active_impl = NULL;
+    s_seq.stop_requested = false;
+    s_seq.task_handle = NULL;
+    xSemaphoreGive(s_seq.mutex);
+
+    ESP_LOGI(TAG, "External executor deactivated");
+}

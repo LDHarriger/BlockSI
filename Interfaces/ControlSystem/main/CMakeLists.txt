@@ -17,8 +17,8 @@ idf_component_register(
         "blocksi_state.c"           # Unified system state management
         "power_calibration_v2.c"    # Power calibration sweep (motor pot version)
         "sequence_runner.c"         # Generic autonomous sequence framework
-        "seq_power_cal.c"           # Sequence: Power-O3 calibration (4-phase)
-        "seq_airflow_val.c"         # Sequence: Airflow/concentration validation
+        "seq_executor.c"            # Recipe-based step executor (replaces seq_power_cal/seq_airflow_val)
+        "seq_sensor_adapter.c"      # 106-H sample counter for executor
     INCLUDE_DIRS 
         "."
     REQUIRES 

@@ -1,6 +1,6 @@
 # BlockSI Interface Contract
 
-> Last updated: 2026-02-25
+> Last updated: 2026-02-26
 >
 > This is the **single source of truth** for everything shared between
 > the ESP32 firmware and the PC dashboard.  Both agents MUST read this
@@ -32,10 +32,11 @@ RSP,OK|ERR,<command_name>,<response_data>\n
 DATA,<17 fields>\n
 ```
 
-### ESP32 -> PC:  Calibration data (during sweep)  `[IMPLEMENTED]`
+### ESP32 -> PC:  Calibration data (during sweep)  `[SUPERSEDED]`
 ```
 CAL_DATA,power_pct,actual_pct,o3_pct,temp_c,direction,elapsed_s\n
 ```
+> **SUPERSEDED** by generic `SEQ,<type>,SAMPLE,...` format.  See Recipe Protocol below.
 
 ### ESP32 -> PC:  State push (on connect/reconnect)  `[IMPLEMENTED]`
 ```
@@ -46,68 +47,43 @@ PC dashboard should parse this to synchronize its relay/power display with
 the ESP32's actual state.  This ensures the PC is never out of sync after
 a disconnect/reconnect cycle.
 
-### Future:  Sequence status  `[IMPLEMENTED]`
-```
-SEQ,<phase_name>,<progress_pct>,<power_pct>,<air_comp>,<elapsed_s>\n
-```
-Phase names vary by sequence type.  For power calibration (`cal`):
-`baseline`, `sweep_up`, `sweep_down`, `random_pair`, `complete`.
-For airflow validation (`validate`):
-`prompt_vessel`, `prompt_direct`, `stabilize`, `measure`, `complete`.
+### ESP32 -> PC:  Recipe sequence messages  `[IMPLEMENTED]`
 
-Sent approximately every 1 second during sequence execution.
-PC dashboard enters observer mode (`sequence_active=True`) when a sequence
-is running, showing progress and disabling manual power controls.
+The generic recipe executor (`seq_executor`) emits these messages during
+any sequence type.  The `<type>` field matches what was sent in `sequence_start`.
 
-### ESP32 -> PC:  Interactive prompt  `[IMPLEMENTED]`
 ```
-SEQ,prompt,<prompt_id>,<message_text>\n
-```
-Sent when a sequence needs operator confirmation (e.g., valve routing).
-PC dashboard should display the message and provide a confirm button.
-Operator responds via `CMD,sequence_confirm,<prompt_id>[,<value>]`.
-The sequence blocks until confirmation is received or timeout.
-
-Prompt IDs for airflow validation (`validate`):
-- `prompt_vessel` — operator routes L-valve to vessel
-- `prompt_direct` — operator routes L-valve direct to 106-H
-
-### ESP32 -> PC:  Sequence completion notification
-```
-SEQ_DONE,<type>,<result>,<elapsed_s>,pts=<count>\n
-```
-Result is one of: `ok`, `aborted`, `error`.
-
-### ESP32 -> PC:  Calibration data (during cal sequence)  `[IMPLEMENTED]`
-```
-CAL_DATA,<timestamp_ms>,<power_pct>,<actual_pct>,<o3_pct>,<o2_lpm>,<air_comp_on>,<total_lpm>,<cell_temp_c>,<phase>\n
-```
-Phase is one of: `baseline`, `sweep_up`, `sweep_down`, `random_pair`.
-
-### ESP32 -> PC:  Calibration metadata (at sequence start)
-```
-CAL_START,o2_lpm=<val>,random_count=<n>,step_pct=<n>\n
+SEQ,<type>,STARTED,steps=<N>,flow=<X>\n           -- Recipe execution begins
+SEQ,<type>,STEP,<index>,<power_pct>,<phase>\n      -- Step transition
+SEQ,<type>,SAMPLE,<step_idx>,<sample_num>,<o3_pct>,<temp_c>,<power_actual>\n  -- Per-sample data
+SEQ,<type>,PROMPT,<prompt_id>,<prompt_text>\n       -- Operator confirmation needed
+SEQ,<type>,COMPLETE,<elapsed_s>\n                   -- Finished successfully
+SEQ,<type>,ABORTED,<reason>\n                       -- Aborted
 ```
 
-### ESP32 -> PC:  Calibration summary (at sequence end)
-```
-CAL_COMPLETE,total=<n>,baseline=<n>,sweep_up=<n>,sweep_down=<n>,random=<n>,elapsed=<s>\n
-```
+**SAMPLE fields**:
+| Field | Type | Description |
+|-------|------|-------------|
+| `step_idx` | int | Step index from recipe |
+| `sample_num` | int | 0-based sample within this step's hold |
+| `o3_pct` | float | Vessel ozone %vol from 106-H |
+| `temp_c` | float | 106-H cell temperature °C |
+| `power_actual` | float | Actual power % from ADC feedback |
 
-### ESP32 -> PC:  Validation data (during validate sequence)  `[IMPLEMENTED]`
-```
-VAL_DATA,<timestamp_ms>,<power_pct>,<actual_pct>,<o3_pct>,<o2_lpm>,<cell_temp_c>\n
-```
+**Key change from previous protocol**: All sequence types (calibration,
+validation, sterilization) use the same `SEQ,<type>,SAMPLE,...` format.
+The PC determines what `<type>` means and how to process the samples.
+The old `CAL_DATA`, `VAL_DATA`, `CAL_START`, `CAL_COMPLETE`, `VAL_START`,
+`VAL_RESULT` messages are **superseded** and no longer emitted.
 
-### ESP32 -> PC:  Validation metadata (at sequence start)
-```
-VAL_START,power=<pct>,o2_lpm=<lpm>\n
-```
+### Old sequence-specific messages  `[SUPERSEDED]`
 
-### ESP32 -> PC:  Validation result (at sequence end)
-```
-VAL_RESULT,power=<pct>,o2_lpm=<lpm>,mean_o3=<pct>,std_o3=<pct>,expected_o3=<pct>,mean_temp=<c>,samples=<n>,elapsed=<s>\n
-```
+The following messages were used by `seq_power_cal.c` and `seq_airflow_val.c`
+(now removed from the build).  Listed for reference only:
+- `CAL_DATA`, `CAL_START`, `CAL_COMPLETE`
+- `VAL_DATA`, `VAL_START`, `VAL_RESULT`
+- `SEQ_DONE,<type>,<result>,<elapsed_s>,pts=<count>`
+- `SEQ,<phase_name>,<progress_pct>,<power_pct>,<air_comp>,<elapsed_s>` (old format)
 
 ---
 
@@ -181,19 +157,42 @@ See `decisions_log.md` entry 2026-02-24.
 | `calibrate_stop` | none | `calibration=stopping` | |
 | `calibrate_status` | none | `active=<0\|1>,pct=<val>,dir=<val>,pts=<val>` | |
 
-### Autonomous Sequences  `[IMPLEMENTED]`
+### Recipe-Based Sequences  `[IMPLEMENTED]`
+
+**Architecture**: "ESP32 = Arms, PC = Brains".  The PC generates complete
+recipes and sends them step-by-step.  The ESP32 executes blindly with
+precise sample-counted holds, streaming per-sample data back.
+
+**Loading protocol** (PC → ESP32, in order):
 | Command | Args | Response (OK) | Notes |
 |---------|------|---------------|-------|
-| `sequence_start` | `<type>[,<params>]` | `type=<type>,status=started` | Types: `cal`, `validate`. Params vary by type |
-| `sequence_stop` | none | `stopping` | Graceful abort of active sequence |
-| `sequence_status` | none | `state=<s>,type=<t>,phase=<p>,progress=<f>,power=<n>,air=<0\|1>,elapsed=<f>` | States: idle, running, stopping, complete, error |
-| `sequence_confirm` | `<prompt_id>[,<value>]` | `confirmed=<prompt_id>` | Responds to interactive prompts during sequences |
+| `sequence_start` | `<type>,<key=value params>` | `type=<type>,status=loading` | Begins recipe loading.  E.g. `calibrate,flow=4.0` |
+| `seq_step` | `<idx>,<pwr>,<hold>,<phase>` | `step=<idx>,pwr=<pwr>,hold=<hold>` | Add step.  E.g. `0,0,15,baseline`.  Max 256 steps |
+| `seq_prompt` | `<before>,<id>,<text>` | `prompt=<id>,before=<before>` | Add prompt.  E.g. `0,check_flow,Verify O2 flow`.  Max 16 |
+| `seq_run` | none | `running` | Sort steps, start execution task |
 
-**Sequence types:**
-| Type | Params | Description |
-|------|--------|-------------|
-| `cal` | `<o2_lpm>` (default 4.0) | Power-O3 calibration: baseline, sweep up/down, random pairs |
-| `validate` | `<power_pct>,<o2_lpm>` (default 75, 4.0) | Airflow/concentration validation: interactive prompts, stabilize, measure |
+**Runtime control** (PC → ESP32):
+| Command | Args | Response (OK) | Notes |
+|---------|------|---------------|-------|
+| `sequence_confirm` | none | `confirmed` | Unblock pending prompt |
+| `sequence_abort` | `[reason]` | `aborting` | Abort with optional reason |
+| `sequence_stop` | `[reason]` | `stopping` | Legacy alias for abort |
+| `sequence_status` | none | `state=<s>,type=<t>,step=<n>/<total>` | States: idle, loading, running, waiting_confirm, complete, aborted |
+
+**Step fields**:
+| Field | Range | Description |
+|-------|-------|-------------|
+| `idx` | 0-65535 | Step ordering index (sorted ascending before execution) |
+| `pwr` | 0-100 | Power level percent |
+| `hold` | 1-65535 | Number of 106-H samples to collect at this power (~2.5s each) |
+| `phase` | string | Phase label for display (max 23 chars, e.g. `baseline`, `sweep_up`) |
+
+**Sequence types** (defined by PC, not by ESP32 firmware):
+| Type | PC Generates | Description |
+|------|-------------|-------------|
+| `calibrate` | Power sweep steps | 0→100→0 in 1% steps + random levels for model fitting |
+| `validate` | Spot-check steps + prompts | Baseline, 2 spot-checks, target power hold |
+| `sterilize` | Multi-phase recipe | Validate, fill, hold, vent (future) |
 
 ### Sensors
 | Command | Args | Response (OK) | Notes |
@@ -258,153 +257,153 @@ These constants must match between ESP32 firmware and PC dashboard:
 
 ## Sequence Integration Guide  `[IMPLEMENTED]`
 
-> This section defines how the ESP32 sequence framework and the PC dashboard
-> interact.  Both agents follow these conventions.
-> ESP32: sequence_runner framework `[IMPLEMENTED]`.
-> Dashboard: observer mode, 12 handlers, prompt dialog `[IMPLEMENTED]`.
+> Updated: 2026-02-26.  Reflects the recipe-based executor architecture.
+> ESP32: generic `seq_executor` + `sequence_runner` lockout `[IMPLEMENTED]`.
+> Dashboard: generates recipes, parses `SEQ,<type>,SAMPLE,...` data `[NEEDS UPDATE]`.
 
-### Architecture: ESP32 Executes, Dashboard Observes
+### Architecture: "ESP32 = Arms, PC = Brains"
 
 ```
-Dashboard                          ESP32
-─────────                          ─────
-CMD,sequence_start,<type>,<params> →   prepare() + spawn task
-                                    ← RSP,OK,sequence_start,...
-                                    ← SEQ,<phase>,<progress>,...  (every ~1s)
-                                    ← seq-specific data lines
-                                    ← SEQ,prompt,<id>,<message>   (if interactive)
-CMD,sequence_confirm,<id>[,<val>]  →   unblock, continue
-                                    ← SEQ,...  (resumes)
-CMD,sequence_stop                  →   request_stop() + cleanup()
-                                    ← RSP,OK,sequence_stop,...
-                                    ← SEQ_DONE,<type>,aborted,...
-    (or on normal completion:)
-                                    ← SEQ_DONE,<type>,ok,...
+Dashboard (PC)                     ESP32
+──────────────                     ─────
+CMD,sequence_start,<type>,<params> →   seq_executor_begin()
+                                    ← RSP,OK,sequence_start,type=...,status=loading
+CMD,seq_step,0,0,15,baseline       →   seq_executor_add_step()
+CMD,seq_step,1,50,5,spot           →   seq_executor_add_step()
+  ... (repeat for all steps)
+CMD,seq_prompt,0,check_flow,...    →   seq_executor_add_prompt()
+CMD,seq_run                        →   seq_executor_run() — sort, spawn task
+                                    ← RSP,OK,seq_run,running
+                                    ← SEQ,<type>,STARTED,steps=N,flow=X
+                                    ← SEQ,<type>,PROMPT,<id>,<text>   (if prompt before step 0)
+CMD,sequence_confirm               →   seq_executor_confirm()
+                                    ← SEQ,<type>,STEP,...
+                                    ← SEQ,<type>,SAMPLE,...  (per 106-H sample)
+                                    ← SEQ,<type>,SAMPLE,...
+                                    ...
+                                    ← SEQ,<type>,COMPLETE,<elapsed_s>
+
+CMD,sequence_abort[,reason]        →   seq_executor_abort()  (at any time)
+                                    ← SEQ,<type>,ABORTED,<reason>
 ```
 
-**Key principle**: The ESP32 owns all timing-critical execution.  The
-Dashboard is a thin observer that shows progress, renders prompts, and
-can abort.  The Dashboard NEVER sends `power_set` or `relay_set` during
-an active sequence — the ESP32 drives hardware directly.
+**Key principles**:
+1. **PC generates all recipes** — step lists, random values, hold durations
+2. **ESP32 executes blindly** — set power, count samples, stream data
+3. **ESP32 does NO analysis** — no mean/std, no model queries, no pass/fail
+4. **PC does ALL analysis** — collects `SAMPLE` data, fits models, generates certificates
+5. **Sample-counted holds** — each step holds for N 106-H samples (~2.5s each)
+6. **Control lockout** — `sequence_runner_is_active()` prevents manual power/relay changes
 
 ### Responsibility Matrix
 
 | Responsibility | Owner | Notes |
 |---|---|---|
-| Sequence timing & phase transitions | **ESP32** | Deterministic, no LAN latency |
-| Hardware control during sequence | **ESP32** | `power_set`, relay toggling |
-| Sensor reading & data streaming | **ESP32** | `CAL_DATA`, `VAL_DATA`, etc. |
-| Statistics computation | **ESP32** | Mean, std, deviation in `VAL_RESULT` |
-| Prompt mechanism (send/block/unblock) | **ESP32** | `seq_prompt_user()` / `sequence_runner_provide_confirmation()` |
-| Sequence initiation (user clicks "Start") | **Dashboard** | Sends `CMD,sequence_start,...` |
-| Abort button | **Dashboard** | Sends `CMD,sequence_stop` |
-| Progress display (banner, progress bar) | **Dashboard** | Parses `SEQ,...` lines |
-| Interactive prompt UI (dialogs, instructions) | **Dashboard** | Parses `SEQ,prompt,...`, sends `CMD,sequence_confirm,...` |
-| Rich operator guidance (diagrams, step text) | **Dashboard** | Maps prompt IDs to UI — NOT limited to ESP32's fallback `<message>` |
-| Data visualization during sequence | **Dashboard** | Live charts from `CAL_DATA`, `VAL_DATA` |
-| Result display & storage | **Dashboard** | Parses `CAL_COMPLETE`, `VAL_RESULT`, saves CSV |
-| Control lockout during sequence | **Dashboard** | Disable power slider, relay toggles, preset buttons |
-| E-STOP (always active, even mid-sequence) | **Dashboard** | Calls `cmd_emergency_stop()` which sends `sequence_stop` + `power_set,0` |
+| Recipe generation (step lists, random values) | **PC** | Calibration: 0→100→0 + random.  Validation: baseline + spots + target |
+| Hardware control during sequence | **ESP32** | `o3_power_set()` per step |
+| Sample-counted hold timing | **ESP32** | Via `seq_sensor_get_sample_count()` from 106-H |
+| Per-sample data streaming | **ESP32** | `SEQ,<type>,SAMPLE,...` per 106-H reading |
+| Prompt mechanism (send/block/unblock) | **ESP32** | `SEQ,<type>,PROMPT,...` → blocks until `sequence_confirm` |
+| Recipe design (what steps, what power, what hold) | **PC** | CalibrationRunner, ValidationRunner |
+| Data storage (CSV, JSON) | **PC** | Collects SAMPLE lines into pandas DataFrame |
+| Statistical analysis (mean, std, CV) | **PC** | Computes from collected samples |
+| Model fitting & prediction | **PC** | Uses calibration data to fit Power→O3 models |
+| Pass/fail determination | **PC** | Applies criteria to validation results |
+| Certificate generation & expiry | **PC** | JSON certificates with 24h validity |
+| Control lockout during sequence | **PC** | Disable power slider, relay toggles when executor active |
+| E-STOP (always active) | **PC** | Sends `sequence_abort` + `power_set,0` + `relay_set,ozone_gen,0` |
 
 ### Dashboard: Required Message Handling
 
-The Dashboard TCP server must parse these message types from the ESP32:
-
 | Message prefix | When | Dashboard action |
 |---|---|---|
-| `SEQ,<phase>,<pct>,...` | Every ~1s during any sequence | Update sequence banner: phase label, progress bar, power, elapsed |
-| `SEQ,prompt,<id>,<msg>` | When sequence needs operator input | Show interactive dialog (see Prompt UI below) |
-| `SEQ_DONE,<type>,<result>,...` | Sequence finished | Clear sequence banner, re-enable controls, show result toast |
-| `CAL_START,...` | Cal sequence begins | Initialize calibration chart/data store |
-| `CAL_DATA,...` | Each cal measurement point | Append to live scatter plot |
-| `CAL_COMPLETE,...` | Cal sequence ends normally | Save CSV, show summary |
-| `VAL_START,...` | Validation begins | Initialize validation view |
-| `VAL_DATA,...` | Each validation sample | Append to live O3 time-series |
-| `VAL_RESULT,...` | Validation ends normally | Show pass/fail report with deviation % |
-| `STATE,...` | On TCP connect/reconnect | Sync relay states + power display |
+| `SEQ,<type>,STARTED,...` | Recipe execution begins | Enter observer mode, show progress banner |
+| `SEQ,<type>,STEP,...` | Step transition | Update phase label, power display |
+| `SEQ,<type>,SAMPLE,...` | Each 106-H sample (~2.5s) | Append to data buffer, update live chart |
+| `SEQ,<type>,PROMPT,...` | Prompt before step | Show modal dialog, wait for user, send `sequence_confirm` |
+| `SEQ,<type>,COMPLETE,...` | Sequence finished OK | Run analysis, show results, save data |
+| `SEQ,<type>,ABORTED,...` | Sequence aborted | Clear banner, re-enable controls |
+| `STATE,...` | TCP connect/reconnect | Sync relay states + power display |
 
-### Dashboard: Prompt UI Design
+### Dashboard: Recipe Generation Examples
 
-When the Dashboard receives `SEQ,prompt,<prompt_id>,<message_text>`:
+**Calibration recipe** (PC generates ~203 steps):
+```python
+steps = []
+# Sweep up: 0→100% in 1% increments, 2 samples each
+for pwr in range(0, 101):
+    steps.append((len(steps), pwr, 2, "sweep_up"))
+# Sweep down: 100→0%
+for pwr in range(100, -1, -1):
+    steps.append((len(steps), pwr, 2, "sweep_down"))
+# Random spot checks
+for _ in range(15):
+    pwr = random.randint(0, 100)
+    steps.append((len(steps), pwr, 5, "random"))
+```
 
-1. **Show a modal dialog** (blocks other interaction except E-STOP and abort)
-2. **Map prompt ID to rich content** — the `<message_text>` from the ESP32 is
-   a plain-text fallback.  The Dashboard should maintain a mapping of prompt
-   IDs to richer instructions:
+**Validation recipe** (PC generates ~7 steps + 2 prompts):
+```python
+steps = [
+    (0, 0,       15, "baseline"),     # 0% for ~37s
+    (1, spot1,    5, "spot_low"),     # ~33% for ~12s
+    (2, spot2,    5, "spot_high"),    # ~66% for ~12s
+    (3, target,  15, "target"),       # Target power for ~37s
+    (4, 0,        5, "cooldown"),     # 0% for ~12s
+]
+prompts = [
+    (0, "check_flow", "Verify O2 flow matches rotameter"),
+    (1, "check_route", "Confirm gas route to 106-H sensor"),
+]
+```
 
-| Prompt ID | Sequence | Rich UI guidance |
+### Validation Pass/Fail Criteria (PC-side analysis)
+
+| Check | Criterion | Action on fail |
 |---|---|---|
-| `prompt_vessel` | `validate` | "**Step 1 — Route to Vessel**<br>Turn the L-valve so airflow goes through the sterilization vessel.<br>Verify the rotameter reads the target LPM.<br>Optionally enter the actual rotameter reading below." |
-| `prompt_direct` | `validate` | "**Step 2 — Route Direct to Sensor**<br>Turn the L-valve so airflow goes directly to the 106-H sensor, bypassing the vessel.<br>Adjust the needle valve until the rotameter matches the vessel route flow.<br>Optionally enter the confirmed LPM." |
+| Airflow equality | Within 5% of target LPM | Fail — "Check rotameter" |
+| Model exists | Valid un-expired calibration model | Fail — "Run calibration first" |
+| Baseline | Mean O3 < 0.02 %vol | Fail — "Residual O3 detected" |
+| Spot correlation | Each spot within 0.15 %vol or 15% relative of model | Fail — "Model inaccurate" |
+| Target accuracy | Mean O3 within 10% relative of model prediction | Fail — "Concentration off" |
+| Target stability | CV < 5% | Fail — "Unstable output" |
 
-3. **Provide a Confirm button** + optional numeric input (LPM reading)
-4. **Send** `CMD,sequence_confirm,<prompt_id>[,<lpm_value>]` when operator confirms
-5. **Show a "Waiting for ESP32..." spinner** after confirming (ESP32 resumes and
-   sends next `SEQ,...` status within ~1s)
-6. **Handle timeout**: If no prompt response in 5 minutes, ESP32 will abort
-   the sequence and send `SEQ_DONE,...,error`.  Dashboard should detect this
-   and clean up.
+Certificate valid for **24 hours**.  Filename:
+`YYYY-MM-DD_HHMMSS_{flow}LPM_{power}pwr_Validation.json`
+
+### Air Compressor During Sequences
+
+**Air compressor must be OFF** during calibration and validation sequences.
+O2-only conditions provide clean, reproducible data.  Air-blend conditions
+(~21% O2 at ~10 LPM additional flow) require a separate calibration.
+
+The PC should verify `air_comp=0` before sending `seq_run`.  The ESP32 does
+not enforce this — it executes the recipe as given.
 
 ### Dashboard: Sequence Observer Mode
 
-When `sequence_active=True`:
+When executor state is `running` or `waiting_confirm`:
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  ⚠ VALIDATE — Phase: stabilize — 45%  ██████░░░░  ABORT │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  ⚠ CALIBRATE — Step 45/203 — sweep_up 22%  ████░░░░  ABORT │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-- **Amber banner** at top of page (similar to current calibration banner)
-- **Power controls disabled**: slider, preset buttons, linked inputs all `.props("disable")`
-- **Relay controls disabled**: toggle buttons `.props("disable")` (ESP32 manages relays)
-- **E-STOP remains active**: Always functional, sends `sequence_stop` first then `power_set,0`
-- **Phase label and progress** updated from `SEQ,...` lines
-- **Abort** sends `CMD,sequence_stop` and dashboard waits for `SEQ_DONE,...,aborted`
+- **Amber banner** at top of page
+- **Power controls disabled**: slider, preset buttons, linked inputs `.props("disable")`
+- **Relay controls disabled**: toggle buttons `.props("disable")`
+- **E-STOP remains active**: sends `sequence_abort` then `power_set,0`
+- **Step/phase info** from `SEQ,<type>,STEP,...` messages
+- **Live chart** from `SEQ,<type>,SAMPLE,...` data
 
-### Dashboard: Refactoring `CalibrationRunner`  `[IMPLEMENTED]`
+### Dashboard: Prompt UI Design
 
-The `CalibrationRunner` class has been **deleted** and replaced by observer mode.
-The dashboard now sends `CMD,sequence_start,cal,<lpm>` and parses `CAL_START`,
-`CAL_DATA`, `CAL_COMPLETE` messages from the ESP32.  Pre-rewrite backup is in
-`Interfaces/PC/Old/blocksi_dashboard_pre_observer.py`.
+When the Dashboard receives `SEQ,<type>,PROMPT,<prompt_id>,<text>`:
 
-Previous PC-driven approach (for reference):
+1. **Show a modal dialog** (blocks other interaction except E-STOP and abort)
+2. **Map prompt ID to rich content** if available; fall back to `<text>` from ESP32
+3. **Provide Confirm button** + optional numeric input
+4. **Send** `CMD,sequence_confirm` when operator confirms
+5. **Show "Executing..." spinner** after confirming
 
-| Current (PC-driven) | Target (ESP32-driven) |
-|---|---|
-| `CalibrationRunner.start()` sends `CMD,power_set,0` | Send `CMD,sequence_start,cal,<lpm>` |
-| `CalibrationRunner.step()` increments power each tick | Parse `SEQ,...` for phase/progress |
-| `CalibrationRunner._pair_step()` toggles air compressor | Parse `CAL_DATA,...` for live plot |
-| Manages `S.cal_phase`, `S.cal_current_power` | Update from `SEQ,...` fields |
-| Saves CSV from `state.cal_data[]` | Save CSV from streamed `CAL_DATA` lines |
-| `CalibrationRunner.stop()` sends `CMD,power_set,0` | Send `CMD,sequence_stop` |
-
-### Dashboard: Validation Sequence UI
-
-The Calibration Tab should be extended (or a new Validation sub-section added):
-
-1. **Start controls**: Power % input (default 75), O2 LPM input (default 4.0), "Validate" button
-2. **Progress area**: Shows current phase, progress bar, elapsed time
-3. **Live chart**: O3 % over time from `VAL_DATA` points (shows stabilization + measurement)
-4. **Result card**: At completion, shows:
-   - Mean O3 %, Std Dev
-   - Expected O3 % (from model)
-   - Deviation %
-   - Pass/Fail indicator (green <10%, amber 10-20%, red >20%)
-   - Sample count and total elapsed time
-
-### Future Sequence Types (Planned)
-
-These sequences are not yet implemented on the ESP32 but follow the same
-observer pattern.  Documenting here so the Dashboard agent can plan UI for them:
-
-| Type | Name | ESP32 does | Dashboard does |
-|---|---|---|---|
-| `fill` | Fill model calibration | Fills vessel with known O3, measures transit time | Shows fill progress, stores model params |
-| `decay` | O3 decay testing | Fills, seals, measures decay curve | Live decay chart, curve fitting display |
-| `sterilize` | Sterilize batch | Full cycle: validate → fill → hold → vent | Multi-phase progress, dose tracker, completion report |
-
-**Note on `sterilize`**: This will likely chain `validate` as a sub-sequence,
-then proceed to fill/hold/vent.  The Dashboard must handle the same prompt
-IDs from the validation phase within the larger sterilization flow.

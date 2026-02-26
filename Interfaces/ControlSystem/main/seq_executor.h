@@ -11,13 +11,13 @@
  * Recipe loading protocol:
  *   CMD,sequence_start,<type>,<key=value params>     Begin recipe
  *   CMD,seq_prompt,<before_step>,<prompt_id>,<text>   Add prompt
- *   CMD,seq_step,<index>,<power_pct>,<hold_samples>,<phase>  Add step
+ *   CMD,seq_step,<index>,<power_pct>,<hold_samples>,<phase>[,<air_comp>]  Add step
  *   CMD,seq_run                                       Finalize & execute
  *
  * Runtime streaming (ESP32 → PC):
  *   SEQ,<type>,STARTED,steps=<N>,flow=<X>
- *   SEQ,<type>,STEP,<index>,<power>,<phase>
- *   SEQ,<type>,SAMPLE,<step_idx>,<sample_num>,<o3_pct>,<temp_c>,<power_actual>
+ *   SEQ,<type>,STEP,<index>,<power>,<phase>,<air_comp>
+ *   SEQ,<type>,SAMPLE,<step_idx>,<sample_num>,<o3_pct>,<temp_c>,<power_actual>,<air_comp>
  *   SEQ,<type>,PROMPT,<prompt_id>,<prompt_text>
  *   SEQ,<type>,COMPLETE,<elapsed_s>
  *   SEQ,<type>,ABORTED,<reason>
@@ -56,6 +56,7 @@ typedef struct {
     uint8_t  power_pct;                         /**< Power level 0-100 */
     uint16_t hold_samples;                      /**< Sensor samples to hold */
     char     phase[SEQ_EXEC_PHASE_LEN];         /**< Phase label */
+    bool     air_comp;                          /**< Air compressor relay state for this step */
 } seq_exec_step_t;
 
 /* ── Prompt definition ──────────────────────────────────────────── */
@@ -99,10 +100,12 @@ esp_err_t seq_executor_begin(const char *type, const char *params);
 /**
  * @brief Add a step to the recipe being loaded
  *
+ * @param air_comp  Set air compressor relay ON (true) or OFF (false) for this step
  * @return ESP_OK, ESP_ERR_INVALID_STATE if not loading, ESP_ERR_NO_MEM if full
  */
 esp_err_t seq_executor_add_step(uint16_t index, uint8_t power_pct,
-                                uint16_t hold_samples, const char *phase);
+                                uint16_t hold_samples, const char *phase,
+                                bool air_comp);
 
 /**
  * @brief Add a prompt to the recipe being loaded

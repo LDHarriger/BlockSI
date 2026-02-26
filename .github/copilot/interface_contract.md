@@ -54,8 +54,8 @@ any sequence type.  The `<type>` field matches what was sent in `sequence_start`
 
 ```
 SEQ,<type>,STARTED,steps=<N>,flow=<X>\n           -- Recipe execution begins
-SEQ,<type>,STEP,<index>,<power_pct>,<phase>\n      -- Step transition
-SEQ,<type>,SAMPLE,<step_idx>,<sample_num>,<o3_pct>,<temp_c>,<power_actual>\n  -- Per-sample data
+SEQ,<type>,STEP,<index>,<power_pct>,<phase>,<air_comp>\n -- Step transition
+SEQ,<type>,SAMPLE,<step_idx>,<sample_num>,<o3_pct>,<temp_c>,<power_actual>,<air_comp>\n  -- Per-sample data
 SEQ,<type>,PROMPT,<prompt_id>,<prompt_text>\n       -- Operator confirmation needed
 SEQ,<type>,COMPLETE,<elapsed_s>\n                   -- Finished successfully
 SEQ,<type>,ABORTED,<reason>\n                       -- Aborted
@@ -69,6 +69,7 @@ SEQ,<type>,ABORTED,<reason>\n                       -- Aborted
 | `o3_pct` | float | Vessel ozone %vol from 106-H |
 | `temp_c` | float | 106-H cell temperature °C |
 | `power_actual` | float | Actual power % from ADC feedback |
+| `air_comp` | int | Air compressor state (0=OFF, 1=ON) |
 
 **Key change from previous protocol**: All sequence types (calibration,
 validation, sterilization) use the same `SEQ,<type>,SAMPLE,...` format.
@@ -167,7 +168,7 @@ precise sample-counted holds, streaming per-sample data back.
 | Command | Args | Response (OK) | Notes |
 |---------|------|---------------|-------|
 | `sequence_start` | `<type>,<key=value params>` | `type=<type>,status=loading` | Begins recipe loading.  E.g. `calibrate,flow=4.0` |
-| `seq_step` | `<idx>,<pwr>,<hold>,<phase>` | `step=<idx>,pwr=<pwr>,hold=<hold>` | Add step.  E.g. `0,0,15,baseline`.  Max 256 steps |
+| `seq_step` | `<idx>,<pwr>,<hold>,<phase>[,<air_comp>]` | `step=<idx>,pwr=<pwr>,hold=<hold>,air=<0\|1>` | Add step.  E.g. `0,0,15,baseline` or `5,50,5,random,1`.  Max 256 steps.  `air_comp` optional (default 0) |
 | `seq_prompt` | `<before>,<id>,<text>` | `prompt=<id>,before=<before>` | Add prompt.  E.g. `0,check_flow,Verify O2 flow`.  Max 16 |
 | `seq_run` | none | `running` | Sort steps, start execution task |
 
@@ -186,6 +187,7 @@ precise sample-counted holds, streaming per-sample data back.
 | `pwr` | 0-100 | Power level percent |
 | `hold` | 1-65535 | Number of 106-H samples to collect at this power (~2.5s each) |
 | `phase` | string | Phase label for display (max 23 chars, e.g. `baseline`, `sweep_up`) |
+| `air_comp` | 0\|1 | Air compressor relay state for this step (optional, default 0) |
 
 **Sequence types** (defined by PC, not by ESP32 firmware):
 | Type | PC Generates | Description |
@@ -270,6 +272,7 @@ CMD,sequence_start,<type>,<params> →   seq_executor_begin()
                                     ← RSP,OK,sequence_start,type=...,status=loading
 CMD,seq_step,0,0,15,baseline       →   seq_executor_add_step()
 CMD,seq_step,1,50,5,spot           →   seq_executor_add_step()
+CMD,seq_step,2,50,5,random,1      →   seq_executor_add_step()  (air_comp ON)
   ... (repeat for all steps)
 CMD,seq_prompt,0,check_flow,...    →   seq_executor_add_prompt()
 CMD,seq_run                        →   seq_executor_run() — sort, spawn task
@@ -300,7 +303,7 @@ CMD,sequence_abort[,reason]        →   seq_executor_abort()  (at any time)
 | Responsibility | Owner | Notes |
 |---|---|---|
 | Recipe generation (step lists, random values) | **PC** | Calibration: 0→100→0 + random.  Validation: baseline + spots + target |
-| Hardware control during sequence | **ESP32** | `o3_power_set()` per step |
+| Hardware control during sequence | **ESP32** | `o3_power_set()` + `relay_set_with_source(RELAY_AIR_COMP,...)` per step |
 | Sample-counted hold timing | **ESP32** | Via `seq_sensor_get_sample_count()` from 106-H |
 | Per-sample data streaming | **ESP32** | `SEQ,<type>,SAMPLE,...` per 106-H reading |
 | Prompt mechanism (send/block/unblock) | **ESP32** | `SEQ,<type>,PROMPT,...` → blocks until `sequence_confirm` |
@@ -330,26 +333,27 @@ CMD,sequence_abort[,reason]        →   seq_executor_abort()  (at any time)
 **Calibration recipe** (PC generates ~203 steps):
 ```python
 steps = []
-# Sweep up: 0→100% in 1% increments, 2 samples each
+# Sweep up: 0→100% in 1% increments, 2 samples each (air OFF)
 for pwr in range(0, 101):
-    steps.append((len(steps), pwr, 2, "sweep_up"))
-# Sweep down: 100→0%
+    steps.append((len(steps), pwr, 2, "sweep_up", 0))
+# Sweep down: 100→0% (air OFF)
 for pwr in range(100, -1, -1):
-    steps.append((len(steps), pwr, 2, "sweep_down"))
-# Random spot checks
+    steps.append((len(steps), pwr, 2, "sweep_down", 0))
+# Random spot checks — pairs: air OFF then air ON
 for _ in range(15):
     pwr = random.randint(0, 100)
-    steps.append((len(steps), pwr, 5, "random"))
+    steps.append((len(steps), pwr, 5, "random", 0))       # O2 only
+    steps.append((len(steps), pwr, 5, "random_air", 1))   # Air blend
 ```
 
-**Validation recipe** (PC generates ~7 steps + 2 prompts):
+**Validation recipe** (PC generates ~5 steps + 2 prompts, air OFF):
 ```python
 steps = [
-    (0, 0,       15, "baseline"),     # 0% for ~37s
-    (1, spot1,    5, "spot_low"),     # ~33% for ~12s
-    (2, spot2,    5, "spot_high"),    # ~66% for ~12s
-    (3, target,  15, "target"),       # Target power for ~37s
-    (4, 0,        5, "cooldown"),     # 0% for ~12s
+    (0, 0,       15, "baseline",  0),   # 0% for ~37s
+    (1, spot1,    5, "spot_low",  0),   # ~33% for ~12s
+    (2, spot2,    5, "spot_high", 0),   # ~66% for ~12s
+    (3, target,  15, "target",    0),   # Target power for ~37s
+    (4, 0,        5, "cooldown",  0),   # 0% for ~12s
 ]
 prompts = [
     (0, "check_flow", "Verify O2 flow matches rotameter"),
@@ -373,12 +377,25 @@ Certificate valid for **24 hours**.  Filename:
 
 ### Air Compressor During Sequences
 
-**Air compressor must be OFF** during calibration and validation sequences.
-O2-only conditions provide clean, reproducible data.  Air-blend conditions
-(~21% O2 at ~10 LPM additional flow) require a separate calibration.
+The air compressor relay can be controlled **per-step** via the optional
+`air_comp` field in `seq_step`.  This enables calibration recipes that
+include air-blend conditions (e.g., random power levels alternating
+between air ON and air OFF).
 
-The PC should verify `air_comp=0` before sending `seq_run`.  The ESP32 does
-not enforce this — it executes the recipe as given.
+- **Pure O2 calibration**: All steps with `air_comp=0` (or omitted)
+- **Air-blend calibration**: Steps with `air_comp=1` toggle the relay ON
+- **Validation**: Typically all `air_comp=0` for O2-only conditions
+
+The executor toggles `RELAY_AIR_COMP` at step transitions when the
+`air_comp` value changes, with a 1-second stabilization delay after
+each toggle.  On sequence completion or abort, the air compressor is
+always set to OFF.
+
+The `STEP` and `SAMPLE` messages include the `air_comp` state so the
+PC can track which condition each data point belongs to.
+
+The PC pre-flight check (`relay_air_comp=0`) guards the initial state.
+During execution, the recipe controls the relay via step definitions.
 
 ### Dashboard: Sequence Observer Mode
 

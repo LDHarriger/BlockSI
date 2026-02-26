@@ -792,7 +792,7 @@ static bool lan_command_handler(const char *cmd, const char *args,
         return false;
 
     } else if (strcmp(cmd, "seq_step") == 0) {
-        // CMD,seq_step,<index>,<power_pct>,<hold_samples>,<phase>
+        // CMD,seq_step,<index>,<power_pct>,<hold_samples>,<phase>[,<air_comp 0|1>]
         if (!args) {
             snprintf(response, response_size, "missing_args");
             return false;
@@ -800,16 +800,19 @@ static bool lan_command_handler(const char *cmd, const char *args,
         
         unsigned idx = 0, pwr = 0, hold = 0;
         char phase[24] = {0};
-        int parsed = sscanf(args, "%u,%u,%u,%23s", &idx, &pwr, &hold, phase);
+        unsigned air_comp = 0;
+        int parsed = sscanf(args, "%u,%u,%u,%23[^,],%u", &idx, &pwr, &hold, phase, &air_comp);
         if (parsed < 3) {
-            snprintf(response, response_size, "bad_format:idx,pwr,hold[,phase]");
+            snprintf(response, response_size, "bad_format:idx,pwr,hold[,phase[,air]]");
             return false;
         }
         
+        bool air = (parsed >= 5 && air_comp != 0);
         esp_err_t ret = seq_executor_add_step((uint16_t)idx, (uint8_t)pwr,
-                                               (uint16_t)hold, phase);
+                                               (uint16_t)hold, phase, air);
         if (ret == ESP_OK) {
-            snprintf(response, response_size, "step=%u,pwr=%u,hold=%u", idx, pwr, hold);
+            snprintf(response, response_size, "step=%u,pwr=%u,hold=%u,air=%u",
+                     idx, pwr, hold, air ? 1 : 0);
             return true;
         }
         snprintf(response, response_size, "failed=%s", esp_err_to_name(ret));

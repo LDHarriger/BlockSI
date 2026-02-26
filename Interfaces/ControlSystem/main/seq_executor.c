@@ -19,6 +19,7 @@
 #include "seq_sensor_adapter.h"
 #include "sequence_runner.h"
 #include "o3_power_control.h"
+#include "relay_control.h"
 #include "blocksi_state.h"
 #include "lan_client.h"
 #include "motor_pot.h"
@@ -139,7 +140,8 @@ esp_err_t seq_executor_begin(const char *type, const char *params)
 }
 
 esp_err_t seq_executor_add_step(uint16_t index, uint8_t power_pct,
-                                uint16_t hold_samples, const char *phase)
+                                uint16_t hold_samples, const char *phase,
+                                bool air_comp)
 {
     xSemaphoreTake(s_exec.mutex, portMAX_DELAY);
 
@@ -156,6 +158,7 @@ esp_err_t seq_executor_add_step(uint16_t index, uint8_t power_pct,
     s->index = index;
     s->power_pct = power_pct;
     s->hold_samples = hold_samples;
+    s->air_comp = air_comp;
     strncpy(s->phase, phase ? phase : "", SEQ_EXEC_PHASE_LEN - 1);
     s->phase[SEQ_EXEC_PHASE_LEN - 1] = '\0';
 
@@ -284,6 +287,8 @@ static void executor_task(void *arg)
 
     /* ── Execute each step ────────────────────────────────────── */
 
+    bool air_comp_active = false;   /* Track air compressor state for cleanup */
+
     for (uint16_t i = 0; i < s_exec.step_count; i++) {
         if (s_exec.abort_requested) break;
 
@@ -294,15 +299,27 @@ static void executor_task(void *arg)
         issue_prompts_before_step(step->index);
         if (s_exec.abort_requested) break;
 
+        /* ── Air compressor relay control ─────────────────────── */
+        if (step->air_comp != air_comp_active) {
+            relay_set_with_source(RELAY_AIR_COMP,
+                                  step->air_comp ? RELAY_ON : RELAY_OFF,
+                                  RELAY_SRC_SEQUENCE);
+            air_comp_active = step->air_comp;
+            ESP_LOGI(TAG, "Air compressor → %s", air_comp_active ? "ON" : "OFF");
+            /* Allow flow to stabilize after air compressor toggle */
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+
         /* Notify step transition */
         float progress = (float)i / (float)s_exec.step_count * 100.0f;
         seq_report_progress(step->phase, progress, step->power_pct, false);
-        send_msg("SEQ,%s,STEP,%d,%d,%s",
-                 s_exec.type, step->index, step->power_pct, step->phase);
+        send_msg("SEQ,%s,STEP,%d,%d,%s,%d",
+                 s_exec.type, step->index, step->power_pct, step->phase,
+                 step->air_comp ? 1 : 0);
 
-        ESP_LOGI(TAG, "Step %d/%d: pwr=%d%% hold=%d phase=%s",
+        ESP_LOGI(TAG, "Step %d/%d: pwr=%d%% hold=%d phase=%s air=%d",
                  i + 1, s_exec.step_count, step->power_pct,
-                 step->hold_samples, step->phase);
+                 step->hold_samples, step->phase, step->air_comp ? 1 : 0);
 
         /* Set power level */
         o3_power_set(step->power_pct);
@@ -331,10 +348,11 @@ static void executor_task(void *arg)
                     float temp_c = state ? state->sensors.cell_temp_c : 0.0f;
                     float actual_pct = o3_power_get_percent();
 
-                    /* Stream sample to PC */
-                    send_msg("SEQ,%s,SAMPLE,%d,%d,%.4f,%.1f,%.1f",
+                    /* Stream sample to PC (with air_comp state) */
+                    send_msg("SEQ,%s,SAMPLE,%d,%d,%.4f,%.1f,%.1f,%d",
                              s_exec.type, step->index, collected,
-                             o3_pct, temp_c, actual_pct);
+                             o3_pct, temp_c, actual_pct,
+                             step->air_comp ? 1 : 0);
 
                     collected++;
                 }
@@ -446,7 +464,9 @@ static float parse_param_float(const char *params, const char *key, float def)
 static void safe_power_off(void)
 {
     o3_power_set(0);
-    ESP_LOGI(TAG, "Safe shutdown: power → 0%%");
+    /* Ensure air compressor is OFF after sequence */
+    relay_set_with_source(RELAY_AIR_COMP, RELAY_OFF, RELAY_SRC_SEQUENCE);
+    ESP_LOGI(TAG, "Safe shutdown: power → 0%%, air_comp → OFF");
 }
 
 static float get_elapsed_s(void)

@@ -1,6 +1,6 @@
 # ESP32 Agent Summary
 
-> Last updated: 2026-02-26 (recipe-based executor implementation)
+> Last updated: 2026-02-26 (air compressor per-step control)
 
 ## Current State
 
@@ -53,12 +53,12 @@ The ESP32 executes blindly with precise sample-counted holds:
 
 ```
 PC → CMD,sequence_start,<type>,<params>
-PC → CMD,seq_step,<idx>,<pwr>,<hold_samples>,<phase>  (× N)
+PC → CMD,seq_step,<idx>,<pwr>,<hold_samples>,<phase>[,<air_comp>]  (× N)
 PC → CMD,seq_prompt,<before>,<id>,<text>               (× M)
 PC → CMD,seq_run
 ESP32 → SEQ,<type>,STARTED,...
-ESP32 → SEQ,<type>,STEP,...        (per step transition)
-ESP32 → SEQ,<type>,SAMPLE,...      (per 106-H sample, ~2.5s)
+ESP32 → SEQ,<type>,STEP,...,<air_comp>  (per step transition)
+ESP32 → SEQ,<type>,SAMPLE,...,<air_comp>  (per 106-H sample, ~2.5s)
 ESP32 → SEQ,<type>,COMPLETE,...    (or ABORTED)
 ```
 
@@ -66,6 +66,9 @@ Key properties:
 - Max 256 steps, 16 prompts per recipe
 - Steps sorted by index before execution
 - Sample-counted holds via `seq_sensor_get_sample_count()` (monotonic 106-H counter)
+- Per-step air compressor relay control via `air_comp` field (optional, default OFF)
+- 1-second stabilization delay after air compressor toggle
+- Air compressor always set to OFF on sequence completion/abort
 - Prompts block execution via binary semaphore until `CMD,sequence_confirm`
 - FreeRTOS task (8KB stack, priority 5)
 - Safe power-off on abort/completion
@@ -80,7 +83,7 @@ determine pass/fail, store calibration data, or generate certificates.
 | Command | Args | Purpose |
 |---------|------|---------|
 | `sequence_start` | `<type>,<key=val params>` | Begin recipe loading |
-| `seq_step` | `<idx>,<pwr>,<hold>,<phase>` | Add step |
+| `seq_step` | `<idx>,<pwr>,<hold>,<phase>[,<air_comp>]` | Add step (air_comp optional, default 0) |
 | `seq_prompt` | `<before>,<id>,<text>` | Add prompt |
 | `seq_run` | none | Sort steps, start execution task |
 | `sequence_confirm` | none | Unblock pending prompt |
@@ -110,12 +113,15 @@ Tag convention: `static const char *TAG = "MODULE_NAME";`
 
 ## Pending Work
 
+- `[IMPLEMENTED]` **Air compressor per-step control**: `seq_exec_step_t` has `air_comp`
+  bool.  Executor toggles `RELAY_AIR_COMP` at step transitions.  STEP and SAMPLE
+  messages include air_comp state.  Safe shutdown restores air_comp=OFF.
 - `[IMPLEMENTED]` **Recipe executor**: Generic `seq_executor` with sample-counted
   holds, prompt blocking, and LAN streaming.  Replaces all sequence-specific firmware.
 - `[IMPLEMENTED]` **Relay robustness**: Source tracking, NVS persistence, reconnect
   state push, reset-reason-aware restore.
-- `[DECIDED]` **Air compressor OFF during sequences**: O2-only for standard
-  calibration/validation; separate recipes for air-blend characterization.
+- `[IMPLEMENTED]` **Air compressor per-step control**: O2-only (air_comp=0) for
+  standard calibration/validation; air-blend steps use air_comp=1 in recipes.
 - `[PROPOSED]` **Relay dropout investigation**: Source-tracking implemented for
   ongoing monitoring. Monitor logs for `[src=...]` tags.
 - `[PROPOSED]` **Legacy cleanup**: `power_calibration_v2.c` and its

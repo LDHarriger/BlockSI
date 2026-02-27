@@ -170,7 +170,7 @@ precise sample-counted holds, streaming per-sample data back.
 | `sequence_start` | `<type>,<key=value params>` | `type=<type>,status=loading` | Begins recipe loading.  E.g. `calibrate,flow=4.0` |
 | `seq_step` | `<idx>,<pwr>,<hold>,<phase>[,<air_comp>]` | `step=<idx>,pwr=<pwr>,hold=<hold>,air=<0\|1>` | Add step.  E.g. `0,0,15,baseline` or `5,50,5,random,1`.  Max 256 steps.  `air_comp` optional (default 0) |
 | `seq_prompt` | `<before>,<id>,<text>` | `prompt=<id>,before=<before>` | Add prompt.  E.g. `0,check_flow,Verify O2 flow`.  Max 16 |
-| `seq_run` | none | `running` | Sort steps, start execution task |
+| `seq_run` | none | `running` | Sort steps, start execution task.  **Pre-flight**: returns `ERR,preflight_fail:ozone_gen_off` or `ERR,preflight_fail:o2_conc_off` if relays not ON |
 
 **Runtime control** (PC → ESP32):
 | Command | Args | Response (OK) | Notes |
@@ -374,6 +374,27 @@ prompts = [
 
 Certificate valid for **24 hours**.  Filename:
 `YYYY-MM-DD_HHMMSS_{flow}LPM_{power}pwr_Validation.json`
+
+### Relay Prerequisites for Sequences  `[IMPLEMENTED]`
+
+The `seq_run` command performs **pre-flight relay checks** before starting
+execution.  If either `ozone_gen` or `o2_conc` relays are OFF, the command
+returns an error instead of starting the recipe:
+
+```
+RSP,ERR,seq_run,preflight_fail:ozone_gen_off
+RSP,ERR,seq_run,preflight_fail:o2_conc_off
+```
+
+**The PC dashboard must ensure these relays are ON before sending `seq_run`.**
+Recommended pre-flight sequence:
+1. `CMD,relay_set,o2_conc,1` — Turn on O2 concentrator
+2. `CMD,relay_set,ozone_gen,1` — Turn on ozone generator
+3. Wait ~2-3 seconds for equipment to stabilize
+4. `CMD,seq_run` — Start the recipe
+
+The ESP32 does NOT activate these relays automatically — it only verifies
+them as a safety check.  The PC is responsible for relay lifecycle management.
 
 ### Air Compressor During Sequences
 

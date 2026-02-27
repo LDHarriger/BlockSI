@@ -5,6 +5,32 @@
 
 ---
 
+### 2026-02-27: seq_run pre-flight relay validation
+
+**Context**: User attempted a calibration but relays (O2 concentrator and
+ozone generator) were not toggled ON.  Power control worked (motor pot
+moved) but no O3 was produced because the generator and O2 source were
+off.  The old `seq_power_cal.c` checked these as prerequisites (lines 501
+and 507) but the generic recipe executor had no such checks.  The PC
+dashboard's `cmd_sequence_start` only verified `air_comp=0` — it never
+activated `ozone_gen` or `o2_conc`.
+
+**Decision**: Add pre-flight relay checks in the `seq_run` LAN command
+handler in `main.c`.  If `ozone_gen` or `o2_conc` are OFF, return
+`RSP,ERR,seq_run,preflight_fail:ozone_gen_off` (or `o2_conc_off`).
+The ESP32 does NOT auto-activate relays (consistent with "ESP32 = Arms"
+principle).  The PC must send `relay_set` commands before `seq_run`.
+
+**Rationale**: Safety — running a recipe without the generator or gas
+source ON wastes time and produces meaningless data.  Making the ESP32
+reject the recipe forces the PC to handle relay lifecycle explicitly.
+The error message is specific enough for the PC to auto-diagnose and
+potentially auto-fix (send the relay commands and retry).
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
 ### 2026-02-24: PC is sole authority for power_target_pct
 
 **Context**: Stale ESP32 DATA telemetry lines carried old `power_target_pct`

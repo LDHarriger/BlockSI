@@ -113,6 +113,10 @@ Tag convention: `static const char *TAG = "MODULE_NAME";`
 
 ## Pending Work
 
+- `[IMPLEMENTED]` **seq_run pre-flight relay checks**: `seq_run` handler verifies
+  `ozone_gen` and `o2_conc` are ON before starting execution.  Returns
+  `preflight_fail:ozone_gen_off` or `preflight_fail:o2_conc_off` error.
+  PC must send `relay_set` commands before `seq_run`.
 - `[IMPLEMENTED]` **Air compressor per-step control**: `seq_exec_step_t` has `air_comp`
   bool.  Executor toggles `RELAY_AIR_COMP` at step transitions.  STEP and SAMPLE
   messages include air_comp state.  Safe shutdown restores air_comp=OFF.
@@ -120,17 +124,25 @@ Tag convention: `static const char *TAG = "MODULE_NAME";`
   holds, prompt blocking, and LAN streaming.  Replaces all sequence-specific firmware.
 - `[IMPLEMENTED]` **Relay robustness**: Source tracking, NVS persistence, reconnect
   state push, reset-reason-aware restore.
-- `[IMPLEMENTED]` **Air compressor per-step control**: O2-only (air_comp=0) for
-  standard calibration/validation; air-blend steps use air_comp=1 in recipes.
 - `[PROPOSED]` **Relay dropout investigation**: Source-tracking implemented for
   ongoing monitoring. Monitor logs for `[src=...]` tags.
 - `[PROPOSED]` **Legacy cleanup**: `power_calibration_v2.c` and its
   `calibrate_start`/`calibrate_stop` commands could be removed once the Dashboard
   fully adopts the recipe protocol.
 
-## Recent Changes (2026-02-26)
+## Recent Changes (2026-02-27)
 
-### Recipe-Based Executor  `[IMPLEMENTED]`
+### Pre-flight relay checks in seq_run  `[IMPLEMENTED]`
+- `main.c`: `seq_run` handler now checks `ozone_gen` and `o2_conc` relay states
+  before starting execution.  Returns `preflight_fail:ozone_gen_off` or
+  `preflight_fail:o2_conc_off` if either relay is OFF.
+- **Root cause of relay issue**: Neither ESP32 executor nor PC dashboard was
+  activating `ozone_gen`/`o2_conc` relays before calibration.  The old
+  `seq_power_cal.c` checked these as prerequisites but the generic executor
+  had no such checks.  PC dashboard must now send `relay_set` commands
+  before `seq_run` to activate equipment.
+
+### Previous Changes (2026-02-26)
 - `seq_executor.c/.h`: Generic step executor — receives recipe from PC, executes
   with sample-counted holds, streams `SEQ,<type>,SAMPLE,...` per 106-H reading
 - `seq_sensor_adapter.c/.h`: Monotonic 106-H sample counter, called from

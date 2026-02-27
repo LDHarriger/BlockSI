@@ -5,7 +5,38 @@
 
 ---
 
-### 2026-02-27: seq_run pre-flight relay validation
+### 2026-02-28: Executor-owned relay prerequisites with hardware interlock
+
+**Context**: Previous decision (2026-02-27) had `seq_run` reject if relays
+were OFF, requiring the PC to send separate `relay_set` commands before
+`seq_run`.  User feedback: the ESP32 should **activate** relays itself,
+not just reject.  Additionally, the air compressor is physically internal
+to the MP-8000 generator — its relay circuit has NO power unless the
+`ozone_gen` SSR is ON.  This hardware dependency was undocumented and
+unenforced.
+
+**Decision**: (Supersedes 2026-02-27)
+1. **Relay prereqs via params**: `sequence_start` accepts `relay_o2=<0|1>`,
+   `relay_o3=<0|1>`, `relay_air=<0|1>` params.  Omit = don't change.
+   The executor saves original states, applies prereqs in safe order
+   (O2 → O3 → Air), waits 3s for stabilization, sends `SEQ,*,RELAY`
+   notification, then begins step execution.
+2. **Cleanup**: On completion: power=0, air_comp=OFF, O2/O3 unchanged.
+   On abort: power=0, air_comp=OFF, ozone_gen=OFF (safety).
+3. **Hardware interlock in relay_control.c**: `relay_set_with_source()`
+   enforces: (a) `air_comp ON` rejected when `ozone_gen OFF`, (b)
+   `ozone_gen OFF` auto-sets `air_comp OFF`.  Catches ALL callers.
+
+**Rationale**: Single-command startup (`seq_run`) is simpler and less
+error-prone than requiring 2-3 relay commands + delays + retry logic on
+the PC side.  The hardware interlock prevents silent failures where the
+air compressor relay is toggled but no current flows.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-02-27: seq_run pre-flight relay validation  `[SUPERSEDED by 2026-02-28]`
 
 **Context**: User attempted a calibration but relays (O2 concentrator and
 ozone generator) were not toggled ON.  Power control worked (motor pot
@@ -27,7 +58,7 @@ reject the recipe forces the PC to handle relay lifecycle explicitly.
 The error message is specific enough for the PC to auto-diagnose and
 potentially auto-fix (send the relay commands and retry).
 
-**Status**: `[IMPLEMENTED]`
+**Status**: `[SUPERSEDED]` — See 2026-02-28 entry above.
 
 ---
 

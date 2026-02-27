@@ -39,11 +39,28 @@ static const char *TAG = "SEQ_EXEC";
 
 /* ── Internal state ─────────────────────────────────────────────── */
 
+/*
+ * Relay prerequisite: -1 = don't change, 0 = force OFF, 1 = force ON
+ * Parsed from sequence_start params: relay_o2=1, relay_o3=1, relay_air=0
+ */
+typedef struct {
+    int8_t o2_conc;     /**< O2 concentrator */
+    int8_t ozone_gen;   /**< O3 generator (MP-8000) */
+    int8_t air_comp;    /**< Air compressor (internal to MP-8000, requires ozone_gen ON) */
+} seq_relay_prereqs_t;
+
 static struct {
     /* Recipe metadata */
     char type[SEQ_EXEC_TYPE_LEN];
     char params[SEQ_EXEC_PARAMS_LEN];
     float flow_lpm;                         /* Parsed from params */
+
+    /* Relay prerequisites (from sequence_start params) */
+    seq_relay_prereqs_t relay_prereqs;
+    /* Original relay states saved before sequence (for restore on abort) */
+    relay_state_t orig_o2_conc;
+    relay_state_t orig_ozone_gen;
+    relay_state_t orig_air_comp;
 
     /* Steps */
     seq_exec_step_t steps[SEQ_EXEC_MAX_STEPS];
@@ -75,7 +92,9 @@ static int   step_compare(const void *a, const void *b);
 static void  issue_prompts_before_step(uint16_t step_index);
 static void  send_msg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static float parse_param_float(const char *params, const char *key, float def);
-static void  safe_power_off(void);
+static int   parse_param_int(const char *params, const char *key, int def);
+static void  apply_relay_prereqs(void);
+static void  restore_relays(void);
 static float get_elapsed_s(void);
 
 /* ── Public API ─────────────────────────────────────────────────── */
@@ -132,6 +151,12 @@ esp_err_t seq_executor_begin(const char *type, const char *params)
     }
 
     s_exec.flow_lpm = parse_param_float(s_exec.params, "flow", 4.0f);
+
+    /* Parse relay prerequisites: -1=don't change, 0=OFF, 1=ON */
+    s_exec.relay_prereqs.o2_conc   = (int8_t)parse_param_int(s_exec.params, "relay_o2",  -1);
+    s_exec.relay_prereqs.ozone_gen = (int8_t)parse_param_int(s_exec.params, "relay_o3",  -1);
+    s_exec.relay_prereqs.air_comp  = (int8_t)parse_param_int(s_exec.params, "relay_air", -1);
+
     s_exec.state = SEQ_EXEC_LOADING;
 
     xSemaphoreGive(s_exec.mutex);
@@ -285,6 +310,10 @@ static void executor_task(void *arg)
     ESP_LOGI(TAG, "=== EXECUTOR START: %s, %d steps ===",
              s_exec.type, s_exec.step_count);
 
+    /* ── Apply relay prerequisites (O2, O3, air) before power steps ── */
+    apply_relay_prereqs();
+    if (s_exec.abort_requested) goto cleanup;
+
     /* ── Execute each step ────────────────────────────────────── */
 
     bool air_comp_active = false;   /* Track air compressor state for cleanup */
@@ -371,7 +400,8 @@ static void executor_task(void *arg)
 
     /* ── Cleanup ─────────────────────────────────────────────── */
 
-    safe_power_off();
+cleanup:
+    restore_relays();
 
     float elapsed = get_elapsed_s();
 
@@ -461,12 +491,118 @@ static float parse_param_float(const char *params, const char *key, float def)
     return strtof(found + strlen(search), NULL);
 }
 
-static void safe_power_off(void)
+static int parse_param_int(const char *params, const char *key, int def)
 {
+    if (!params || !key) return def;
+    char search[32];
+    snprintf(search, sizeof(search), "%s=", key);
+    const char *found = strstr(params, search);
+    if (!found) return def;
+    return atoi(found + strlen(search));
+}
+
+/**
+ * @brief Save current relay states and apply prerequisites before sequence
+ *
+ * Order matters due to hardware dependency:
+ *   1. O2 concentrator (independent)
+ *   2. O3 generator (independent, but air_comp requires it ON)
+ *   3. Air compressor (internal to MP-8000, needs ozone_gen ON first)
+ *
+ * Uses relay_set_with_source() which enforces the air_comp→ozone_gen
+ * interlock at the driver level.
+ */
+static void apply_relay_prereqs(void)
+{
+    /* Save original states for potential restore on abort */
+    s_exec.orig_o2_conc   = relay_get_state(RELAY_O2_CONC);
+    s_exec.orig_ozone_gen = relay_get_state(RELAY_OZONE_GEN);
+    s_exec.orig_air_comp  = relay_get_state(RELAY_AIR_COMP);
+
+    ESP_LOGI(TAG, "Relay state before sequence: o2=%d o3=%d air=%d",
+             s_exec.orig_o2_conc, s_exec.orig_ozone_gen, s_exec.orig_air_comp);
+
+    bool changed = false;
+
+    /* Apply in safe order: O2 → O3 → Air (air needs O3 power) */
+
+    if (s_exec.relay_prereqs.o2_conc >= 0) {
+        relay_state_t target = s_exec.relay_prereqs.o2_conc ? RELAY_ON : RELAY_OFF;
+        if (relay_get_state(RELAY_O2_CONC) != target) {
+            relay_set_with_source(RELAY_O2_CONC, target, RELAY_SRC_SEQUENCE);
+            send_msg("SEQ,%s,RELAY,o2_conc,%d", s_exec.type, target);
+            ESP_LOGI(TAG, "Prereq: o2_conc → %s", target ? "ON" : "OFF");
+            changed = true;
+        }
+    }
+
+    if (s_exec.relay_prereqs.ozone_gen >= 0) {
+        relay_state_t target = s_exec.relay_prereqs.ozone_gen ? RELAY_ON : RELAY_OFF;
+        if (relay_get_state(RELAY_OZONE_GEN) != target) {
+            relay_set_with_source(RELAY_OZONE_GEN, target, RELAY_SRC_SEQUENCE);
+            send_msg("SEQ,%s,RELAY,ozone_gen,%d", s_exec.type, target);
+            ESP_LOGI(TAG, "Prereq: ozone_gen → %s", target ? "ON" : "OFF");
+            changed = true;
+        }
+    }
+
+    if (s_exec.relay_prereqs.air_comp >= 0) {
+        relay_state_t target = s_exec.relay_prereqs.air_comp ? RELAY_ON : RELAY_OFF;
+        if (relay_get_state(RELAY_AIR_COMP) != target) {
+            esp_err_t ret = relay_set_with_source(RELAY_AIR_COMP, target, RELAY_SRC_SEQUENCE);
+            if (ret == ESP_OK) {
+                send_msg("SEQ,%s,RELAY,air_comp,%d", s_exec.type, target);
+                ESP_LOGI(TAG, "Prereq: air_comp → %s", target ? "ON" : "OFF");
+                changed = true;
+            } else {
+                /* Interlock rejected (ozone_gen not ON) — logged by relay_control */
+                ESP_LOGW(TAG, "Prereq: air_comp ON rejected (ozone_gen interlock)");
+            }
+        }
+    }
+
+    /* Allow relays and equipment to warm up / stabilize */
+    if (changed) {
+        ESP_LOGI(TAG, "Waiting 3s for relay/equipment stabilization...");
+        send_msg("SEQ,%s,STATUS,relay_stabilizing", s_exec.type);
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    }
+
+    ESP_LOGI(TAG, "Relay prerequisites applied");
+}
+
+/**
+ * @brief Restore relays to safe state on sequence end
+ *
+ * Normal completion: power=0, air_comp=OFF, O2/O3 left in current state
+ *                    (user may want to keep using the system)
+ * Abort:            power=0, air_comp=OFF, ozone_gen=OFF (safety), O2 left on
+ *
+ * Order: air_comp OFF first (before ozone_gen, though killing ozone_gen
+ * also kills air power — keep software state clean).
+ */
+static void restore_relays(void)
+{
+    /* Always kill power first */
     o3_power_set(0);
-    /* Ensure air compressor is OFF after sequence */
-    relay_set_with_source(RELAY_AIR_COMP, RELAY_OFF, RELAY_SRC_SEQUENCE);
-    ESP_LOGI(TAG, "Safe shutdown: power → 0%%, air_comp → OFF");
+
+    /* Always turn off air compressor (it's inside the MP-8000) */
+    if (relay_get_state(RELAY_AIR_COMP) == RELAY_ON) {
+        relay_set_with_source(RELAY_AIR_COMP, RELAY_OFF, RELAY_SRC_SEQUENCE);
+        send_msg("SEQ,%s,RELAY,air_comp,0", s_exec.type);
+    }
+
+    if (s_exec.abort_requested) {
+        /* On abort: turn off O3 generator for safety (this also kills air power) */
+        if (relay_get_state(RELAY_OZONE_GEN) == RELAY_ON) {
+            relay_set_with_source(RELAY_OZONE_GEN, RELAY_OFF, RELAY_SRC_SEQUENCE);
+            send_msg("SEQ,%s,RELAY,ozone_gen,0", s_exec.type);
+        }
+        ESP_LOGW(TAG, "Abort cleanup: power=0, o3_gen=OFF, air=OFF, o2 unchanged");
+    } else {
+        /* Normal completion: leave o2 and o3 in their current state */
+        ESP_LOGI(TAG, "Completion cleanup: power=0, air=OFF, o2/o3 unchanged");
+    }
 }
 
 static float get_elapsed_s(void)

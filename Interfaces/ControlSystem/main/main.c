@@ -857,15 +857,8 @@ static bool lan_command_handler(const char *cmd, const char *args,
 
     } else if (strcmp(cmd, "seq_run") == 0) {
         // CMD,seq_run
-        // Pre-flight: O3 generator and O2 concentrator must be ON for meaningful data
-        if (relay_get_state(RELAY_OZONE_GEN) != RELAY_ON) {
-            snprintf(response, response_size, "preflight_fail:ozone_gen_off");
-            return false;
-        }
-        if (relay_get_state(RELAY_O2_CONC) != RELAY_ON) {
-            snprintf(response, response_size, "preflight_fail:o2_conc_off");
-            return false;
-        }
+        // Relay prerequisites are handled by the executor itself
+        // (parsed from sequence_start params: relay_o2, relay_o3, relay_air)
         esp_err_t ret = seq_executor_run();
         if (ret == ESP_OK) {
             snprintf(response, response_size, "running");

@@ -137,6 +137,29 @@ esp_err_t relay_set_with_source(relay_id_t relay, relay_state_t state, relay_sou
         return ESP_ERR_INVALID_ARG;
     }
     
+    /*
+     * Hardware interlock: Air compressor is internal to the MP-8000 ozone
+     * generator.  Its relay circuit has NO power unless the ozone_gen SSR
+     * is ON.  Enforce two rules:
+     *
+     * 1. air_comp ON requires ozone_gen ON — reject otherwise
+     * 2. ozone_gen OFF → auto-turn-off air_comp (loses power anyway,
+     *    keep software state consistent with physical reality)
+     */
+    if (relay == RELAY_AIR_COMP && state == RELAY_ON) {
+        if (s_relay.states[RELAY_OZONE_GEN] != RELAY_ON) {
+            ESP_LOGW(TAG, "Air comp ON rejected: ozone_gen is OFF (no power to air circuit)");
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+    if (relay == RELAY_OZONE_GEN && state == RELAY_OFF) {
+        if (s_relay.states[RELAY_AIR_COMP] == RELAY_ON) {
+            ESP_LOGI(TAG, "ozone_gen OFF → auto air_comp OFF (circuit loses power)");
+            s_relay.states[RELAY_AIR_COMP] = RELAY_OFF;
+            apply_gpio_state(RELAY_AIR_COMP);
+        }
+    }
+    
     relay_state_t old_state = s_relay.states[relay];
     s_relay.states[relay] = state;
     apply_gpio_state(relay);

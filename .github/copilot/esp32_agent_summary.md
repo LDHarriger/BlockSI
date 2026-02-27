@@ -1,6 +1,6 @@
 # ESP32 Agent Summary
 
-> Last updated: 2026-02-26 (air compressor per-step control)
+> Last updated: 2026-02-28 (executor-owned relay prereqs + hardware interlock)
 
 ## Current State
 
@@ -24,7 +24,7 @@ From `main/CMakeLists.txt` SRCS:
 |------|---------|
 | `main.c` | Entry point, WiFi, Golioth, LAN command handler |
 | `lan_client.c` / `.h` | TCP client — connects to PC on port 5000 |
-| `relay_control.c` / `.h` | 3x SSR control (ozone_gen, o2_conc, air_comp) — active-high, NVS persistence |
+| `relay_control.c` / `.h` | 3x SSR control (ozone_gen, o2_conc, air_comp) — active-high, NVS persistence, hardware interlock |
 | `motor_pot.c` / `.h` | PRM162 motorized potentiometer driver via DRV8833 H-bridge + ADC feedback |
 | `o3_power_control.c` / `.h` | High-level power control API (uses motor_pot) |
 | `model_106h_interface.c` / `.h` | 106-H ozone monitor RS232 interface (UART2, 19200 baud) |
@@ -52,10 +52,12 @@ The PC generates complete recipes and sends them step-by-step via LAN.
 The ESP32 executes blindly with precise sample-counted holds:
 
 ```
-PC → CMD,sequence_start,<type>,<params>
+PC → CMD,sequence_start,<type>,flow=4.0,relay_o2=1,relay_o3=1,relay_air=0
 PC → CMD,seq_step,<idx>,<pwr>,<hold_samples>,<phase>[,<air_comp>]  (× N)
 PC → CMD,seq_prompt,<before>,<id>,<text>               (× M)
 PC → CMD,seq_run
+ESP32 →                          (applies relay prereqs, waits 3s)
+ESP32 → SEQ,<type>,RELAY,o2_conc=ON,ozone_gen=ON,air_comp=OFF
 ESP32 → SEQ,<type>,STARTED,...
 ESP32 → SEQ,<type>,STEP,...,<air_comp>  (per step transition)
 ESP32 → SEQ,<type>,SAMPLE,...,<air_comp>  (per 106-H sample, ~2.5s)
@@ -66,12 +68,14 @@ Key properties:
 - Max 256 steps, 16 prompts per recipe
 - Steps sorted by index before execution
 - Sample-counted holds via `seq_sensor_get_sample_count()` (monotonic 106-H counter)
+- **Relay prereqs**: `sequence_start` params (`relay_o2`, `relay_o3`, `relay_air`) specify
+  desired relay states.  Executor saves originals, applies in safe order (O2 → O3 → Air),
+  waits 3s if any changed, sends `SEQ,*,RELAY` notification.
+- **Cleanup**: completion → power=0, air=OFF, O2/O3 unchanged.  Abort → same + ozone_gen=OFF.
 - Per-step air compressor relay control via `air_comp` field (optional, default OFF)
 - 1-second stabilization delay after air compressor toggle
-- Air compressor always set to OFF on sequence completion/abort
 - Prompts block execution via binary semaphore until `CMD,sequence_confirm`
 - FreeRTOS task (8KB stack, priority 5)
-- Safe power-off on abort/completion
 - Integrates with `sequence_runner` for `sequence_runner_is_active()` lockout
   via `sequence_runner_force_active()` / `sequence_runner_force_idle()` bridge
 
@@ -82,10 +86,10 @@ determine pass/fail, store calibration data, or generate certificates.
 
 | Command | Args | Purpose |
 |---------|------|---------|
-| `sequence_start` | `<type>,<key=val params>` | Begin recipe loading |
+| `sequence_start` | `<type>,<key=val params>` | Begin recipe loading.  Relay params: `relay_o2`, `relay_o3`, `relay_air` |
 | `seq_step` | `<idx>,<pwr>,<hold>,<phase>[,<air_comp>]` | Add step (air_comp optional, default 0) |
 | `seq_prompt` | `<before>,<id>,<text>` | Add prompt |
-| `seq_run` | none | Sort steps, start execution task |
+| `seq_run` | none | Apply relay prereqs, sort steps, start execution task |
 | `sequence_confirm` | none | Unblock pending prompt |
 | `sequence_abort` | `[reason]` | Abort sequence |
 | `sequence_stop` | `[reason]` | Legacy alias for abort |
@@ -113,13 +117,15 @@ Tag convention: `static const char *TAG = "MODULE_NAME";`
 
 ## Pending Work
 
-- `[IMPLEMENTED]` **seq_run pre-flight relay checks**: `seq_run` handler verifies
-  `ozone_gen` and `o2_conc` are ON before starting execution.  Returns
-  `preflight_fail:ozone_gen_off` or `preflight_fail:o2_conc_off` error.
-  PC must send `relay_set` commands before `seq_run`.
+- `[IMPLEMENTED]` **Executor-owned relay prerequisites**: `sequence_start` params
+  specify relay states (`relay_o2`, `relay_o3`, `relay_air`).  Executor saves originals,
+  applies in safe order, waits 3s, sends `SEQ,*,RELAY`.  Supersedes old preflight reject.
+- `[IMPLEMENTED]` **Hardware interlock**: Air compressor is internal to MP-8000.
+  `relay_set_with_source()` rejects `air_comp ON` when `ozone_gen OFF`, and
+  auto-sets `air_comp OFF` when `ozone_gen` is turned OFF.
 - `[IMPLEMENTED]` **Air compressor per-step control**: `seq_exec_step_t` has `air_comp`
   bool.  Executor toggles `RELAY_AIR_COMP` at step transitions.  STEP and SAMPLE
-  messages include air_comp state.  Safe shutdown restores air_comp=OFF.
+  messages include air_comp state.
 - `[IMPLEMENTED]` **Recipe executor**: Generic `seq_executor` with sample-counted
   holds, prompt blocking, and LAN streaming.  Replaces all sequence-specific firmware.
 - `[IMPLEMENTED]` **Relay robustness**: Source tracking, NVS persistence, reconnect
@@ -130,17 +136,20 @@ Tag convention: `static const char *TAG = "MODULE_NAME";`
   `calibrate_start`/`calibrate_stop` commands could be removed once the Dashboard
   fully adopts the recipe protocol.
 
-## Recent Changes (2026-02-27)
+## Recent Changes (2026-02-28)
 
-### Pre-flight relay checks in seq_run  `[IMPLEMENTED]`
-- `main.c`: `seq_run` handler now checks `ozone_gen` and `o2_conc` relay states
-  before starting execution.  Returns `preflight_fail:ozone_gen_off` or
-  `preflight_fail:o2_conc_off` if either relay is OFF.
-- **Root cause of relay issue**: Neither ESP32 executor nor PC dashboard was
-  activating `ozone_gen`/`o2_conc` relays before calibration.  The old
-  `seq_power_cal.c` checked these as prerequisites but the generic executor
-  had no such checks.  PC dashboard must now send `relay_set` commands
-  before `seq_run` to activate equipment.
+### Executor-owned relay prerequisites + hardware interlock  `[IMPLEMENTED]`
+- `relay_control.c`: Hardware interlock in `relay_set_with_source()` —
+  (a) `air_comp ON` rejected when `ozone_gen OFF` (`ESP_ERR_INVALID_STATE`),
+  (b) `ozone_gen OFF` auto-sets `air_comp OFF`.
+- `seq_executor.c`: Added `seq_relay_prereqs_t`, `apply_relay_prereqs()`,
+  `restore_relays()`.  Parses `relay_o2/relay_o3/relay_air` from params.
+  Applies in safe order (O2 → O3 → Air), saves originals, waits 3s,
+  sends `SEQ,*,RELAY` notification.  Cleanup: abort kills O3+Air, completion
+  kills Air only.
+- `main.c`: Removed old preflight reject from `seq_run` handler.  Executor
+  now owns relay lifecycle.
+- Supersedes 2026-02-27 preflight reject approach.
 
 ### Previous Changes (2026-02-26)
 - `seq_executor.c/.h`: Generic step executor — receives recipe from PC, executes
@@ -169,4 +178,6 @@ Tag convention: `static const char *TAG = "MODULE_NAME";`
 - **Motor Pot**: PRM162 dual-gang, Section 1 floats with MP-8000 (~10V above ground), Section 2 gives ADC feedback
 - **106-H quirks**: Fixed 19200 baud, non-standard female D9 pinout, RS232 level shifter required
 - **SSRs**: Active-high (Kerwinn KG1-1DA25)
-- **Air compressor**: Adds ~10 LPM at ~21% O2 to O2 concentrator output (~93% O2)
+- **Air compressor**: Internal to MP-8000.  Adds ~10 LPM at ~21% O2 to O2 concentrator
+  output (~93% O2).  Relay circuit has NO power unless `ozone_gen` SSR is ON.
+  Firmware interlock enforces this dependency.

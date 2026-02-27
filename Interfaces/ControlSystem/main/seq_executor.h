@@ -10,12 +10,16 @@
  *
  * Recipe loading protocol:
  *   CMD,sequence_start,<type>,<key=value params>     Begin recipe
+ *     Params: flow=<lpm>, relay_o2=<0|1>, relay_o3=<0|1>, relay_air=<0|1>
+ *     Relay params: -1 (omit) = don't change, 0 = force OFF, 1 = force ON
  *   CMD,seq_prompt,<before_step>,<prompt_id>,<text>   Add prompt
  *   CMD,seq_step,<index>,<power_pct>,<hold_samples>,<phase>[,<air_comp>]  Add step
  *   CMD,seq_run                                       Finalize & execute
  *
  * Runtime streaming (ESP32 → PC):
  *   SEQ,<type>,STARTED,steps=<N>,flow=<X>
+ *   SEQ,<type>,RELAY,<relay_name>,<0|1>       Relay state change
+ *   SEQ,<type>,STATUS,relay_stabilizing       Waiting for equipment
  *   SEQ,<type>,STEP,<index>,<power>,<phase>,<air_comp>
  *   SEQ,<type>,SAMPLE,<step_idx>,<sample_num>,<o3_pct>,<temp_c>,<power_actual>,<air_comp>
  *   SEQ,<type>,PROMPT,<prompt_id>,<prompt_text>

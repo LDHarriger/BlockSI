@@ -518,3 +518,36 @@ O2% in filenames enables condition-specific model fitting.  Models in git
 ensures fitted parameters are versioned and recoverable.
 
 **Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-02-27: Dashboard relay prereqs, SEQ RELAY/STATUS handling, air_comp in steps
+
+**Context**: The ESP32 agent implemented executor-owned relay prerequisites
+(relay params in `sequence_start`, `SEQ,*,RELAY` and `SEQ,*,STATUS`
+notifications, per-step `air_comp` field).  The dashboard was not handling
+these new messages — relays weren't toggled during sequences, the banner
+showed no feedback during the relay stabilization phase, and step tuples
+lacked the `air_comp` field.
+
+**Decision**:
+1. **Relay params in `sequence_start`**: Added `relay_o2=1,relay_o3=1,relay_air=0`
+   to the command params for calibration and validation sequences.
+2. **Belt-and-suspenders**: Dashboard pre-enables relays via `cmd_set_relay()`
+   AND passes relay params (executor applies them authoritatively at `seq_run`).
+3. **Handle `SEQ,*,RELAY`**: New handler updates `S.relay_*` state and sets
+   `seq_phase="relay_setup"` for banner display.
+4. **Handle `SEQ,*,STATUS`**: Handles `relay_stabilizing` → sets
+   `seq_phase="stabilizing"` for banner display.
+5. **Phase-aware banner**: Loading → Enabling relays → Stabilizing → Starting →
+   Step X/N — Phase (replaces generic "Step X/N" during pre-run phases).
+6. **Air_comp in step tuples**: 5th element added to all recipe steps (currently
+   always 0 for pure-O2 calibration), sent via `CMD,seq_step,...,air_comp`.
+7. **Air_comp in STEP/SAMPLE parsing**: Parses optional `parts[6]`/`parts[8]`
+   fields; SAMPLE dict includes `"air_comp"` key for CSV output.
+
+**Rationale**: Aligns dashboard with ESP32 executor-owned relay lifecycle.
+Phase-aware banner gives immediate visual feedback during all sequence phases.
+Belt-and-suspenders ensures relays are enabled even if one path fails.
+
+**Status**: `[IMPLEMENTED]`

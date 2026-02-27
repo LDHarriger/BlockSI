@@ -450,28 +450,31 @@ def _save_cal_csv(samples: list[dict], lpm: float, o2_pct: int) -> str:
 def generate_cal_recipe(flow_lpm: float) -> tuple[list[tuple], list[tuple]]:
     """Generate calibration recipe: baseline + sweep up + sweep down + random.
 
-    Returns (steps, prompts).  Each step = (idx, power_pct, hold_samples, phase).
+    Returns (steps, prompts).
+    Each step = (idx, power_pct, hold_samples, phase, air_comp).
     Each prompt = (before_step_idx, prompt_id, text).
     """
     steps: list[tuple] = []
 
     # Phase 1 — Baseline: 0% for 15 samples (~37s)
-    steps.append((len(steps), 0, 15, "baseline"))
+    steps.append((len(steps), 0, 15, "baseline", 0))
 
     # Phase 2 — Sweep Up: 0→100% in 1% steps, 2 samples each
     for pwr in range(0, 101):
-        steps.append((len(steps), pwr, 2, "sweep_up"))
+        steps.append((len(steps), pwr, 2, "sweep_up", 0))
 
     # Phase 3 — Sweep Down: 100→0% in 1% steps, 2 samples each
     for pwr in range(100, -1, -1):
-        steps.append((len(steps), pwr, 2, "sweep_down"))
+        steps.append((len(steps), pwr, 2, "sweep_down", 0))
 
     # Phase 4 — Random spot checks: 15 random levels, 5 samples each
     for _ in range(15):
         pwr = random.randint(0, 100)
-        steps.append((len(steps), pwr, 5, "random"))
+        steps.append((len(steps), pwr, 5, "random", 0))
 
-    prompts: list[tuple] = []  # No prompts for calibration
+    prompts: list[tuple] = [
+        (0, "check_flow", "Verify O2 flow and gas route before calibration"),
+    ]
     return steps, prompts
 
 
@@ -485,11 +488,11 @@ def generate_val_recipe(
     spot1 = max(10, int(power_pct * 0.33))
     spot2 = max(10, int(power_pct * 0.66))
     steps: list[tuple] = [
-        (0, 0,              15, "baseline"),    # 0% for ~37s
-        (1, spot1,           5, "spot_low"),    # ~33% for ~12s
-        (2, spot2,           5, "spot_high"),   # ~66% for ~12s
-        (3, int(power_pct), 15, "target"),      # Target power for ~37s
-        (4, 0,               5, "cooldown"),    # 0% for ~12s
+        (0, 0,              15, "baseline",  0),  # 0% for ~37s
+        (1, spot1,           5, "spot_low",  0),  # ~33% for ~12s
+        (2, spot2,           5, "spot_high", 0),  # ~66% for ~12s
+        (3, int(power_pct), 15, "target",    0),  # Target power for ~37s
+        (4, 0,               5, "cooldown",  0),  # 0% for ~12s
     ]
     prompts: list[tuple] = [
         (0, "check_flow", "Verify O2 flow matches rotameter"),
@@ -788,8 +791,29 @@ class TCPServer:
             )
             _notify(f"{seq_type.title()} sequence started")
 
+        elif action == "RELAY":
+            # SEQ,calibrate,RELAY,<relay_name>,<0|1>
+            S.seq_phase = "relay_setup"
+            if len(parts) >= 5:
+                k = parts[3].strip()
+                on = parts[4].strip() in ("1", "ON")
+                if k == "ozone_gen":
+                    S.relay_o3_gen = on
+                elif k == "o2_conc":
+                    S.relay_o2_conc = on
+                elif k == "air_comp":
+                    S.relay_air_comp = on
+            log(f"SEQ relay: {','.join(parts[3:])}", "seq")
+
+        elif action == "STATUS":
+            # SEQ,calibrate,STATUS,relay_stabilizing
+            status = parts[3].strip() if len(parts) > 3 else ""
+            if status == "relay_stabilizing":
+                S.seq_phase = "stabilizing"
+            log(f"SEQ status: {status}", "seq")
+
         elif action == "STEP":
-            # SEQ,calibrate,STEP,45,22,sweep_up
+            # SEQ,calibrate,STEP,45,22,sweep_up,0
             if len(parts) >= 6:
                 try:
                     S.seq_step_idx = int(parts[3])
@@ -801,6 +825,12 @@ class TCPServer:
                         ) * 100
                 except (ValueError, IndexError):
                     pass
+                # Parse optional air_comp field
+                if len(parts) >= 7:
+                    try:
+                        S.relay_air_comp = parts[6].strip() == "1"
+                    except (ValueError, IndexError):
+                        pass
             log(
                 f"STEP {S.seq_step_idx}/{S.seq_step_total}: "
                 f"{S.seq_phase} @ {S.seq_power:.0f}%",
@@ -808,15 +838,17 @@ class TCPServer:
             )
 
         elif action == "SAMPLE":
-            # SEQ,calibrate,SAMPLE,step_idx,sample_num,o3_pct,temp_c,power_actual
+            # SEQ,calibrate,SAMPLE,step_idx,sample_num,o3_pct,temp_c,power_actual[,air_comp]
             if len(parts) >= 8:
                 try:
+                    air = int(parts[8]) if len(parts) >= 9 else 0
                     sample = {
                         "step_idx": int(parts[3]),
                         "sample_num": int(parts[4]),
                         "o3_pct": float(parts[5]),
                         "temp_c": float(parts[6]),
                         "power_actual": float(parts[7]),
+                        "air_comp": air,
                         "phase": S.seq_phase,
                         "power_target": S.seq_power,
                     }
@@ -980,28 +1012,33 @@ async def cmd_sequence_start(seq_type: str, **kwargs) -> bool:
         return False
 
     # Generate recipe based on type
+    # Relay prereqs: executor applies these at seq_run time
+    relay_params = ",relay_o2=1,relay_o3=1,relay_air=0"
     if seq_type == "calibrate":
         flow = kwargs.get("flow", DEFAULT_FLOW_LPM)
         steps, prompts = generate_cal_recipe(flow)
-        param_str = f"flow={flow}"
+        param_str = f"flow={flow}{relay_params}"
     elif seq_type == "validate":
         power = kwargs.get("power", 75.0)
         flow = kwargs.get("flow", DEFAULT_FLOW_LPM)
         steps, prompts = generate_val_recipe(power, flow)
-        param_str = f"power={power},flow={flow}"
+        param_str = f"power={power},flow={flow}{relay_params}"
         S.val_power = power
         S.val_lpm = flow
     else:
         log(f"Unknown sequence type: {seq_type}", "error")
         return False
 
-    # Pre-flight: verify air compressor is OFF
+    # Pre-flight: belt-and-suspenders relay enable (executor also applies)
+    if not S.relay_o2_conc:
+        log("Pre-enabling O2 concentrator relay", "seq")
+        await cmd_set_relay("o2_conc", True)
+    if not S.relay_o3_gen:
+        log("Pre-enabling ozone generator relay", "seq")
+        await cmd_set_relay("ozone_gen", True)
     if S.relay_air_comp:
-        _notify(
-            "Air compressor must be OFF for calibration/validation",
-            "negative",
-        )
-        return False
+        log("Pre-disabling air compressor relay", "seq")
+        await cmd_set_relay("air_comp", False)
 
     # Enter loading state
     S.sequence_active = True
@@ -1030,8 +1067,8 @@ async def cmd_sequence_start(seq_type: str, **kwargs) -> bool:
 
     # 2. Send all steps via raw TCP (fire-and-forget for speed)
     log(f"Sending {len(steps)} recipe steps...", "seq")
-    for idx, pwr, hold, phase in steps:
-        await tcp._send_raw(f"CMD,seq_step,{idx},{pwr},{hold},{phase}\n")
+    for idx, pwr, hold, phase, air in steps:
+        await tcp._send_raw(f"CMD,seq_step,{idx},{pwr},{hold},{phase},{air}\n")
         await asyncio.sleep(0.005)  # brief yield to avoid buffer overflow
 
     # 3. Send prompts via raw TCP
@@ -1876,10 +1913,25 @@ async def index():
                 "validate": "VALIDATE",
             }
             display_name = type_names.get(S.seq_type, S.seq_type.upper())
-            seq_name_lbl.text = (
-                f"{display_name} — Step {S.seq_step_idx}/{S.seq_step_total}"
-            )
-            seq_phase_lbl.text = S.seq_phase.replace("_", " ").title()
+            # Phase-aware banner text
+            phase = S.seq_phase
+            if phase == "loading":
+                seq_name_lbl.text = f"{display_name} — Loading recipe..."
+                seq_phase_lbl.text = f"{S.seq_step_total} steps"
+            elif phase == "relay_setup":
+                seq_name_lbl.text = f"{display_name} — Enabling relays..."
+                seq_phase_lbl.text = ""
+            elif phase == "stabilizing":
+                seq_name_lbl.text = f"{display_name} — Equipment stabilizing..."
+                seq_phase_lbl.text = "~3s warm-up"
+            elif phase == "started":
+                seq_name_lbl.text = f"{display_name} — Starting..."
+                seq_phase_lbl.text = ""
+            else:
+                seq_name_lbl.text = (
+                    f"{display_name} — Step {S.seq_step_idx}/{S.seq_step_total}"
+                )
+                seq_phase_lbl.text = phase.replace("_", " ").title()
             seq_progress_bar.value = S.seq_progress / 100
             mins = int(S.seq_elapsed) // 60
             secs = int(S.seq_elapsed) % 60

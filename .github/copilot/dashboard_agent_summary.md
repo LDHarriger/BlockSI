@@ -1,6 +1,6 @@
 # Dashboard Agent Summary
 
-> Last updated: 2026-02-26 (Session 5 — Recipe protocol + data management restructure)
+> Last updated: 2026-02-27 (Session 6 — Relay prereqs + banner + air_comp)
 
 ## Current State
 
@@ -43,7 +43,8 @@ Recipe protocol:
 
 ### Calibration (`generate_cal_recipe`)
 - ~218 steps: 1 baseline (15 samples) + 101 sweep up (2 each) + 101 sweep down (2 each) + 15 random (5 each)
-- No prompts
+- 1 prompt: `check_flow` (before step 0)
+- Step tuples now include `air_comp` field (5th element, always 0 for pure-O2 cal)
 - Air compressor must be OFF
 
 ### Validation (`generate_val_recipe`)
@@ -66,14 +67,16 @@ Recipe protocol:
 | `DATA,...` | `_dispatch` | Parse 17-field telemetry → state → data_buf → CSV |
 | `RSP,...` | `_handle_rsp` | Time sync, relay get, response queue |
 | `STATE,...` | `_handle_state` | Reconnect sync — relay/power/flow state |
-| `SEQ,...` | `_handle_seq` | Routes by action: STARTED, STEP, SAMPLE, PROMPT, COMPLETE, ABORTED |
+| `SEQ,...` | `_handle_seq` | Routes by action: STARTED, RELAY, STATUS, STEP, SAMPLE, PROMPT, COMPLETE, ABORTED |
 
 ### SEQ action handling:
 | Action | Dashboard response |
 |--------|-------------------|
 | `STARTED` | Enter sequence mode, set step total, notify |
-| `STEP` | Update phase, power, progress (step_idx/step_total) |
-| `SAMPLE` | Append to cal_samples or val_samples |
+| `RELAY` | Update relay state (`S.relay_*`), set phase to `relay_setup` |
+| `STATUS` | Handle `relay_stabilizing` → set phase to `stabilizing` |
+| `STEP` | Update phase, power, progress, parse optional `air_comp` field |
+| `SAMPLE` | Append to cal_samples or val_samples (includes `air_comp`) |
 | `PROMPT` | Set pending_prompt_id/text → tick opens modal dialog |
 | `COMPLETE` | Run post-analysis (cal: save CSV, val: compute stats), clear sequence state |
 | `ABORTED` | Clear sequence state, notify |
@@ -111,7 +114,7 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 
 | Function | Sends | Notes |
 |----------|-------|-------|
-| `cmd_sequence_start(type, **kwargs)` | Full recipe: start → steps → prompts → run | Pre-flight: checks connected + air_comp OFF |
+| `cmd_sequence_start(type, **kwargs)` | Full recipe: start (with relay prereqs) → steps → prompts → run | Belt-and-suspenders: pre-enables relays + passes `relay_o2=1,relay_o3=1,relay_air=0` in params |
 | `cmd_sequence_abort([reason])` | `CMD,sequence_abort[,reason]` | Primary abort command |
 | `cmd_sequence_stop()` | `CMD,sequence_abort` | Legacy alias |
 | `cmd_sequence_confirm()` | `CMD,sequence_confirm` | No prompt_id arg (ESP32 unblocks pending) |
@@ -126,7 +129,13 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 - 5 sensor cards: Flow LPM, Vessel O3, Room O3, Vessel Temp, Cell Temp
 
 ### Sequence Banner (top of page, hidden when no sequence)
-- Amber bar: `CALIBRATE — Step 45/218 — Sweep Up` with progress bar, elapsed time, ABORT button
+- Amber bar with phase-aware text:
+  - `loading`: "CALIBRATE — Loading recipe... (218 steps)"
+  - `relay_setup`: "CALIBRATE — Enabling relays..."
+  - `stabilizing`: "CALIBRATE — Equipment stabilizing... (~3s warm-up)"
+  - `started`: "CALIBRATE — Starting..."
+  - Normal phases: "CALIBRATE — Step 45/218 — Sweep Up"
+- Progress bar, elapsed time, ABORT button
 
 ### Prompt Dialog (modal)
 - Maps prompt IDs to rich content: `check_flow`, `check_route`, plus legacy `prompt_vessel`, `prompt_direct`

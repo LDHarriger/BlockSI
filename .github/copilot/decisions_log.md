@@ -5,6 +5,47 @@
 
 ---
 
+### 2026-02-28: Single-command calibration — ESP32 owns sweep pattern
+
+**Context**: The recipe-based calibration protocol required 221 commands
+(1 `sequence_start` + 218 `seq_step` + 1 `seq_prompt` + 1 `seq_run`)
+sent from the PC to the ESP32.  This caused calibration to immediately
+abort because:
+1. ESP32's LAN client has 50ms polling delay + 63-byte recv buffer,
+   processing only ~20-40 commands/second
+2. 218 fire-and-forget `seq_step` commands take ~5-7s to process
+3. Dashboard's `send_command("seq_run")` picks up stale
+   `RSP,OK,seq_step,...` response instead of the real seq_run RSP
+4. Periodic relay sync (`_tick()` every 10s) races on the same queue
+
+Additionally, the protocol was overly complex — the sweep pattern
+(0→100→0 in 1% steps) is physics-dictated and won't change, making it
+essentially motor control rather than "brains" work.  The design was
+also CLI-unfriendly: manually typing 200+ commands is impractical.
+
+**Decision**: (Supersedes recipe-based calibration)
+1. **Single command**: `CMD,calibrate,flow=<lpm>` loads + runs the
+   entire 203-step sweep on ESP32.  1 command in, 1 response out.
+2. **ESP32 owns the sweep**: `seq_executor_load_calibration()` builds
+   baseline (0%, 15 samples) + sweep up (0→100%, 2 samples each) +
+   sweep down (100→0%, 2 samples each) internally.
+3. **Recipe protocol preserved**: `sequence_start/seq_step/seq_run` still
+   works for future custom sequences (validate, sterilize) where the PC
+   genuinely needs to define the step list.
+4. **Legacy aliases**: `calibrate_start/stop/status` route to seq_executor.
+5. **Random phase dropped** for now — sweep up + down provides sufficient
+   hysteresis data for model fitting.
+
+**Rationale**: Standard practice in process control (SCPI, Modbus, etc.)
+uses parameterized commands, not individual step-by-step scripting.  A
+calibration sweep is a fixed routine — the ESP32 should own it.  This
+eliminates ALL response queue issues (1 command instead of 221) and
+makes calibration CLI-testable with a single line.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
 ### 2026-02-28: Executor-owned relay prerequisites with hardware interlock
 
 **Context**: Previous decision (2026-02-27) had `seq_run` reject if relays

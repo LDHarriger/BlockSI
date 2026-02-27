@@ -1,6 +1,6 @@
 # BlockSI Interface Contract
 
-> Last updated: 2026-02-26
+> Last updated: 2026-02-27
 >
 > This is the **single source of truth** for everything shared between
 > the ESP32 firmware and the PC dashboard.  Both agents MUST read this
@@ -153,12 +153,35 @@ See `decisions_log.md` entry 2026-02-24.
 | `motor_pot_status` | none | Status string | ADC, wiper position |
 | `motor_pot_calibrate` | none | `adc_min=<val>,adc_max=<val>,range=<val>` | Full sweep calibration |
 
-### Calibration Sweep  (legacy, still functional)
+### Single-Command Calibration  `[IMPLEMENTED]`
+
+The ESP32 has the calibration sweep pattern on-board.  A single command
+loads the recipe and starts execution immediately — no recipe protocol
+needed.  Emits standard `SEQ,calibrate,...` messages during execution.
+
 | Command | Args | Response (OK) | Notes |
 |---------|------|---------------|-------|
-| `calibrate_start` | none | `calibration=started` | Requires O3 gen relay ON, motor pot init |
-| `calibrate_stop` | none | `calibration=stopping` | |
-| `calibrate_status` | none | `active=<0\|1>,pct=<val>,dir=<val>,pts=<val>` | |
+| `calibrate` | `flow=<lpm>` (optional, default 4.0) | `running,steps=203,flow=<lpm>` | Loads + runs 203-step sweep.  Relay prereqs: O2 ON, O3 ON, Air OFF |
+
+**Sweep pattern** (built internally by `seq_executor_load_calibration()`):
+- Step 0: 0% power, 15 samples (~37s baseline)
+- Steps 1-101: Sweep up 0→100% in 1% increments, 2 samples each
+- Steps 102-202: Sweep down 100→0% in 1% increments, 2 samples each
+- Total: 203 steps, ~419 samples, ~17 minutes
+
+**Stop/status** via standard sequence commands:
+
+| Command | Args | Response (OK) | Notes |
+|---------|------|---------------|-------|
+| `sequence_abort` | `[reason]` | `aborting` | Abort calibration (power->0, O3 OFF, Air OFF) |
+| `sequence_status` | none | `state=<s>,type=calibrate,step=<n>/<total>` | |
+
+**Legacy aliases** (route to seq_executor internally):
+| Command | Args | Response (OK) | Notes |
+|---------|------|---------------|-------|
+| `calibrate_start` | `[lpm]` | `running,steps=203,...` | Legacy alias for `calibrate` |
+| `calibrate_stop` | none | `aborting,reason=calibrate_stop` | Legacy alias for `sequence_abort` |
+| `calibrate_status` | none | `state=<s>,step=<n>/<total>` | Legacy alias for `sequence_status` |
 
 ### Recipe-Based Sequences  `[IMPLEMENTED]`
 
@@ -194,7 +217,7 @@ precise sample-counted holds, streaming per-sample data back.
 **Sequence types** (defined by PC, not by ESP32 firmware):
 | Type | PC Generates | Description |
 |------|-------------|-------------|
-| `calibrate` | Power sweep steps | 0→100→0 in 1% steps + random levels for model fitting |
+| `calibrate` | **On-board** (single cmd) | 0→100→0 in 1% steps, 203 total — ESP32 owns sweep pattern |
 | `validate` | Spot-check steps + prompts | Baseline, 2 spot-checks, target power hold |
 | `sterilize` | Multi-phase recipe | Validate, fill, hold, vent (future) |
 
@@ -273,36 +296,45 @@ These constants must match between ESP32 firmware and PC dashboard:
 
 ### Architecture: "ESP32 = Arms, PC = Brains"
 
+**Calibration** uses single-command protocol (ESP32 has sweep on-board):
 ```
 Dashboard (PC)                     ESP32
 ──────────────                     ─────
-CMD,sequence_start,calibrate,flow=4.0,relay_o2=1,relay_o3=1,relay_air=0
-                                   →   seq_executor_begin()
-                                    ← RSP,OK,sequence_start,type=calibrate,status=loading
-CMD,seq_step,0,0,15,baseline       →   seq_executor_add_step()
-CMD,seq_step,1,50,5,spot           →   seq_executor_add_step()
-CMD,seq_step,2,50,5,random,1      →   seq_executor_add_step()  (air_comp ON)
-  ... (repeat for all steps)
-CMD,seq_prompt,0,check_flow,...    →   seq_executor_add_prompt()
-CMD,seq_run                        →   seq_executor_run() — apply relay prereqs, sort, spawn task
-                                    ← RSP,OK,seq_run,running
-                                    ← SEQ,<type>,RELAY,o2_conc=ON,ozone_gen=ON,air_comp=OFF
-                                    ← SEQ,<type>,STARTED,steps=N,flow=X
-                                    ← SEQ,<type>,PROMPT,<id>,<text>   (if prompt before step 0)
-CMD,sequence_confirm               →   seq_executor_confirm()
-                                    ← SEQ,<type>,STEP,...
-                                    ← SEQ,<type>,SAMPLE,...  (per 106-H sample)
-                                    ← SEQ,<type>,SAMPLE,...
+CMD,calibrate,flow=4.0             →   seq_executor_load_calibration(4.0)
+                                       seq_executor_run()
+                                    ← RSP,OK,calibrate,running,steps=203,flow=4.0
+                                    ← SEQ,calibrate,RELAY,...
+                                    ← SEQ,calibrate,STARTED,steps=203,flow=4.0
+                                    ← SEQ,calibrate,STEP,0,0,baseline,0
+                                    ← SEQ,calibrate,SAMPLE,...  (per 106-H sample)
                                     ...
-                                    ← SEQ,<type>,COMPLETE,<elapsed_s>
+                                    ← SEQ,calibrate,COMPLETE,<elapsed_s>
 
 CMD,sequence_abort[,reason]        →   seq_executor_abort()  (at any time)
-                                    ← SEQ,<type>,ABORTED,<reason>
+                                    ← SEQ,calibrate,ABORTED,<reason>
+```
+
+**Other sequences** (validate, sterilize) use recipe protocol:
+```
+Dashboard (PC)                     ESP32
+──────────────                     ─────
+CMD,sequence_start,validate,power=75,flow=4.0,relay_o2=1,relay_o3=1,relay_air=0
+                                   →   seq_executor_begin()
+                                    ← RSP,OK,sequence_start,type=validate,status=loading
+CMD,seq_step,0,0,15,baseline       →   seq_executor_add_step()
+  ... (repeat for all steps)
+CMD,seq_prompt,0,check_flow,...    →   seq_executor_add_prompt()
+CMD,seq_run                        →   seq_executor_run()
+                                    ← RSP,OK,seq_run,running
+                                    ← SEQ,validate,STARTED,...
+                                    ← SEQ,validate,SAMPLE,...
+                                    ...
+                                    ← SEQ,validate,COMPLETE,<elapsed_s>
 ```
 
 **Key principles**:
-1. **PC generates all recipes** — step lists, random values, hold durations
-2. **ESP32 executes blindly** — set power, count samples, stream data
+1. **Fixed sequences live on ESP32** — calibration sweep is physics-dictated, doesn't change
+2. **Custom sequences use recipe protocol** — validation, sterilization (PC defines steps)
 3. **ESP32 does NO analysis** — no mean/std, no model queries, no pass/fail
 4. **PC does ALL analysis** — collects `SAMPLE` data, fits models, generates certificates
 5. **Sample-counted holds** — each step holds for N 106-H samples (~2.5s each)
@@ -312,7 +344,8 @@ CMD,sequence_abort[,reason]        →   seq_executor_abort()  (at any time)
 
 | Responsibility | Owner | Notes |
 |---|---|---|
-| Recipe generation (step lists, random values) | **PC** | Calibration: 0→100→0 + random.  Validation: baseline + spots + target |
+| Calibration sweep pattern | **ESP32** | Built-in 203-step sweep via `seq_executor_load_calibration()` |
+| Validation/custom recipes | **PC** | Baseline + spots + target (recipe protocol) |
 | Hardware control during sequence | **ESP32** | `o3_power_set()` + `relay_set_with_source(RELAY_AIR_COMP,...)` per step |
 | Sample-counted hold timing | **ESP32** | Via `seq_sensor_get_sample_count()` from 106-H |
 | Per-sample data streaming | **ESP32** | `SEQ,<type>,SAMPLE,...` per 106-H reading |
@@ -340,20 +373,11 @@ CMD,sequence_abort[,reason]        →   seq_executor_abort()  (at any time)
 
 ### Dashboard: Recipe Generation Examples
 
-**Calibration recipe** (PC generates ~203 steps):
+**Calibration** — single command, no recipe needed:
 ```python
-steps = []
-# Sweep up: 0→100% in 1% increments, 2 samples each (air OFF)
-for pwr in range(0, 101):
-    steps.append((len(steps), pwr, 2, "sweep_up", 0))
-# Sweep down: 100→0% (air OFF)
-for pwr in range(100, -1, -1):
-    steps.append((len(steps), pwr, 2, "sweep_down", 0))
-# Random spot checks — pairs: air OFF then air ON
-for _ in range(15):
-    pwr = random.randint(0, 100)
-    steps.append((len(steps), pwr, 5, "random", 0))       # O2 only
-    steps.append((len(steps), pwr, 5, "random_air", 1))   # Air blend
+resp = await tcp.send_command(f"calibrate,flow={flow}", timeout=5.0)
+# ESP32 builds the 203-step sweep internally and starts immediately.
+# Dashboard just observes SEQ,calibrate,SAMPLE,... messages.
 ```
 
 **Validation recipe** (PC generates ~5 steps + 2 prompts, air OFF):

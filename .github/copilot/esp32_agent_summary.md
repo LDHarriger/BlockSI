@@ -1,6 +1,6 @@
 # ESP32 Agent Summary
 
-> Last updated: 2026-02-28 (executor-owned relay prereqs + hardware interlock)
+> Last updated: 2026-02-28 (single-command calibration + dashboard simplification)
 
 ## Current State
 
@@ -44,32 +44,49 @@ From `main/CMakeLists.txt` SRCS:
 | `seq_power_cal.c` / `.h` | Old: Power-O3 calibration (4-phase, type: `cal`) |
 | `seq_airflow_val.c` / `.h` | Old: Airflow validation (5-phase, type: `validate`) |
 
-## Recipe-Based Executor  `[IMPLEMENTED]`
+## Sequence Executor  `[IMPLEMENTED]`
 
 Architecture: **"ESP32 = Arms, PC = Brains"**
 
-The PC generates complete recipes and sends them step-by-step via LAN.
-The ESP32 executes blindly with precise sample-counted holds:
+### Single-Command Calibration  `[IMPLEMENTED]`
+
+Calibration uses a single command — ESP32 has the sweep pattern on-board:
+
+```
+PC → CMD,calibrate,flow=4.0
+ESP32 → RSP,OK,calibrate,running,steps=203,flow=4.0
+ESP32 → SEQ,calibrate,RELAY,...
+ESP32 → SEQ,calibrate,STARTED,steps=203,flow=4.0
+ESP32 → SEQ,calibrate,STEP,...  (per step transition)
+ESP32 → SEQ,calibrate,SAMPLE,...  (per 106-H sample, ~2.5s)
+ESP32 → SEQ,calibrate,COMPLETE,...
+```
+
+`seq_executor_load_calibration(flow_lpm)` builds the 203-step sweep:
+- Step 0: 0% power, 15 samples (~37s baseline)
+- Steps 1-101: Sweep up 0→100%, 2 samples each
+- Steps 102-202: Sweep down 100→0%, 2 samples each
+- Relay prereqs: O2 ON, O3 ON, Air OFF (built-in)
+
+### Recipe Protocol (for validate, sterilize, custom sequences)
+
+Other sequence types use the multi-command recipe protocol:
 
 ```
 PC → CMD,sequence_start,<type>,flow=4.0,relay_o2=1,relay_o3=1,relay_air=0
 PC → CMD,seq_step,<idx>,<pwr>,<hold_samples>,<phase>[,<air_comp>]  (× N)
 PC → CMD,seq_prompt,<before>,<id>,<text>               (× M)
 PC → CMD,seq_run
-ESP32 →                          (applies relay prereqs, waits 3s)
-ESP32 → SEQ,<type>,RELAY,o2_conc=ON,ozone_gen=ON,air_comp=OFF
 ESP32 → SEQ,<type>,STARTED,...
-ESP32 → SEQ,<type>,STEP,...,<air_comp>  (per step transition)
-ESP32 → SEQ,<type>,SAMPLE,...,<air_comp>  (per 106-H sample, ~2.5s)
-ESP32 → SEQ,<type>,COMPLETE,...    (or ABORTED)
+ESP32 → SEQ,<type>,SAMPLE,...  (per 106-H sample)
+ESP32 → SEQ,<type>,COMPLETE,...
 ```
 
-Key properties:
+### Executor Properties
 - Max 256 steps, 16 prompts per recipe
 - Steps sorted by index before execution
 - Sample-counted holds via `seq_sensor_get_sample_count()` (monotonic 106-H counter)
-- **Relay prereqs**: `sequence_start` params (`relay_o2`, `relay_o3`, `relay_air`) specify
-  desired relay states.  Executor saves originals, applies in safe order (O2 → O3 → Air),
+- **Relay prereqs**: Executor saves originals, applies in safe order (O2 → O3 → Air),
   waits 3s if any changed, sends `SEQ,*,RELAY` notification.
 - **Cleanup**: completion → power=0, air=OFF, O2/O3 unchanged.  Abort → same + ozone_gen=OFF.
 - Per-step air compressor relay control via `air_comp` field (optional, default OFF)
@@ -77,13 +94,21 @@ Key properties:
 - Prompts block execution via binary semaphore until `CMD,sequence_confirm`
 - FreeRTOS task (8KB stack, priority 5)
 - Integrates with `sequence_runner` for `sequence_runner_is_active()` lockout
-  via `sequence_runner_force_active()` / `sequence_runner_force_idle()` bridge
 
-ESP32 does NOT: generate random values, compute statistics, query models,
-determine pass/fail, store calibration data, or generate certificates.
+ESP32 does NOT: compute statistics, query models, determine pass/fail,
+store calibration data, or generate certificates.
 
 ## LAN Commands — Sequence Protocol
 
+### Single-command calibration
+| Command | Args | Purpose |
+|---------|------|---------|
+| `calibrate` | `flow=<lpm>` (optional) | Load + run 203-step calibration sweep |
+| `calibrate_start` | `[lpm]` | Legacy alias → `calibrate` |
+| `calibrate_stop` | none | Legacy alias → `sequence_abort` |
+| `calibrate_status` | none | Legacy alias → `sequence_status` |
+
+### Recipe protocol (validate, custom sequences)
 | Command | Args | Purpose |
 |---------|------|---------|
 | `sequence_start` | `<type>,<key=val params>` | Begin recipe loading.  Relay params: `relay_o2`, `relay_o3`, `relay_air` |
@@ -91,11 +116,10 @@ determine pass/fail, store calibration data, or generate certificates.
 | `seq_prompt` | `<before>,<id>,<text>` | Add prompt |
 | `seq_run` | none | Apply relay prereqs, sort steps, start execution task |
 | `sequence_confirm` | none | Unblock pending prompt |
-| `sequence_abort` | `[reason]` | Abort sequence |
-| `sequence_stop` | `[reason]` | Legacy alias for abort |
+| `sequence_abort` | `[reason]` | Abort any sequence |
 | `sequence_status` | none | Query executor state |
 
-Full specification in `interface_contract.md` §Recipe-Based Sequences.
+Full specification in `interface_contract.md`.
 
 ## Pin Assignments (from `blocksi_pins.h`)
 
@@ -117,26 +141,38 @@ Tag convention: `static const char *TAG = "MODULE_NAME";`
 
 ## Pending Work
 
+- `[IMPLEMENTED]` **Single-command calibration**: `CMD,calibrate,flow=<lpm>` loads
+  + runs 203-step sweep.  `seq_executor_load_calibration()` builds baseline +
+  sweep up (0→100%) + sweep down (100→0%) internally.  Eliminates the 221-command
+  recipe protocol for calibration.
 - `[IMPLEMENTED]` **Executor-owned relay prerequisites**: `sequence_start` params
-  specify relay states (`relay_o2`, `relay_o3`, `relay_air`).  Executor saves originals,
-  applies in safe order, waits 3s, sends `SEQ,*,RELAY`.  Supersedes old preflight reject.
+  specify relay states.  Executor saves originals, applies in safe order, waits 3s.
 - `[IMPLEMENTED]` **Hardware interlock**: Air compressor is internal to MP-8000.
-  `relay_set_with_source()` rejects `air_comp ON` when `ozone_gen OFF`, and
-  auto-sets `air_comp OFF` when `ozone_gen` is turned OFF.
-- `[IMPLEMENTED]` **Air compressor per-step control**: `seq_exec_step_t` has `air_comp`
-  bool.  Executor toggles `RELAY_AIR_COMP` at step transitions.  STEP and SAMPLE
-  messages include air_comp state.
+  `relay_set_with_source()` enforces dependency.
 - `[IMPLEMENTED]` **Recipe executor**: Generic `seq_executor` with sample-counted
-  holds, prompt blocking, and LAN streaming.  Replaces all sequence-specific firmware.
+  holds, prompt blocking, and LAN streaming.
 - `[IMPLEMENTED]` **Relay robustness**: Source tracking, NVS persistence, reconnect
   state push, reset-reason-aware restore.
 - `[PROPOSED]` **Relay dropout investigation**: Source-tracking implemented for
-  ongoing monitoring. Monitor logs for `[src=...]` tags.
-- `[PROPOSED]` **Legacy cleanup**: `power_calibration_v2.c` and its
-  `calibrate_start`/`calibrate_stop` commands could be removed once the Dashboard
-  fully adopts the recipe protocol.
+  ongoing monitoring.  Monitor logs for `[src=...]` tags.
+- `[PROPOSED]` **Legacy cleanup**: `power_calibration_v2.c` is no longer referenced
+  by any command handler (all `calibrate_*` commands route to seq_executor).
+  Can be removed from `CMakeLists.txt` in a future cleanup.
 
 ## Recent Changes (2026-02-28)
+
+### Single-command calibration  `[IMPLEMENTED]`
+- `seq_executor.c`: Added `add_step_internal()` (private helper for internal
+  recipe population without mutex/state-check) and `seq_executor_load_calibration(flow_lpm)`
+  (public function that calls `seq_executor_begin()` with baked-in relay prereqs,
+  builds 203 steps internally: baseline + sweep up 0→100% + sweep down 100→0%).
+- `seq_executor.h`: Added `seq_executor_load_calibration()` declaration.
+- `main.c`: Added `CMD,calibrate[,flow=<lpm>]` handler.  Remapped legacy
+  `calibrate_start`/`calibrate_stop`/`calibrate_status` to route through
+  seq_executor instead of `power_calibration_v2.c`.
+- Dashboard (`blocksi_dashboard.py`): Replaced 221-command recipe protocol
+  with single `send_command("calibrate,flow=X")`.  Removed `generate_cal_recipe()`.
+  Kept `_handle_seq()` parsing, scatter plot, CSV saving unchanged.
 
 ### Executor-owned relay prerequisites + hardware interlock  `[IMPLEMENTED]`
 - `relay_control.c`: Hardware interlock in `relay_set_with_source()` —

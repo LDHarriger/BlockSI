@@ -160,6 +160,43 @@ int seq_executor_get_current_step(void);
  */
 int seq_executor_get_step_count(void);
 
+/**
+ * @brief Load built-in calibration recipe and prepare for execution
+ *
+ * Creates a complete calibration sweep internally:
+ *   - Baseline: 0% for 15 samples
+ *   - Sweep Up: 0→100% in 1% steps, 2 samples each
+ *   - Sweep Down: 100→0% in 1% steps, 2 samples each
+ *   - Total: 203 steps
+ *
+ * Relay prereqs (O2=ON, O3=ON, Air=OFF) are baked in.
+ * After calling this, call seq_executor_run() to start.
+ *
+ * @param flow_lpm  O2 flow rate in LPM (stored in metadata)
+ * @return ESP_OK, ESP_ERR_INVALID_STATE if already running
+ */
+esp_err_t seq_executor_load_calibration(float flow_lpm);
+
+/**
+ * @brief Load a built-in validation recipe
+ *
+ * Creates a 5-step validation sequence:
+ *   - Baseline: 0% for 15 samples
+ *   - Spot Low: ~33% of target, 5 samples
+ *   - Spot High: ~66% of target, 5 samples
+ *   - Target: full power, 15 samples
+ *   - Cooldown: 0%, 5 samples
+ *
+ * Includes prompts: check_flow (before step 0), check_route (before step 1).
+ * Relay prereqs (O2=ON, O3=ON, Air=OFF) are baked in.
+ * After calling this, call seq_executor_run() to start.
+ *
+ * @param power_pct  Target power level (0-100)
+ * @param flow_lpm   O2 flow rate in LPM
+ * @return ESP_OK, ESP_ERR_INVALID_STATE if already running
+ */
+esp_err_t seq_executor_load_validation(uint8_t power_pct, float flow_lpm);
+
 #ifdef __cplusplus
 }
 #endif

@@ -538,39 +538,117 @@ static bool lan_command_handler(const char *cmd, const char *args,
     // End of pot handlers
 
     // =========================================================================
-    // Power calibration sweep commands
+    // Single-command calibration  (replaces recipe protocol for calibration)
     // =========================================================================
+    } else if (strcmp(cmd, "calibrate") == 0) {
+        // CMD,calibrate[,flow=4.0]
+        // Loads built-in calibration sweep and starts execution.
+        // Single command replaces: sequence_start + 203× seq_step + seq_run
+        float flow = 4.0f;
+        if (args) {
+            // Parse flow=<value> from args
+            const char *f = strstr(args, "flow=");
+            if (f) flow = strtof(f + 5, NULL);
+        }
+        if (flow < 0.1f || flow > 15.0f) flow = 4.0f;
+
+        esp_err_t ret = seq_executor_load_calibration(flow);
+        if (ret != ESP_OK) {
+            if (ret == ESP_ERR_INVALID_STATE) {
+                snprintf(response, response_size, "busy:sequence_active");
+            } else {
+                snprintf(response, response_size, "failed=%s", esp_err_to_name(ret));
+            }
+            return false;
+        }
+
+        ret = seq_executor_run();
+        if (ret == ESP_OK) {
+            snprintf(response, response_size,
+                     "running,steps=%d,flow=%.1f",
+                     seq_executor_get_step_count(), flow);
+            return true;
+        }
+        snprintf(response, response_size, "run_failed=%s", esp_err_to_name(ret));
+        return false;
+
     } else if (strcmp(cmd, "calibrate_start") == 0) {
-        esp_err_t ret = power_calibration_start();
+        // Legacy alias — routes to built-in calibration
+        float flow = 4.0f;
+        if (args) {
+            const char *f = strstr(args, "flow=");
+            if (f) flow = strtof(f + 5, NULL);
+            else flow = strtof(args, NULL);  // bare number = LPM
+            if (flow < 0.1f || flow > 15.0f) flow = 4.0f;
+        }
+        esp_err_t ret = seq_executor_load_calibration(flow);
+        if (ret != ESP_OK) {
+            snprintf(response, response_size, "already_active_or_failed");
+            return false;
+        }
+        ret = seq_executor_run();
         if (ret == ESP_OK) {
             snprintf(response, response_size, "calibration=started");
             return true;
-        } else if (ret == ESP_ERR_INVALID_STATE) {
-            snprintf(response, response_size, "already_active_or_pot_not_init");
-            return false;
         }
         snprintf(response, response_size, "failed");
         return false;
         
-    } else if (strcmp(cmd, "calibrate_stop") == 0) {
-        esp_err_t ret = power_calibration_stop();
+    } else if (strcmp(cmd, "calibrate_stop") == 0 ||
+               strcmp(cmd, "validate_stop") == 0) {
+        esp_err_t ret = seq_executor_abort(cmd);
         if (ret == ESP_OK) {
-            snprintf(response, response_size, "calibration=stopping");
+            snprintf(response, response_size, "stopping");
             return true;
         }
         snprintf(response, response_size, "not_active");
         return false;
         
-    } else if (strcmp(cmd, "calibrate_status") == 0) {
-        power_cal_status_t status;
-        power_calibration_get_status(&status);
+    } else if (strcmp(cmd, "calibrate_status") == 0 ||
+               strcmp(cmd, "validate_status") == 0) {
+        seq_exec_state_t st = seq_executor_get_state();
+        const char *state_names[] = {"idle", "loading", "running", "waiting_confirm",
+                                     "complete", "aborted"};
+        int si = (int)st;
+        if (si < 0 || si > 5) si = 0;
         snprintf(response, response_size, 
-                 "active=%d,pct=%u,dir=%d,pts=%u",
-                 status.active ? 1 : 0,
-                 status.current_pct,
-                 status.direction,
-                 status.points_up + status.points_down);
+                 "state=%s,type=%s,step=%d/%d",
+                 state_names[si],
+                 seq_executor_get_type(),
+                 seq_executor_get_current_step(),
+                 seq_executor_get_step_count());
         return true;
+
+    } else if (strcmp(cmd, "validate") == 0) {
+        // CMD,validate,power=75,flow=4.0
+        uint8_t power = 75;
+        float flow = 4.0f;
+        if (args) {
+            const char *p = strstr(args, "power=");
+            if (p) {
+                int pv = atoi(p + 6);
+                if (pv >= 1 && pv <= 100) power = (uint8_t)pv;
+            }
+            const char *f = strstr(args, "flow=");
+            if (f) {
+                float fv = strtof(f + 5, NULL);
+                if (fv >= 0.1f && fv <= 15.0f) flow = fv;
+            }
+        }
+        esp_err_t ret = seq_executor_load_validation(power, flow);
+        if (ret != ESP_OK) {
+            snprintf(response, response_size, "already_active_or_failed");
+            return false;
+        }
+        ret = seq_executor_run();
+        if (ret == ESP_OK) {
+            snprintf(response, response_size,
+                     "running,steps=%d,power=%u,flow=%.1f",
+                     seq_executor_get_step_count(), power, flow);
+            return true;
+        }
+        snprintf(response, response_size, "failed");
+        return false;
 
     // =========================================================================
     // Sensor status commands

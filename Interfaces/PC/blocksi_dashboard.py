@@ -28,7 +28,6 @@ import csv
 import json
 import math
 import os
-import random
 import re
 import time
 from collections import deque
@@ -445,60 +444,14 @@ def _save_cal_csv(samples: list[dict], lpm: float, o2_pct: int) -> str:
 
 
 # =============================================================================
-# Recipe generation  (PC = Brains — generates step lists for ESP32)
+# Recipe generation  (PC sends step lists for recipe-protocol sequences)
 # =============================================================================
-def generate_cal_recipe(flow_lpm: float) -> tuple[list[tuple], list[tuple]]:
-    """Generate calibration recipe: baseline + sweep up + sweep down + random.
-
-    Returns (steps, prompts).
-    Each step = (idx, power_pct, hold_samples, phase, air_comp).
-    Each prompt = (before_step_idx, prompt_id, text).
-    """
-    steps: list[tuple] = []
-
-    # Phase 1 — Baseline: 0% for 15 samples (~37s)
-    steps.append((len(steps), 0, 15, "baseline", 0))
-
-    # Phase 2 — Sweep Up: 0→100% in 1% steps, 2 samples each
-    for pwr in range(0, 101):
-        steps.append((len(steps), pwr, 2, "sweep_up", 0))
-
-    # Phase 3 — Sweep Down: 100→0% in 1% steps, 2 samples each
-    for pwr in range(100, -1, -1):
-        steps.append((len(steps), pwr, 2, "sweep_down", 0))
-
-    # Phase 4 — Random spot checks: 15 random levels, 5 samples each
-    for _ in range(15):
-        pwr = random.randint(0, 100)
-        steps.append((len(steps), pwr, 5, "random", 0))
-
-    prompts: list[tuple] = [
-        (0, "check_flow", "Verify O2 flow and gas route before calibration"),
-    ]
-    return steps, prompts
+# NOTE: Calibration no longer uses the recipe protocol — ESP32 has the sweep
+# pattern on-board via CMD,calibrate,flow=<lpm>.  generate_cal_recipe() removed.
 
 
-def generate_val_recipe(
-    power_pct: float, flow_lpm: float
-) -> tuple[list[tuple], list[tuple]]:
-    """Generate validation recipe: baseline + spots + target + cooldown.
-
-    Returns (steps, prompts).
-    """
-    spot1 = max(10, int(power_pct * 0.33))
-    spot2 = max(10, int(power_pct * 0.66))
-    steps: list[tuple] = [
-        (0, 0,              15, "baseline",  0),  # 0% for ~37s
-        (1, spot1,           5, "spot_low",  0),  # ~33% for ~12s
-        (2, spot2,           5, "spot_high", 0),  # ~66% for ~12s
-        (3, int(power_pct), 15, "target",    0),  # Target power for ~37s
-        (4, 0,               5, "cooldown",  0),  # 0% for ~12s
-    ]
-    prompts: list[tuple] = [
-        (0, "check_flow", "Verify O2 flow matches rotameter"),
-        (1, "check_route", "Confirm gas route to 106-H sensor"),
-    ]
-    return steps, prompts
+# generate_val_recipe() removed — ESP32 now owns the validation sweep
+# pattern on-board via CMD,validate,power=<pct>,flow=<lpm>.
 
 
 def _analyze_validation(samples: list[dict], power_pct: float,
@@ -604,7 +557,7 @@ class TCPServer:
         self._server: Optional[asyncio.AbstractServer] = None
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
-        self._response_q: asyncio.Queue[str] = asyncio.Queue(maxsize=50)
+        self._response_q: asyncio.Queue[str] = asyncio.Queue(maxsize=300)
         self._running = False
 
     # -- lifecycle --------------------------------------------------------
@@ -918,6 +871,8 @@ class TCPServer:
             S.sequence_active = False
             S.pending_prompt_id = ""
             S.pending_prompt_text = ""
+            # Dashboard-side cleanup: power=0, all relays off
+            asyncio.create_task(_sequence_cleanup("complete"))
 
         elif action == "ABORTED":
             # SEQ,calibrate,ABORTED,user_request
@@ -927,6 +882,8 @@ class TCPServer:
             S.pending_prompt_id = ""
             S.pending_prompt_text = ""
             _notify(f"{seq_type.title()} aborted: {reason}", "warning")
+            # Dashboard-side cleanup: power=0, all relays off
+            asyncio.create_task(_sequence_cleanup("abort"))
 
         else:
             log(f"Unknown SEQ action: {action} in {line[:80]}", "warn")
@@ -998,36 +955,82 @@ async def cmd_emergency_stop() -> None:
     if S.sequence_active:
         await cmd_sequence_abort()
     await cmd_set_power(0)
+    await cmd_set_relay("air_comp", False)
     await cmd_set_relay("ozone_gen", False)
+    await cmd_set_relay("o2_conc", False)
 
 
 async def cmd_sequence_start(seq_type: str, **kwargs) -> bool:
-    """Generate a recipe and send it to ESP32.
+    """Start a sequence on the ESP32.
 
-    Protocol: sequence_start → seq_step × N → seq_prompt × M → seq_run.
-    Steps are sent via raw TCP (no individual response wait) for speed.
+    For calibrate: single CMD,calibrate,flow=<lpm> — ESP32 has the sweep
+    pattern on-board (baseline + sweep up 0→100% + sweep down 100→0%).
+
+    For validate: recipe protocol (sequence_start → seq_step × N → seq_run).
     """
     if not S.connected:
         _notify("Not connected to ESP32", "negative")
         return False
 
-    # Generate recipe based on type
-    # Relay prereqs: executor applies these at seq_run time
-    relay_params = ",relay_o2=1,relay_o3=1,relay_air=0"
     if seq_type == "calibrate":
-        flow = kwargs.get("flow", DEFAULT_FLOW_LPM)
-        steps, prompts = generate_cal_recipe(flow)
-        param_str = f"flow={flow}{relay_params}"
+        return await _start_calibration(**kwargs)
     elif seq_type == "validate":
-        power = kwargs.get("power", 75.0)
-        flow = kwargs.get("flow", DEFAULT_FLOW_LPM)
-        steps, prompts = generate_val_recipe(power, flow)
-        param_str = f"power={power},flow={flow}{relay_params}"
-        S.val_power = power
-        S.val_lpm = flow
+        return await _start_validation(**kwargs)
     else:
         log(f"Unknown sequence type: {seq_type}", "error")
         return False
+
+
+async def _start_calibration(**kwargs) -> bool:
+    """Single-command calibration: CMD,calibrate,flow=<lpm>.
+
+    ESP32 builds the 203-step sweep internally and starts immediately.
+    Relay prereqs (O2 ON, O3 ON, Air OFF) are handled by the executor.
+    """
+    flow = kwargs.get("flow", DEFAULT_FLOW_LPM)
+
+    # Pre-flight: ensure power starts at 0%
+    log("Pre-flight: setting power to 0%", "seq")
+    await cmd_set_power(0)
+
+    # Enter running state (ESP32 starts immediately — no loading phase)
+    S.sequence_active = True
+    S.seq_type = "calibrate"
+    S.seq_phase = "starting"
+    S.seq_progress = 0.0
+    S.seq_elapsed = 0.0
+    S.seq_step_idx = 0
+    S.seq_step_total = 203  # 1 baseline + 101 up + 101 down
+    S.pending_prompt_id = ""
+    S.pending_prompt_text = ""
+    S.cal_samples = []
+    S.cal_file = ""
+    S.cal_lpm = flow
+
+    # Single command — ESP32 loads recipe + starts execution
+    resp = await tcp.send_command(f"calibrate,flow={flow}", timeout=5.0)
+    if resp and "OK" in resp:
+        log(f"Calibration started: flow={flow} LPM, 203 steps", "seq")
+        return True
+
+    log(f"Calibration failed: {resp}", "error")
+    S.sequence_active = False
+    return False
+
+
+async def _start_validation(**kwargs) -> bool:
+    """Single-command validation: CMD,validate,power=<pct>,flow=<lpm>.
+
+    ESP32 owns the full sweep pattern on-board.
+    """
+    power = int(kwargs.get("power", 75))
+    flow = kwargs.get("flow", DEFAULT_FLOW_LPM)
+    S.val_power = power
+    S.val_lpm = flow
+
+    # Pre-flight: ensure power starts at 0%
+    log("Pre-flight: setting power to 0%", "seq")
+    await cmd_set_power(0)
 
     # Pre-flight: belt-and-suspenders relay enable (executor also applies)
     if not S.relay_o2_conc:
@@ -1040,52 +1043,28 @@ async def cmd_sequence_start(seq_type: str, **kwargs) -> bool:
         log("Pre-disabling air compressor relay", "seq")
         await cmd_set_relay("air_comp", False)
 
-    # Enter loading state
+    # Enter sequence state
     S.sequence_active = True
-    S.seq_type = seq_type
+    S.seq_type = "validate"
     S.seq_phase = "loading"
     S.seq_progress = 0.0
     S.seq_elapsed = 0.0
     S.seq_step_idx = 0
-    S.seq_step_total = len(steps)
+    S.seq_step_total = 5
     S.pending_prompt_id = ""
     S.pending_prompt_text = ""
-    if seq_type == "calibrate":
-        S.cal_samples = []
-        S.cal_file = ""
-        S.cal_lpm = kwargs.get("flow", DEFAULT_FLOW_LPM)
-    elif seq_type == "validate":
-        S.val_samples = []
-        S.val_result = {}
+    S.val_samples = []
+    S.val_result = {}
 
-    # 1. Send sequence_start (wait for RSP)
-    resp = await tcp.send_command(f"sequence_start,{seq_type},{param_str}")
-    if not resp or "OK" not in resp:
-        log(f"sequence_start failed: {resp}", "error")
-        S.sequence_active = False
-        return False
-
-    # 2. Send all steps via raw TCP (fire-and-forget for speed)
-    log(f"Sending {len(steps)} recipe steps...", "seq")
-    for idx, pwr, hold, phase, air in steps:
-        await tcp._send_raw(f"CMD,seq_step,{idx},{pwr},{hold},{phase},{air}\n")
-        await asyncio.sleep(0.005)  # brief yield to avoid buffer overflow
-
-    # 3. Send prompts via raw TCP
-    for before, pid, text in prompts:
-        await tcp._send_raw(f"CMD,seq_prompt,{before},{pid},{text}\n")
-        await asyncio.sleep(0.005)
-
-    # Brief pause for ESP32 to process buffered commands
-    await asyncio.sleep(0.1)
-
-    # 4. Send seq_run (wait for RSP — validates recipe loaded OK)
-    resp = await tcp.send_command("seq_run")
+    # Single command — ESP32 builds recipe internally
+    resp = await tcp.send_command(
+        f"validate,power={power},flow={flow}", timeout=5.0
+    )
     if resp and "OK" in resp:
-        log(f"Recipe running: {len(steps)} steps", "seq")
+        log(f"Validation running: power={power}%, flow={flow} LPM", "seq")
         return True
 
-    log(f"seq_run failed: {resp}", "error")
+    log(f"validate failed: {resp}", "error")
     S.sequence_active = False
     return False
 
@@ -1100,8 +1079,19 @@ async def cmd_sequence_abort(reason: str = "") -> bool:
 
 
 async def cmd_sequence_stop() -> bool:
-    """Legacy alias — sends sequence_abort."""
-    return await cmd_sequence_abort()
+    """Abort sequence + full cleanup (power=0, all relays off)."""
+    result = await cmd_sequence_abort()
+    await _sequence_cleanup("stop")
+    return result
+
+
+async def _sequence_cleanup(source: str = "unknown") -> None:
+    """Power=0% and all relays off. Belt-and-suspenders with ESP32 cleanup."""
+    log(f"Dashboard cleanup ({source}): power=0, all relays off", "seq")
+    await cmd_set_power(0)
+    await cmd_set_relay("air_comp", False)
+    await cmd_set_relay("ozone_gen", False)
+    await cmd_set_relay("o2_conc", False)
 
 
 async def cmd_sequence_confirm() -> bool:
@@ -1447,7 +1437,7 @@ async def index():
             with ui.row().classes("justify-end w-full q-gutter-sm"):
                 ui.button("Abort Sequence", color="red", on_click=lambda: (
                     prompt_dialog.close(),
-                    asyncio.create_task(cmd_sequence_abort()),
+                    asyncio.create_task(cmd_sequence_stop()),
                 )).props("flat")
                 ui.button("Confirm", color="green", icon="check", on_click=lambda: (
                     prompt_dialog.close(),
@@ -1546,9 +1536,9 @@ async def index():
                     "w-full q-mb-sm"
                 ):
                     ui.markdown(
-                        "PC-generated recipe (~17 min): Baseline → Sweep Up "
-                        "(0→100%) → Sweep Down (100→0%) → Random Spots. "
-                        "Air compressor must be OFF."
+                        "Single-command calibration (~17 min): Baseline → "
+                        "Sweep Up (0→100%) → Sweep Down (100→0%). "
+                        "ESP32 runs sweep autonomously."
                     ).classes("text-caption text-grey q-mb-sm")
 
                     with ui.row().classes("q-gutter-sm items-end q-mb-sm"):
@@ -1570,7 +1560,7 @@ async def index():
                         cal_stop_btn = ui.button(
                             "Stop", icon="stop",
                             on_click=lambda: asyncio.create_task(
-                                cmd_sequence_abort()
+                                cmd_sequence_stop()
                             ),
                             color="grey",
                         )
@@ -1580,7 +1570,6 @@ async def index():
                         ("baseline", "Baseline", "~37s @ 0%"),
                         ("sweep_up", "Sweep Up", "0 → 100%"),
                         ("sweep_down", "Sweep Down", "100 → 0%"),
-                        ("random", "Random Spots", "15 random levels"),
                     ]
                     cal_step_cards: dict[str, Any] = {}
                     with ui.row().classes("w-full q-gutter-xs q-mb-sm"):
@@ -1602,7 +1591,7 @@ async def index():
                     cal_chart = ui.echart({
                         "darkMode": True,
                         "tooltip": {"trigger": "item"},
-                        "legend": {"data": ["Sweep Up", "Sweep Down", "Random"]},
+                        "legend": {"data": ["Sweep Up", "Sweep Down"]},
                         "xAxis": {"type": "value", "name": "Power %",
                                   "min": 0, "max": 100},
                         "yAxis": {"type": "value", "name": "O3 %vol"},
@@ -1611,8 +1600,6 @@ async def index():
                              "itemStyle": {"color": "#42A5F5"}},
                             {"name": "Sweep Down", "type": "scatter", "data": [],
                              "itemStyle": {"color": "#FFA726"}},
-                            {"name": "Random", "type": "scatter", "data": [],
-                             "itemStyle": {"color": "#66BB6A"}},
                         ],
                     }).classes("w-full").style("height: 280px")
 
@@ -2023,7 +2010,7 @@ async def index():
                 f"Samples={len(S.cal_samples)}"
             )
             # Highlight active/completed phase cards
-            phase_order = ["baseline", "sweep_up", "sweep_down", "random"]
+            phase_order = ["baseline", "sweep_up", "sweep_down"]
             active_idx = (
                 phase_order.index(S.seq_phase)
                 if S.seq_phase in phase_order else -1
@@ -2058,13 +2045,8 @@ async def index():
                 [s["power_actual"], s["o3_pct"]]
                 for s in S.cal_samples if s.get("phase") == "sweep_down"
             ]
-            rand_pts = [
-                [s["power_actual"], s["o3_pct"]]
-                for s in S.cal_samples if s.get("phase") == "random"
-            ]
             cal_chart.options["series"][0]["data"] = sweep_up
             cal_chart.options["series"][1]["data"] = sweep_down
-            cal_chart.options["series"][2]["data"] = rand_pts
             cal_chart.update()
 
         # -- validation observer UI ---------------------------------------

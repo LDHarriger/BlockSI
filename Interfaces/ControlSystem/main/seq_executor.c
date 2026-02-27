@@ -610,3 +610,120 @@ static float get_elapsed_s(void)
     if (s_exec.start_time_us == 0) return 0.0f;
     return (float)(esp_timer_get_time() - s_exec.start_time_us) / 1000000.0f;
 }
+
+/**
+ * @brief Add a step directly to the step buffer (no mutex, no state check)
+ *
+ * Caller must hold the mutex and ensure state == LOADING.
+ */
+static void add_step_internal(uint16_t index, uint8_t power_pct,
+                              uint16_t hold_samples, const char *phase,
+                              bool air_comp)
+{
+    if (s_exec.step_count >= SEQ_EXEC_MAX_STEPS) return;
+    seq_exec_step_t *s = &s_exec.steps[s_exec.step_count++];
+    s->index = index;
+    s->power_pct = power_pct;
+    s->hold_samples = hold_samples;
+    s->air_comp = air_comp;
+    strncpy(s->phase, phase ? phase : "", SEQ_EXEC_PHASE_LEN - 1);
+    s->phase[SEQ_EXEC_PHASE_LEN - 1] = '\0';
+}
+
+/* ── Built-in calibration recipe ────────────────────────────────── */
+
+esp_err_t seq_executor_load_calibration(float flow_lpm)
+{
+    /*
+     * Calibration sweep:
+     *   Phase 1 — Baseline: 0% power, 15 samples (~37s)
+     *   Phase 2 — Sweep Up: 0→100% in 1% steps, 2 samples each (~505s)
+     *   Phase 3 — Sweep Down: 100→0% in 1% steps, 2 samples each (~505s)
+     *
+     * Total: 203 steps, ~1047s (~17.5 min)
+     *
+     * Relay prereqs are baked in: O2=ON, O3=ON, Air=OFF.
+     * The executor applies these at run time.
+     */
+    char params[SEQ_EXEC_PARAMS_LEN];
+    snprintf(params, sizeof(params),
+             "flow=%.1f,relay_o2=1,relay_o3=1,relay_air=0", flow_lpm);
+
+    esp_err_t ret = seq_executor_begin("calibrate", params);
+    if (ret != ESP_OK) return ret;
+
+    /* Must hold mutex while populating steps (begin left state = LOADING) */
+    xSemaphoreTake(s_exec.mutex, portMAX_DELAY);
+
+    uint16_t idx = 0;
+
+    /* Phase 1 — Baseline */
+    add_step_internal(idx++, 0, 15, "baseline", false);
+
+    /* Phase 2 — Sweep Up: 0 → 100% */
+    for (int pwr = 0; pwr <= 100; pwr++) {
+        add_step_internal(idx++, (uint8_t)pwr, 2, "sweep_up", false);
+    }
+
+    /* Phase 3 — Sweep Down: 100 → 0% */
+    for (int pwr = 100; pwr >= 0; pwr--) {
+        add_step_internal(idx++, (uint8_t)pwr, 2, "sweep_down", false);
+    }
+
+    ESP_LOGI(TAG, "Calibration recipe loaded: %d steps, flow=%.1f LPM",
+             s_exec.step_count, flow_lpm);
+
+    xSemaphoreGive(s_exec.mutex);
+    return ESP_OK;
+}
+
+/* ── Built-in validation recipe ─────────────────────────────────── */
+
+esp_err_t seq_executor_load_validation(uint8_t power_pct, float flow_lpm)
+{
+    /*
+     * Validation sequence:
+     *   Phase 1 — Baseline: 0% power, 15 samples (~37s)
+     *   Phase 2 — Spot Low: ~33% of target, 5 samples (~12s)
+     *   Phase 3 — Spot High: ~66% of target, 5 samples (~12s)
+     *   Phase 4 — Target: full power, 15 samples (~37s)
+     *   Phase 5 — Cooldown: 0% power, 5 samples (~12s)
+     *
+     * Total: 5 steps, ~112s (~1.9 min)
+     *
+     * Relay prereqs: O2=ON, O3=ON, Air=OFF.
+     * Prompts: check_flow before baseline, check_route before spot_low.
+     */
+    char params[SEQ_EXEC_PARAMS_LEN];
+    snprintf(params, sizeof(params),
+             "power=%u,flow=%.1f,relay_o2=1,relay_o3=1,relay_air=0",
+             power_pct, flow_lpm);
+
+    esp_err_t ret = seq_executor_begin("validate", params);
+    if (ret != ESP_OK) return ret;
+
+    xSemaphoreTake(s_exec.mutex, portMAX_DELAY);
+
+    /* Spot check power levels */
+    uint8_t spot1 = (uint8_t)(power_pct * 33 / 100);
+    uint8_t spot2 = (uint8_t)(power_pct * 66 / 100);
+    if (spot1 < 10) spot1 = 10;
+    if (spot2 < 10) spot2 = 10;
+
+    /* Steps */
+    add_step_internal(0, 0,          15, "baseline",  false);
+    add_step_internal(1, spot1,       5, "spot_low",  false);
+    add_step_internal(2, spot2,       5, "spot_high", false);
+    add_step_internal(3, power_pct,  15, "target",    false);
+    add_step_internal(4, 0,           5, "cooldown",  false);
+
+    xSemaphoreGive(s_exec.mutex);
+
+    /* Prompts: check flow before baseline, check route before spot_low */
+    seq_executor_add_prompt(0, "check_flow", "Verify O2 flow matches rotameter");
+    seq_executor_add_prompt(1, "check_route", "Confirm gas route to 106-H sensor");
+
+    ESP_LOGI(TAG, "Validation recipe loaded: 5 steps, power=%u%%, flow=%.1f LPM",
+             power_pct, flow_lpm);
+    return ESP_OK;
+}

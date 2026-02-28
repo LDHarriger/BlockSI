@@ -1,6 +1,6 @@
 # Dashboard Agent Summary
 
-> Last updated: 2026-02-28 (Session 8 — Random phase cleanup + sequence cleanup)
+> Last updated: 2026-02-28 (Session 9 — Model fitting system + bug fixes)
 
 ## Current State
 
@@ -11,10 +11,10 @@ protocol.  The PC does ALL analysis.
 
 | Property | Value |
 |----------|-------|
-| File | `Interfaces/PC/blocksi_dashboard.py` (~2190 lines) |
+| File | `Interfaces/PC/blocksi_dashboard.py` (~2420 lines) |
 | Framework | NiceGUI 3.8.0 (Quasar UI components, WebSocket push) |
 | Python | 3.14 in `.venv` |
-| Dependencies | nicegui, numpy, pandas, plotly |
+| Dependencies | nicegui, numpy, pandas, plotly, scipy |
 | Run command | `.venv\Scripts\python.exe Interfaces\PC\blocksi_dashboard.py [--port 5000]` |
 | UI port | http://localhost:8080 |
 | Backup | `Interfaces/PC/Old/blocksi_dashboard_pre_observer.py` (pre-observer rewrite) |
@@ -162,7 +162,44 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 ### Settings Tab
 - Notification level selector
 
-## What Changed This Session (Session 8)
+## What Changed This Session (Session 9)
+
+### Model Fitting System `[IMPLEMENTED]`
+- New `Interfaces/PC/analysis/` module with `power_o3_model.py`
+- 4-parameter sigmoid model: `O3 = L / (1 + exp(-k*(P - P0))) + b`
+- `fit_sigmoid_model()` — fits via `scipy.optimize.curve_fit`, computes R², RMSE
+- `save_model()` / `load_model()` — JSON persistence in `Models/O3Power/`
+- `predict_o3()` / `predict_power()` — model-aware with fallback to piecewise
+- `generate_curve()` — model-aware curve generation for Plotly
+- `aggregate_calibration_data()` — multi-CSV aggregation with exclusion support
+- Model fitted from 3 calibration CSVs: R²=0.9982, RMSE=0.028
+
+### Dashboard Integration
+- `predict_o3_from_power()` now dispatches to analysis module via `S.active_model`
+- `predict_power_from_o3()` now dispatches to analysis module via `S.active_model`
+- `generate_power_curve()` now dispatches to analysis module via `S.active_model`
+- `SystemState.active_model` — loaded `PowerO3Model` (or None for fallback)
+- `SystemState.model_status` — human-readable status string
+- `SystemState.load_model_for_current_condition()` — loads model matching (LPM, O2%)
+- Model auto-loads on startup, LPM change, and air compressor toggle
+- Calibration UI: "Model Fitting" section with per-condition Fit Model buttons
+- Model status card shows active model params and R² badge
+
+### Bug Fixes (from audit)
+- Reconnection race fix: `_close_client` guards `if self._writer is writer`
+- Dispatch exception safety: try/except around each handler
+- `seq_confirmed` reset on disconnect
+- COMPLETE/ABORTED deadlock fix: `seq_cleanup_pending` flag, deferred to `_tick`
+- Power rollback on `cmd_set_power` failure
+- time_sync unmatched RSP suppression
+- CSV logger exception logging
+- NiceGUI `.classes()` API instead of `_classes` mutation
+
+### Cleanup
+- Removed 3 duplicate empty model directories: `Interfaces/Model/`, `Interfaces/Models/`, `Interfaces/PC/Model/`
+- Canonical model directory: `Models/O3Power/`
+
+## What Changed in Session 8
 
 ### Random phase cleanup
 - Removed `"Random Spots"` from `CAL_PHASES_DEF` (3 phases: Baseline, Sweep Up, Sweep Down)
@@ -203,7 +240,7 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 
 ## Pending Work
 
-- `[PROPOSED]` **Power model fitting UI**: After calibration CSV generated, fit piecewise model, store in `Models/O3Power/`, update constants.
+- `[IMPLEMENTED]` **Power→O3 model fitting**: 4-parameter sigmoid model, fitted per (LPM, O2%) condition, stored in `Models/O3Power/` as JSON. Analysis module at `Interfaces/PC/analysis/`.
 - `[PROPOSED]` **Historical data viewer**: Load and plot old CSV files from `Data/Telemetry/`.
 - `[PROPOSED]` **Future sequence types**: `fill`, `decay`, `sterilize` — recipe generators to be added.
 - `[PROPOSED]` **Validation certificate**: Generate JSON certificate with 24h validity on pass.

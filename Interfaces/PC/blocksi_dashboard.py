@@ -39,6 +39,19 @@ import pandas as pd
 import plotly.graph_objects as go
 from nicegui import ui, app
 
+# Analysis module — model fitting and prediction
+from analysis import (
+    PowerO3Model,
+    load_model_for_condition,
+    list_models as list_saved_models,
+    fit_sigmoid_model,
+    save_model as save_model_json,
+    predict_o3 as _model_predict_o3,
+    predict_power as _model_predict_power,
+    generate_curve as _model_generate_curve,
+    aggregate_calibration_data,
+)
+
 # =============================================================================
 # Configuration & Paths
 # =============================================================================
@@ -55,7 +68,7 @@ MODEL_DIR = os.path.join(BASE_DIR, "Models", "O3Power")
 for _d in (DATA_DIR, TELEMETRY_DIR, CALIBRATION_DIR, VALIDATION_DIR, MODEL_DIR):
     os.makedirs(_d, exist_ok=True)
 
-# Power model coefficients  (O3_max = A/F + B)
+# Power model coefficients  (legacy fallback — O3_max = A/F + B)
 POWER_MODEL_A = 1.78
 POWER_MODEL_B = 1.40
 DEFAULT_FLOW_LPM = 4.0
@@ -123,31 +136,13 @@ PROMPT_CONTENT: dict[str, dict[str, str]] = {
 # Conversion helpers  (pure functions — ported from v9)
 # =============================================================================
 def predict_o3_from_power(power_pct: float, flow_lpm: float) -> float:
-    """Piecewise model: threshold → linear ramp → saturation."""
-    if power_pct <= 0 or flow_lpm <= 0:
-        return 0.0
-    o3_max = POWER_MODEL_A / flow_lpm + POWER_MODEL_B
-    if power_pct < 20:
-        scaling = (power_pct / 20) * 0.1
-    elif power_pct <= 75:
-        scaling = 0.1 + (power_pct - 20) / 55 * 0.9
-    else:
-        scaling = 1.0
-    return o3_max * scaling
+    """Predict O3 %vol from power %, using active model if available."""
+    return _model_predict_o3(power_pct, flow_lpm, S.active_model)
 
 
 def predict_power_from_o3(o3_pct: float, flow_lpm: float) -> float:
-    """Inverse of predict_o3_from_power."""
-    if o3_pct <= 0 or flow_lpm <= 0:
-        return 0.0
-    o3_max = POWER_MODEL_A / flow_lpm + POWER_MODEL_B
-    scaling = o3_pct / o3_max
-    if scaling >= 1.0:
-        return 100.0
-    elif scaling <= 0.1:
-        return (scaling / 0.1) * 20
-    else:
-        return 20 + (scaling - 0.1) / 0.9 * 55
+    """Predict power % from O3 %vol, using active model if available."""
+    return _model_predict_power(o3_pct, flow_lpm, S.active_model)
 
 
 def o3_pct_to_mg_per_s(o3_pct: float, flow_lpm: float) -> float:
@@ -171,9 +166,8 @@ def g_at_time_to_mg_per_s(grams: float, minutes: float = 30.0) -> float:
 
 
 def generate_power_curve(flow_lpm: float):
-    pwr = np.linspace(0, 100, 101)
-    o3 = [predict_o3_from_power(p, flow_lpm) for p in pwr]
-    return pwr, o3
+    """Generate power/O3 curve arrays for plotting, using active model."""
+    return _model_generate_curve(flow_lpm, S.active_model)
 
 
 # =============================================================================
@@ -212,6 +206,9 @@ class SystemState:
         self.seq_phase: str = ""           # current phase name from step
         self.seq_progress: float = 0.0     # 0-100
         self.seq_elapsed: float = 0.0      # seconds
+        self.seq_start_time: float = 0.0   # time.time() when sequence confirmed
+        self.seq_confirmed: bool = False   # True after ESP32 confirmed start
+        self.seq_cleanup_pending: bool = False  # Set by COMPLETE/ABORTED, consumed by _tick
         self.seq_power: float = 0.0        # power target at current step
         self.seq_step_idx: int = 0         # current step index
         self.seq_step_total: int = 0       # total steps in recipe
@@ -233,6 +230,27 @@ class SystemState:
         self.target_o3_pct: float = 0.0
         self.target_mg_per_s: float = 0.0
         self.target_g_30min: float = 0.0
+        # Active model (loaded from Models/O3Power/)
+        self.active_model: Optional[PowerO3Model] = None
+        self.model_status: str = "No model"  # "Fitted", "Fallback", "No model"
+
+    def load_model_for_current_condition(self) -> None:
+        """Try to load a fitted model matching current flow/O2%."""
+        o2 = compute_effective_o2_pct(self.flow_lpm, self.relay_air_comp)
+        model = load_model_for_condition(MODEL_DIR, self.flow_lpm, o2)
+        if model is not None and model.is_valid:
+            self.active_model = model
+            self.model_status = (
+                f"Sigmoid (R²={model.r_squared:.3f})"
+            )
+            log(
+                f"Model loaded: {model.flow_lpm} LPM / {model.o2_pct}% O2 "
+                f"R²={model.r_squared:.4f}",
+                "info",
+            )
+        else:
+            self.active_model = None
+            self.model_status = "Fallback (piecewise)"
 
     def update_derived(self) -> None:
         self.target_o3_pct = round(
@@ -379,8 +397,8 @@ class _CSVLogger:
                     f"{s.get('power_actual_pct', 0)},"
                     f"{s.get('wiper_voltage', 0)}\n"
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log(f"CSV write error: {exc}", "error")
 
 
 csv_logger = _CSVLogger()
@@ -557,7 +575,9 @@ class TCPServer:
         self._server: Optional[asyncio.AbstractServer] = None
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
-        self._response_q: asyncio.Queue[str] = asyncio.Queue(maxsize=300)
+        # Per-command response matching: {cmd_name: (Event, response_str)}
+        self._pending_responses: dict[str, tuple[asyncio.Event, list]] = {}
+        self._pending_lock = asyncio.Lock()
         self._running = False
 
     # -- lifecycle --------------------------------------------------------
@@ -621,39 +641,51 @@ class TCPServer:
                     line = line.strip()
                     if not line:
                         continue
-                    self._dispatch(line)
+                    await self._dispatch(line)
         except Exception as exc:
             log(f"TCP read error: {exc}", "error")
         finally:
-            log("ESP32 disconnected", "warn")
-            await self._close_client()
-            # Abort sequence observer state on disconnect
-            if S.sequence_active:
-                S.sequence_active = False
-                S.pending_prompt_id = ""
-                S.pending_prompt_text = ""
-                _notify("Sequence aborted — ESP32 disconnected", "negative")
+            # Only close if this coroutine's writer is still the active one.
+            # A newer _on_connect may have already replaced self._writer;
+            # closing it would kill the *new* connection (reconnect race).
+            if self._writer is writer:
+                log("ESP32 disconnected", "warn")
+                await self._close_client()
+                # Abort sequence observer state on disconnect
+                if S.sequence_active:
+                    S.sequence_active = False
+                    S.seq_confirmed = False
+                    S.pending_prompt_id = ""
+                    S.pending_prompt_text = ""
+                    _notify("Sequence aborted — ESP32 disconnected", "negative")
+            else:
+                log(f"Old connection from {addr} cleaned up (new connection active)", "info")
 
     # -- dispatch (routes all incoming lines) ------------------------------
-    def _dispatch(self, line: str) -> None:
+    async def _dispatch(self, line: str) -> None:
         prefix = line.split(",", 1)[0]
-        if prefix == "DATA":
-            sample = parse_data_line(line)
-            if sample:
-                apply_telemetry(sample)
-                data_buf.append(sample)
-                csv_logger.write(sample)
-        elif prefix == "RSP":
-            self._handle_rsp(line)
-        elif prefix == "STATE":
-            self._handle_state(line)
-        elif prefix == "SEQ":
-            self._handle_seq(line)
-        else:
-            log(f"Unknown line: {line[:80]}", "warn")
+        try:
+            if prefix == "DATA":
+                sample = parse_data_line(line)
+                if sample:
+                    apply_telemetry(sample)
+                    data_buf.append(sample)
+                    csv_logger.write(sample)
+            elif prefix == "RSP":
+                self._handle_rsp(line)
+            elif prefix == "STATE":
+                self._handle_state(line)
+            elif prefix == "SEQ":
+                await self._handle_seq(line)
+            else:
+                log(f"Unknown line: {line[:80]}", "warn")
+        except Exception as exc:
+            log(f"Dispatch error ({prefix}): {exc}  line={line[:80]}", "error")
 
     # -- RSP handler -------------------------------------------------------
     def _handle_rsp(self, line: str) -> None:
+        # Self-handled RSPs: parse inline, mark matched to suppress warning
+        matched = False
         if "time_sync" in line and "esp=" in line:
             m_esp = re.search(r"esp=(\d+)", line)
             m_pc = re.search(r"pc=(\d+)", line)
@@ -663,6 +695,7 @@ class TCPServer:
                 )
                 S.time_synced = True
                 log(f"Time synced (offset={S.esp_time_offset_ms} ms)")
+            matched = True  # time_sync sent via _send_raw, no waiter
         # Relay-get parsing
         if "relay_get" in line:
             for part in line.split(","):
@@ -677,10 +710,20 @@ class TCPServer:
                 elif k == "air_comp":
                     S.relay_air_comp = on
         log(f"<- {line}", "recv")
-        try:
-            self._response_q.put_nowait(line)
-        except asyncio.QueueFull:
-            pass
+        # Route RSP to the matching send_command waiter by command name
+        # RSP format: RSP,OK|ERR,<cmd_name>,<response_data>
+        # Note: _pending_responses access is safe without lock here because
+        # _handle_rsp runs synchronously in the asyncio event loop (single-
+        # threaded), and send_command only modifies the dict at await points.
+        parts = line.split(",")
+        rsp_cmd = parts[2].strip() if len(parts) >= 3 else ""
+        if rsp_cmd and rsp_cmd in self._pending_responses:
+            event, result_box = self._pending_responses[rsp_cmd]
+            result_box.append(line)
+            event.set()
+            matched = True
+        if not matched:
+            log(f"Unmatched RSP (no waiter for '{rsp_cmd}'): {line[:60]}", "warn")
 
     # -- STATE push (on connect/reconnect) --------------------------------
     def _handle_state(self, line: str) -> None:
@@ -706,7 +749,7 @@ class TCPServer:
         log("STATE sync from ESP32", "state")
 
     # -- SEQ message handler (generic recipe protocol) ---------------------
-    def _handle_seq(self, line: str) -> None:
+    async def _handle_seq(self, line: str) -> None:
         """Handle all SEQ,<type>,<action>,... messages from recipe executor."""
         parts = line.split(",")
         if len(parts) < 3:
@@ -832,6 +875,8 @@ class TCPServer:
             log(
                 f"Sequence '{seq_type}' complete ({elapsed:.0f}s)", "seq"
             )
+            # Show "saving" phase while we save/analyze
+            S.seq_phase = "saving"
             # Post-sequence analysis
             if seq_type == "calibrate":
                 if S.cal_samples:
@@ -868,22 +913,27 @@ class TCPServer:
                     f"{seq_type.title()} completed ({elapsed:.0f}s)",
                     "positive",
                 )
-            S.sequence_active = False
+            # Release UI immediately. Relay/power cleanup is deferred to
+            # _tick (next 1s cycle) because sending commands from inside
+            # _handle_seq deadlocks the TCP read loop.
             S.pending_prompt_id = ""
             S.pending_prompt_text = ""
-            # Dashboard-side cleanup: power=0, all relays off
-            asyncio.create_task(_sequence_cleanup("complete"))
+            S.seq_phase = "complete"
+            S.sequence_active = False
+            S.seq_cleanup_pending = True
+            log("Sequence complete — cleanup deferred to _tick", "seq")
 
         elif action == "ABORTED":
             # SEQ,calibrate,ABORTED,user_request
             reason = ",".join(parts[3:]) if len(parts) > 3 else "unknown"
             log(f"Sequence '{seq_type}' aborted: {reason}", "seq")
-            S.sequence_active = False
+            _notify(f"{seq_type.title()} aborted: {reason}", "warning")
             S.pending_prompt_id = ""
             S.pending_prompt_text = ""
-            _notify(f"{seq_type.title()} aborted: {reason}", "warning")
-            # Dashboard-side cleanup: power=0, all relays off
-            asyncio.create_task(_sequence_cleanup("abort"))
+            S.seq_phase = "aborted"
+            S.sequence_active = False
+            S.seq_cleanup_pending = True
+            log("Sequence aborted — cleanup deferred to _tick", "seq")
 
         else:
             log(f"Unknown SEQ action: {action} in {line[:80]}", "warn")
@@ -900,23 +950,38 @@ class TCPServer:
             return False
 
     async def send_command(self, cmd: str, timeout: float = 2.0) -> Optional[str]:
-        """Send ``CMD,<cmd>\\n`` and wait for the matching RSP."""
+        """Send ``CMD,<cmd>\\n`` and wait for the matching RSP by command name.
+
+        Uses per-command Event+result so concurrent callers don't steal
+        each other's responses (fixes the relay_get vs calibrate race).
+        """
         if not S.connected:
             return None
-        while not self._response_q.empty():
-            try:
-                self._response_q.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+        # Extract command name (first token before any comma args)
+        cmd_name = cmd.split(",", 1)[0]
+        # Set up a per-command waiter
+        event = asyncio.Event()
+        result_box: list[str] = []
+        async with self._pending_lock:
+            # If there's already a pending waiter for this command, clear it
+            if cmd_name in self._pending_responses:
+                old_event, _ = self._pending_responses[cmd_name]
+                old_event.set()  # unblock any stale waiter
+            self._pending_responses[cmd_name] = (event, result_box)
         if not await self._send_raw(f"CMD,{cmd}\n"):
+            async with self._pending_lock:
+                self._pending_responses.pop(cmd_name, None)
             return None
         log(f"-> {cmd}", "send")
         try:
-            resp = await asyncio.wait_for(self._response_q.get(), timeout)
-            return resp
+            await asyncio.wait_for(event.wait(), timeout)
+            return result_box[0] if result_box else None
         except asyncio.TimeoutError:
             log(f"timeout: {cmd}", "error")
             return None
+        finally:
+            async with self._pending_lock:
+                self._pending_responses.pop(cmd_name, None)
 
 
 tcp: TCPServer  # assigned in startup
@@ -926,10 +991,16 @@ tcp: TCPServer  # assigned in startup
 # Command helpers  (all async; COMMA-separated — never colons)
 # =============================================================================
 async def cmd_set_power(pct: int) -> bool:
+    old = S.power_target_pct
     S.power_target_pct = int(pct)
     S.update_derived()
     resp = await tcp.send_command(f"power_set,{int(pct)}")
-    return resp is not None and "OK" in resp
+    ok = resp is not None and "OK" in resp
+    if not ok:
+        # Roll back — ESP32 never ACK'd, keep UI consistent
+        S.power_target_pct = old
+        S.update_derived()
+    return ok
 
 
 async def cmd_set_relay(name: str, on: bool) -> bool:
@@ -941,6 +1012,8 @@ async def cmd_set_relay(name: str, on: bool) -> bool:
             S.relay_o2_conc = on
         elif name == "air_comp":
             S.relay_air_comp = on
+            # Air comp changes effective O2% → may need different model
+            S.load_model_for_current_condition()
         return True
     return False
 
@@ -991,14 +1064,17 @@ async def _start_calibration(**kwargs) -> bool:
 
     # Pre-flight: ensure power starts at 0%
     log("Pre-flight: setting power to 0%", "seq")
-    await cmd_set_power(0)
+    if not await cmd_set_power(0):
+        _notify("Calibration aborted — failed to set power to 0%", "negative")
+        return False
 
-    # Enter running state (ESP32 starts immediately — no loading phase)
-    S.sequence_active = True
+    # Prepare observer state (but do NOT set sequence_active yet)
     S.seq_type = "calibrate"
     S.seq_phase = "starting"
     S.seq_progress = 0.0
     S.seq_elapsed = 0.0
+    S.seq_start_time = 0.0
+    S.seq_confirmed = False
     S.seq_step_idx = 0
     S.seq_step_total = 203  # 1 baseline + 101 up + 101 down
     S.pending_prompt_id = ""
@@ -1010,11 +1086,15 @@ async def _start_calibration(**kwargs) -> bool:
     # Single command — ESP32 loads recipe + starts execution
     resp = await tcp.send_command(f"calibrate,flow={flow}", timeout=5.0)
     if resp and "OK" in resp:
+        S.sequence_active = True
+        S.seq_confirmed = True
+        S.seq_start_time = time.time()
         log(f"Calibration started: flow={flow} LPM, 203 steps", "seq")
+        _notify("Calibration started", "positive")
         return True
 
     log(f"Calibration failed: {resp}", "error")
-    S.sequence_active = False
+    _notify(f"Calibration failed to start: {resp}", "negative")
     return False
 
 
@@ -1030,7 +1110,9 @@ async def _start_validation(**kwargs) -> bool:
 
     # Pre-flight: ensure power starts at 0%
     log("Pre-flight: setting power to 0%", "seq")
-    await cmd_set_power(0)
+    if not await cmd_set_power(0):
+        _notify("Validation aborted — failed to set power to 0%", "negative")
+        return False
 
     # Pre-flight: belt-and-suspenders relay enable (executor also applies)
     if not S.relay_o2_conc:
@@ -1043,12 +1125,13 @@ async def _start_validation(**kwargs) -> bool:
         log("Pre-disabling air compressor relay", "seq")
         await cmd_set_relay("air_comp", False)
 
-    # Enter sequence state
-    S.sequence_active = True
+    # Prepare observer state (do NOT set sequence_active yet)
     S.seq_type = "validate"
-    S.seq_phase = "loading"
+    S.seq_phase = "starting"
     S.seq_progress = 0.0
     S.seq_elapsed = 0.0
+    S.seq_start_time = 0.0
+    S.seq_confirmed = False
     S.seq_step_idx = 0
     S.seq_step_total = 5
     S.pending_prompt_id = ""
@@ -1061,11 +1144,15 @@ async def _start_validation(**kwargs) -> bool:
         f"validate,power={power},flow={flow}", timeout=5.0
     )
     if resp and "OK" in resp:
+        S.sequence_active = True
+        S.seq_confirmed = True
+        S.seq_start_time = time.time()
         log(f"Validation running: power={power}%, flow={flow} LPM", "seq")
+        _notify("Validation started", "positive")
         return True
 
     log(f"validate failed: {resp}", "error")
-    S.sequence_active = False
+    _notify(f"Validation failed to start: {resp}", "negative")
     return False
 
 
@@ -1082,12 +1169,19 @@ async def cmd_sequence_stop() -> bool:
     """Abort sequence + full cleanup (power=0, all relays off)."""
     result = await cmd_sequence_abort()
     await _sequence_cleanup("stop")
+    S.seq_phase = "aborted"
+    S.sequence_active = False
     return result
 
 
 async def _sequence_cleanup(source: str = "unknown") -> None:
-    """Power=0% and all relays off. Belt-and-suspenders with ESP32 cleanup."""
+    """Power=0% and all relays off — only if ESP32 confirmed sequence start."""
+    if not S.seq_confirmed and source != "stop":
+        log(f"Skipping cleanup ({source}): ESP32 never confirmed start", "seq")
+        S.seq_confirmed = False
+        return
     log(f"Dashboard cleanup ({source}): power=0, all relays off", "seq")
+    S.seq_confirmed = False
     await cmd_set_power(0)
     await cmd_set_relay("air_comp", False)
     await cmd_set_relay("ozone_gen", False)
@@ -1209,6 +1303,7 @@ async def index():
             return
         _updating = True
         S.flow_lpm = float(e.value)
+        S.load_model_for_current_condition()
         _sync_derived_to_ui()
         _update_power_curve()
         _updating = False
@@ -1628,6 +1723,144 @@ async def index():
 
                     _render_cal_files()
 
+                    ui.separator().classes("q-my-sm")
+
+                    # ---- Model Fitting ----------------------------------
+                    ui.label("Model Fitting").classes("text-subtitle2")
+                    ui.markdown(
+                        "Fit a 4-parameter sigmoid model to calibration data. "
+                        "All files for the selected condition are auto-aggregated."
+                    ).classes("text-caption text-grey q-mb-sm")
+
+                    model_status_card = ui.card().classes(
+                        "w-full q-pa-sm q-mb-sm"
+                    ).props("flat bordered")
+                    with model_status_card:
+                        with ui.row().classes("items-center q-gutter-sm"):
+                            model_icon = ui.icon("model_training", size="sm")
+                            model_status_lbl = ui.label(S.model_status).classes(
+                                "text-body2"
+                            )
+
+                    model_fit_container = ui.column().classes("w-full")
+
+                    def _render_model_fitting() -> None:
+                        """Render model fitting controls for each condition."""
+                        model_fit_container.clear()
+                        files = list_calibration_files()
+                        existing_models = list_saved_models(MODEL_DIR)
+                        model_map = {
+                            (m.flow_lpm, m.o2_pct): m for m in existing_models
+                        }
+                        with model_fit_container:
+                            if not files:
+                                ui.label(
+                                    "Run a calibration first"
+                                ).classes("text-caption text-grey")
+                                return
+                            for (lpm, o2) in sorted(files):
+                                flist = files[(lpm, o2)]
+                                existing = model_map.get((lpm, o2))
+                                with ui.card().classes(
+                                    "w-full q-pa-sm q-mb-xs"
+                                ).props("flat bordered"):
+                                    with ui.row().classes(
+                                        "items-center q-gutter-sm"
+                                    ):
+                                        ui.label(
+                                            f"{lpm} LPM / {o2}% O2"
+                                        ).classes("text-weight-bold")
+                                        ui.label(
+                                            f"({len(flist)} file{'s' if len(flist) != 1 else ''})"
+                                        ).classes("text-caption text-grey")
+                                        if existing and existing.is_valid:
+                                            ui.badge(
+                                                f"R²={existing.r_squared:.3f}",
+                                                color="green",
+                                            )
+                                        else:
+                                            ui.badge(
+                                                "No model",
+                                                color="grey",
+                                            )
+                                        ui.space()
+
+                                        async def _do_fit(
+                                            _lpm=lpm, _o2=o2, _files=flist,
+                                        ):
+                                            await _fit_model_for_condition(
+                                                _files, _lpm, _o2,
+                                            )
+
+                                        ui.button(
+                                            "Fit Model",
+                                            icon="analytics",
+                                            on_click=_do_fit,
+                                            color="primary",
+                                        ).props("dense size=sm")
+
+                                    if existing and existing.is_valid:
+                                        ui.label(
+                                            f"L={existing.L:.3f}  k={existing.k:.3f}  "
+                                            f"P0={existing.P0:.1f}  b={existing.b:.3f}  "
+                                            f"RMSE={existing.rmse:.4f}  n={existing.n_points}"
+                                        ).classes(
+                                            "text-caption text-grey q-ml-md"
+                                        )
+
+                    _render_model_fitting()
+
+                    # Model fit result notification area
+                    fit_result_container = ui.column().classes("w-full")
+
+                    async def _fit_model_for_condition(
+                        filepaths: list[str],
+                        lpm: float,
+                        o2: int,
+                    ) -> None:
+                        """Fit sigmoid model and save to Models/O3Power/."""
+                        try:
+                            model = fit_sigmoid_model(
+                                filepaths, flow_lpm=lpm, o2_pct=o2,
+                            )
+                            path = save_model_json(model, MODEL_DIR)
+                            log(
+                                f"Model fitted: {model.summary()} -> "
+                                f"{os.path.basename(path)}",
+                                "cal",
+                            )
+                            _notify(
+                                f"Model fitted: R²={model.r_squared:.4f}, "
+                                f"RMSE={model.rmse:.4f}",
+                                "positive",
+                            )
+                            # Reload active model if this condition matches
+                            S.load_model_for_current_condition()
+                            _update_model_status()
+                            _render_model_fitting()
+                            _update_power_curve()
+                            _sync_derived_to_ui()
+                        except Exception as exc:
+                            log(f"Model fit failed: {exc}", "error")
+                            _notify(f"Model fit failed: {exc}", "negative")
+
+                    def _update_model_status() -> None:
+                        """Update the model status label."""
+                        if S.active_model and S.active_model.is_valid:
+                            model_icon.name = "check_circle"
+                            model_icon.classes("text-green")
+                            model_status_lbl.text = (
+                                f"Active: {S.active_model.flow_lpm} LPM / "
+                                f"{S.active_model.o2_pct}% O2 — "
+                                f"{S.model_status}"
+                            )
+                        else:
+                            model_icon.name = "info"
+                            model_icon.classes("text-orange")
+                            model_status_lbl.text = S.model_status
+
+                    _update_model_status()
+
                 # ---- Validation section ---------------------------------
                 with ui.expansion("Validation", icon="verified").classes(
                     "w-full q-mb-sm"
@@ -1842,12 +2075,31 @@ async def index():
     _relay_ts: float = 0.0
     _echart_has_data: bool = False
     _last_prompt_id: str = ""
+    _tick_running: bool = False
 
     async def _tick() -> None:
+        nonlocal _updating, _relay_ts, _echart_has_data, _last_prompt_id, _tick_running
+
+        # Prevent overlapping _tick invocations
+        if _tick_running:
+            return
+        _tick_running = True
+        try:
+            await _tick_inner()
+        finally:
+            _tick_running = False
+
+    async def _tick_inner() -> None:
         nonlocal _updating, _relay_ts, _echart_has_data, _last_prompt_id
 
-        # -- sync relays every ~10 s --------------------------------------
-        if S.connected and time.time() - _relay_ts > 10:
+        # -- deferred sequence cleanup (set by COMPLETE/ABORTED handler) ---
+        if S.seq_cleanup_pending and S.connected:
+            S.seq_cleanup_pending = False
+            log("Running deferred sequence cleanup from _tick", "seq")
+            await _sequence_cleanup("deferred")
+
+        # -- sync relays every ~10 s (SKIP during active sequences) --------
+        if S.connected and not S.sequence_active and time.time() - _relay_ts > 10:
             await cmd_sync_relays()
             _relay_ts = time.time()
 
@@ -1855,19 +2107,13 @@ async def index():
         if S.connected:
             conn_badge.text = "Connected"
             conn_badge.props('color="green"')
-            conn_badge._classes = [
-                c for c in conn_badge._classes if c != "conn-blink"
-            ]
-            if "conn-steady" not in conn_badge._classes:
-                conn_badge._classes.append("conn-steady")
+            conn_badge.classes(remove="conn-blink")
+            conn_badge.classes(add="conn-steady")
         else:
             conn_badge.text = "Disconnected"
             conn_badge.props('color="red"')
-            conn_badge._classes = [
-                c for c in conn_badge._classes if c != "conn-steady"
-            ]
-            if "conn-blink" not in conn_badge._classes:
-                conn_badge._classes.append("conn-blink")
+            conn_badge.classes(remove="conn-steady")
+            conn_badge.classes(add="conn-blink")
         conn_badge.update()
 
         btn_air.props(f'color={"green" if S.relay_air_comp else "grey"}')
@@ -1900,26 +2146,44 @@ async def index():
                 "validate": "VALIDATE",
             }
             display_name = type_names.get(S.seq_type, S.seq_type.upper())
-            # Phase-aware banner text
+
+            # Phase-aware descriptive labels
             phase = S.seq_phase
-            if phase == "loading":
-                seq_name_lbl.text = f"{display_name} — Loading recipe..."
+            _PHASE_DESCS = {
+                "loading": "Preparing...",
+                "starting": f"Starting @ {S.cal_lpm:.1f} LPM O2 w/o air",
+                "started": "Initializing...",
+                "relay_setup": "Enabling O2 + O3 relays",
+                "stabilizing": "Equipment warm-up (~3s)",
+                "baseline": f"Initial baseline (0% power)",
+                "sweep_up": f"Sweep up (0→100%)",
+                "sweep_down": f"Sweep down (100→0%)",
+                "saving": "Saving file...",
+                "complete": "Complete!",
+            }
+            phase_desc = _PHASE_DESCS.get(phase, phase.replace("_", " ").title())
+
+            if phase in ("loading", "starting", "started"):
+                seq_name_lbl.text = f"{display_name} — {phase_desc}"
                 seq_phase_lbl.text = f"{S.seq_step_total} steps"
             elif phase == "relay_setup":
-                seq_name_lbl.text = f"{display_name} — Enabling relays..."
+                seq_name_lbl.text = f"{display_name} — {phase_desc}"
                 seq_phase_lbl.text = ""
             elif phase == "stabilizing":
-                seq_name_lbl.text = f"{display_name} — Equipment stabilizing..."
+                seq_name_lbl.text = f"{display_name} — {phase_desc}"
                 seq_phase_lbl.text = "~3s warm-up"
-            elif phase == "started":
-                seq_name_lbl.text = f"{display_name} — Starting..."
-                seq_phase_lbl.text = ""
+            elif phase in ("saving", "complete"):
+                seq_name_lbl.text = f"{display_name} — {phase_desc}"
+                seq_phase_lbl.text = f"{len(S.cal_samples)} samples"
             else:
                 seq_name_lbl.text = (
                     f"{display_name} — Step {S.seq_step_idx}/{S.seq_step_total}"
                 )
-                seq_phase_lbl.text = phase.replace("_", " ").title()
+                seq_phase_lbl.text = phase_desc
             seq_progress_bar.value = S.seq_progress / 100
+            # Live elapsed time from start timestamp
+            if S.seq_start_time > 0:
+                S.seq_elapsed = time.time() - S.seq_start_time
             mins = int(S.seq_elapsed) // 60
             secs = int(S.seq_elapsed) % 60
             seq_elapsed_lbl.text = f"{mins}:{secs:02d}"
@@ -1999,8 +2263,24 @@ async def index():
 
         # -- calibration observer UI --------------------------------------
         if S.sequence_active and S.seq_type == "calibrate":
+            _CAL_TAB_LABELS = {
+                "loading": "Preparing calibration",
+                "starting": f"Starting calibration @ {S.cal_lpm:.1f} LPM",
+                "started": "Initializing",
+                "relay_setup": "Enabling O2 + O3 relays",
+                "stabilizing": "Equipment warm-up",
+                "baseline": "Initial baseline (0% power)",
+                "sweep_up": f"Sweep up (0→100%) @ {S.seq_power:.0f}%",
+                "sweep_down": f"Sweep down (100→0%) @ {S.seq_power:.0f}%",
+                "saving": "Saving calibration file",
+                "complete": "Calibration complete",
+            }
+            phase_text = _CAL_TAB_LABELS.get(
+                S.seq_phase,
+                S.seq_phase.replace("_", " ").title()
+            )
             cal_phase_lbl.text = (
-                f"Phase: {S.seq_phase.replace('_', ' ').title()}  "
+                f"Phase: {phase_text}  "
                 f"Step {S.seq_step_idx}/{S.seq_step_total}"
             )
             cal_progress.value = S.seq_progress / 100
@@ -2011,10 +2291,14 @@ async def index():
             )
             # Highlight active/completed phase cards
             phase_order = ["baseline", "sweep_up", "sweep_down"]
-            active_idx = (
-                phase_order.index(S.seq_phase)
-                if S.seq_phase in phase_order else -1
-            )
+            # "saving" and "complete" mean all sweep phases are done
+            if S.seq_phase in ("saving", "complete"):
+                active_idx = len(phase_order)  # all complete
+            else:
+                active_idx = (
+                    phase_order.index(S.seq_phase)
+                    if S.seq_phase in phase_order else -1
+                )
             for i, pk in enumerate(phase_order):
                 card = cal_step_cards.get(pk)
                 if card is None:
@@ -2127,6 +2411,8 @@ async def _startup() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args, _ = parser.parse_known_args()
+    # Load fitted model for current operating condition
+    S.load_model_for_current_condition()
     tcp = TCPServer(args.port)
     await tcp.start()
 

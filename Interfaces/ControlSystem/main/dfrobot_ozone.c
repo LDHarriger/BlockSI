@@ -51,6 +51,9 @@ static struct {
     float min_reading_ppm;
     uint32_t reading_count;
     
+    // Error tracking — suppress log spam after repeated I2C failures
+    uint32_t consecutive_errors;
+    
     // Alarm state
     bool alarm_enabled;
     float alarm_warning;
@@ -78,7 +81,13 @@ static esp_err_t sensor_write_reg(uint8_t reg, uint8_t value)
     esp_err_t ret = i2c_master_write_to_device(s_sensor.i2c_port, s_sensor.i2c_addr,
                                                 data, 2, pdMS_TO_TICKS(100));
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Write failed: %s", esp_err_to_name(ret));
+        s_sensor.consecutive_errors++;
+        if (s_sensor.consecutive_errors <= 10) {
+            ESP_LOGE(TAG, "Write failed: %s", esp_err_to_name(ret));
+        } else if (s_sensor.consecutive_errors % 60 == 0) {
+            ESP_LOGW(TAG, "Write still failing (%lu consecutive errors): %s",
+                     s_sensor.consecutive_errors, esp_err_to_name(ret));
+        }
     }
     return ret;
 }
@@ -91,7 +100,13 @@ static esp_err_t sensor_read_reg(uint8_t reg, uint8_t *data, size_t len)
     esp_err_t ret = i2c_master_write_read_device(s_sensor.i2c_port, s_sensor.i2c_addr,
                                                   &reg, 1, data, len, pdMS_TO_TICKS(100));
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Read reg 0x%02X failed: %s", reg, esp_err_to_name(ret));
+        s_sensor.consecutive_errors++;
+        if (s_sensor.consecutive_errors <= 10) {
+            ESP_LOGE(TAG, "Read reg 0x%02X failed: %s", reg, esp_err_to_name(ret));
+        } else if (s_sensor.consecutive_errors % 60 == 0) {
+            ESP_LOGW(TAG, "Read still failing (%lu consecutive errors): %s",
+                     s_sensor.consecutive_errors, esp_err_to_name(ret));
+        }
     }
     return ret;
 }
@@ -264,7 +279,9 @@ esp_err_t dfrobot_o3_read(float *ppm)
     // Step 1: Trigger a passive read by writing to SET_PASSIVE register
     esp_err_t ret = sensor_write_reg(REG_SET_PASSIVE, TRIGGER_PASSIVE_READ);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to trigger read");
+        if (s_sensor.consecutive_errors <= 10) {
+            ESP_LOGE(TAG, "Failed to trigger read");
+        }
         return ret;
     }
     
@@ -276,8 +293,19 @@ esp_err_t dfrobot_o3_read(float *ppm)
     uint8_t data[2];
     ret = sensor_read_reg(REG_PASSIVE_DATA_HIGH, data, 2);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read data");
+        if (s_sensor.consecutive_errors <= 10) {
+            ESP_LOGE(TAG, "Failed to read data");
+        }
         return ret;
+    }
+    
+    // Successful read — reset error counter
+    if (s_sensor.consecutive_errors > 0) {
+        if (s_sensor.consecutive_errors > 10) {
+            ESP_LOGI(TAG, "Sensor recovered after %lu consecutive errors",
+                     s_sensor.consecutive_errors);
+        }
+        s_sensor.consecutive_errors = 0;
     }
     
     // Step 4: Combine bytes (big-endian) - value is in PPB

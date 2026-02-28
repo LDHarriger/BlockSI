@@ -5,6 +5,47 @@
 
 ---
 
+### 2026-02-28: 4-parameter sigmoid model for Power→O3 prediction
+
+**Context**: The dashboard used a hardcoded piecewise model
+(`POWER_MODEL_A=1.78`, `POWER_MODEL_B=1.40`) for predicting O3 from
+power %. This model had three segments (threshold/ramp/saturation) with
+arbitrary breakpoints at 20% and 75% power. Calibration data showed
+the real relationship is a smooth sigmoid, and the piecewise model could
+not be updated from calibration results — it required manual editing of
+constants in the source code.
+
+**Decision**:
+1. **4-parameter sigmoid**: `O3 = L / (1 + exp(-k*(P - P0))) + b`
+   - `L` = asymptote height (max O3 above baseline)
+   - `k` = steepness
+   - `P0` = inflection point (power % at half-max)
+   - `b` = baseline offset
+2. **One model per (flow_lpm, o2_pct)**: Each operating condition gets
+   its own model file in `Models/O3Power/` as JSON.
+3. **Analysis module**: `Interfaces/PC/analysis/power_o3_model.py` — standalone
+   module with fitting, persistence, and prediction functions.
+4. **Auto-aggregation**: All calibration CSVs for a (LPM, O2%) condition
+   are automatically aggregated for fitting. User can exclude files.
+5. **Manual fit only**: User clicks "Fit Model" button — no auto-fit on
+   calibration completion.
+6. **Graceful fallback**: If no fitted model exists for the current
+   condition, the original piecewise model is used automatically.
+7. **Model auto-loading**: Active model reloads on startup, LPM change,
+   and air compressor toggle (which changes effective O2%).
+
+**Rationale**: A sigmoid is the natural shape for an ozone generator's
+power-concentration curve (electrochemical process with saturation).
+The 4 parameters are interpretable and bounded. `scipy.optimize.curve_fit`
+with bounds produces robust fits — initial test with 3 calibration files
+yielded R²=0.9982 vs the piecewise model which had no formal goodness
+measure. Per-condition models ensure accuracy across different flow rates
+and O2 concentrations.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
 ### 2026-02-28: Single-command calibration — ESP32 owns sweep pattern
 
 **Context**: The recipe-based calibration protocol required 221 commands

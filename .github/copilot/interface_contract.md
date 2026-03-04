@@ -1,6 +1,6 @@
 # BlockSI Interface Contract
 
-> Last updated: 2026-02-27
+> Last updated: 2026-03-04
 >
 > This is the **single source of truth** for everything shared between
 > the ESP32 firmware and the PC dashboard.  Both agents MUST read this
@@ -161,13 +161,24 @@ needed.  Emits standard `SEQ,calibrate,...` messages during execution.
 
 | Command | Args | Response (OK) | Notes |
 |---------|------|---------------|-------|
-| `calibrate` | `flow=<lpm>` (optional, default 4.0) | `running,steps=203,flow=<lpm>` | Loads + runs 203-step sweep.  Relay prereqs: O2 ON, O3 ON, Air OFF |
+| `calibrate` | `flow=<lpm>,air_comp=<0\|1>,random=<p1,p2,...>` (all optional) | `running,steps=<N>,flow=<lpm>` | Loads + runs sweep.  Relay prereqs: O2 ON if flow>0, O3 ON, Air per `air_comp`.  Random levels appended if provided. |
 
 **Sweep pattern** (built internally by `seq_executor_load_calibration()`):
 - Step 0: 0% power, 15 samples (~37s baseline)
 - Steps 1-101: Sweep up 0→100% in 1% increments, 2 samples each
 - Steps 102-202: Sweep down 100→0% in 1% increments, 2 samples each
-- Total: 203 steps, ~419 samples, ~17 minutes
+- Steps 203+: Optional random hold steps at PC-generated power levels, 20 samples each
+- Total: 203 + len(random_levels) steps
+
+**Random phase**: PC generates stratified levels (N unique values across 0-100%), arranged
+ascending then descending (mountain shape) to minimise pot travel.  Levels sent as
+comma-separated integers in the `random=` arg: e.g. `random=5,22,38,55,71,84,98,98,84,71,55,38,22,5`.
+With 0 random levels (default), calibration behaves identically to prior behaviour.
+
+**Air compressor**: `air_comp=1` enables the air compressor relay for **all phases** (including
+baseline and sweeps).  `air_comp=0` (default) keeps it off.  If O2 LPM = 0 and air_comp = 0,
+calibration is rejected by the PC GUI before the command is sent.  If flow = 0 but air_comp = 1,
+the O2 concentrator relay is left OFF (air-only mode).
 
 **Stop/status** via standard sequence commands:
 
@@ -193,7 +204,7 @@ precise sample-counted holds, streaming per-sample data back.
 | Command | Args | Response (OK) | Notes |
 |---------|------|---------------|-------|
 | `sequence_start` | `<type>,<key=value params>` | `type=<type>,status=loading` | Begins recipe loading.  Params: `flow=4.0,relay_o2=1,relay_o3=1,relay_air=0`.  Relay params: omit=don't change, 0=OFF, 1=ON |
-| `seq_step` | `<idx>,<pwr>,<hold>,<phase>[,<air_comp>]` | `step=<idx>,pwr=<pwr>,hold=<hold>,air=<0\|1>` | Add step.  E.g. `0,0,15,baseline` or `5,50,5,random,1`.  Max 256 steps.  `air_comp` optional (default 0) |
+| `seq_step` | `<idx>,<pwr>,<hold>,<phase>[,<air_comp>]` | `step=<idx>,pwr=<pwr>,hold=<hold>,air=<0\|1>` | Add step.  E.g. `0,0,15,baseline` or `5,50,5,random,1`.  Max 512 steps.  `air_comp` optional (default 0) |
 | `seq_prompt` | `<before>,<id>,<text>` | `prompt=<id>,before=<before>` | Add prompt.  E.g. `0,check_flow,Verify O2 flow`.  Max 16 |
 | `seq_run` | none | `running` | Sort steps, apply relay prereqs (3s stabilization), start execution task |
 

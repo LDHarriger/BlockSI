@@ -94,11 +94,34 @@ static esp_err_t sensor_write_reg(uint8_t reg, uint8_t value)
 
 /**
  * @brief Read data from specific register
+ * 
+ * Uses separate write/read transactions with 100ms delay between them,
+ * matching the DFRobot Arduino library's i2cReadOzoneData() pattern.
+ * The SEN0321's internal MCU does not support I2C repeated-start (Sr);
+ * it needs a STOP condition and time to prepare the response data.
  */
 static esp_err_t sensor_read_reg(uint8_t reg, uint8_t *data, size_t len)
 {
-    esp_err_t ret = i2c_master_write_read_device(s_sensor.i2c_port, s_sensor.i2c_addr,
-                                                  &reg, 1, data, len, pdMS_TO_TICKS(100));
+    // Step 1: Write register address (separate transaction — STOP at end)
+    esp_err_t ret = i2c_master_write_to_device(s_sensor.i2c_port, s_sensor.i2c_addr,
+                                                &reg, 1, pdMS_TO_TICKS(100));
+    if (ret != ESP_OK) {
+        s_sensor.consecutive_errors++;
+        if (s_sensor.consecutive_errors <= 10) {
+            ESP_LOGE(TAG, "Write reg addr 0x%02X failed: %s", reg, esp_err_to_name(ret));
+        } else if (s_sensor.consecutive_errors % 60 == 0) {
+            ESP_LOGW(TAG, "Write still failing (%lu consecutive errors): %s",
+                     s_sensor.consecutive_errors, esp_err_to_name(ret));
+        }
+        return ret;
+    }
+
+    // Step 2: Critical delay — sensor MCU needs time to prepare data
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Step 3: Read data (separate transaction)
+    ret = i2c_master_read_from_device(s_sensor.i2c_port, s_sensor.i2c_addr,
+                                       data, len, pdMS_TO_TICKS(100));
     if (ret != ESP_OK) {
         s_sensor.consecutive_errors++;
         if (s_sensor.consecutive_errors <= 10) {
@@ -256,11 +279,17 @@ void dfrobot_o3_deinit(void)
 
 bool dfrobot_o3_is_present(void)
 {
-    uint8_t data;
-    esp_err_t ret = i2c_master_read_from_device(s_sensor.i2c_port, s_sensor.i2c_addr,
-                                                 &data, 1, pdMS_TO_TICKS(50));
+    // Write-only probe: START → ADDR_W → STOP (matches DFRobot begin())
+    // Bare reads can corrupt the sensor's internal register pointer
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (s_sensor.i2c_addr << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(s_sensor.i2c_port, cmd, pdMS_TO_TICKS(50));
+    i2c_cmd_link_delete(cmd);
+
     if (ret == ESP_OK) {
-        ESP_LOGD(TAG, "Device present, probe returned: 0x%02X", data);
+        ESP_LOGD(TAG, "Device present at 0x%02X", s_sensor.i2c_addr);
         return true;
     }
     return false;

@@ -1,32 +1,38 @@
 # Dashboard Agent Summary
 
-> Last updated: 2026-02-28 (Session 9 — Model fitting system + bug fixes)
+> Last updated: 2026-03-04 (Session 10 — Random phase, air toggle, safe standby, single-agent model)
 
 ## Current State
 
-The PC dashboard has been updated to use **single-command calibration**.
-Calibration sends one command (`CMD,calibrate,flow=<lpm>`) — the ESP32 has
-the sweep pattern on-board.  Other sequences (validate) still use the recipe
-protocol.  The PC does ALL analysis.
+The PC dashboard has been updated to use **single-command calibration with optional random phase**.
+Calibration sends one command (`CMD,calibrate,flow=<lpm>,air_comp=<0|1>[,random=<p1,...>]`) — the
+ESP32 runs the sweep autonomously and appends random hold steps if provided.  Other sequences
+(validate) still use the recipe protocol.  The PC does ALL analysis.
 
 | Property | Value |
 |----------|-------|
-| File | `Interfaces/PC/blocksi_dashboard.py` (~2420 lines) |
+| File | `Interfaces/PC/blocksi_dashboard.py` (~2460 lines) |
 | Framework | NiceGUI 3.8.0 (Quasar UI components, WebSocket push) |
 | Python | 3.14 in `.venv` |
 | Dependencies | nicegui, numpy, pandas, plotly, scipy |
 | Run command | `.venv\Scripts\python.exe Interfaces\PC\blocksi_dashboard.py [--port 5000]` |
 | UI port | http://localhost:8080 |
-| Backup | `Interfaces/PC/Old/blocksi_dashboard_pre_observer.py` (pre-observer rewrite) |
+
+## Single-Agent Model (as of 2026-03-04)  `[DECIDED]`
+
+Development has moved from domain-separated agents to a **single agent** handling both
+ESP32 firmware and PC dashboard.  See `decisions_log.md` entry 2026-03-04 and
+`collaboration_protocol.md` for rationale.  This summary and `esp32_agent_summary.md`
+are still maintained as startup documents for new chat sessions.
 
 ## Architecture: "ESP32 = Arms, PC = Brains"  `[IMPLEMENTED]`
 
-**Calibration** — single-command protocol:
+**Calibration** — single-command protocol with optional random phase:
 ```
-  PC → CMD,calibrate,flow=4.0
-  ESP32 → RSP,OK,calibrate,running,steps=203,flow=4.0
+  PC → CMD,calibrate,flow=4.0,air_comp=0,random=5,22,38,...  (random optional)
+  ESP32 → RSP,OK,calibrate,running,steps=233,flow=4.0
   ESP32 → SEQ,calibrate,RELAY,...
-  ESP32 → SEQ,calibrate,STARTED,...
+  ESP32 → SEQ,calibrate,STARTED,steps=233,flow=4.0
   ESP32 → SEQ,calibrate,SAMPLE,...  (per 106-H sample ~2.5s)
   ESP32 → SEQ,calibrate,COMPLETE,...
 ```
@@ -50,9 +56,12 @@ protocol.  The PC does ALL analysis.
 ## Recipe Generators  `[IMPLEMENTED]`
 
 ### Calibration
-- **Single command**: `CMD,calibrate,flow=<lpm>` — ESP32 builds 203 steps internally
-- No recipe generation on PC side (`generate_cal_recipe()` removed)
-- Dashboard sends one command, then observes `SEQ,calibrate,SAMPLE,...` messages
+- **Single command**: `CMD,calibrate,flow=<lpm>,air_comp=<0|1>[,random=<p1,...>]` — ESP32 builds steps internally
+- **Random phase**: PC generates `N` stratified levels, arranged ascending then descending (mountain shape, minimises pot travel), 20 samples per level.  Sent as `random=p1,p2,...` in args.
+- **Air compressor**: `air_comp=` applies to ALL phases (baseline, sweeps, random).  O2 concentrator gated by flow>0.
+- **Validation block**: If LPM=0 AND air_comp=0, GUI shows error and blocks start.
+- **Step total**: `203 + 2*N` (N unique levels visited twice)
+- **Dashboard sends**: `cmd_sequence_start("calibrate", flow=lpm, num_random=N, air_comp=bool)`
 
 ### Validation (`generate_val_recipe`)
 - 5 steps: baseline, spot_low (~33%), spot_high (~66%), target, cooldown
@@ -121,12 +130,13 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 
 | Function | Sends | Notes |
 |----------|-------|-------|
-| `cmd_sequence_start(type, **kwargs)` | For calibrate: single `CMD,calibrate,flow=X`. For validate: full recipe protocol (start → steps → prompts → run) | Calibrate path eliminates all response queue issues |
+| `cmd_sequence_start(type, **kwargs)` | For calibrate: builds stratified random levels, sends `CMD,calibrate,flow=X,air_comp=Y,random=...`. For validate: full recipe protocol | |
 | `cmd_sequence_abort([reason])` | `CMD,sequence_abort[,reason]` | Primary abort command (no cleanup) |
 | `cmd_sequence_stop()` | abort + `_sequence_cleanup` | Full abort with power=0 + all relays off |
-| `_sequence_cleanup(source)` | power_set,0 + air_comp=0 + ozone_gen=0 + o2_conc=0 | Belt-and-suspenders with ESP32's own cleanup |
-| `cmd_sequence_confirm()` | `CMD,sequence_confirm` | No prompt_id arg (ESP32 unblocks pending) |
-| `cmd_emergency_stop()` | abort + power_set,0 + air_comp=0 + ozone_gen=0 + o2_conc=0 | All relays off, always active |
+| `_safe_standby()` | power=0, ozone_gen OFF, o2_conc OFF, air_comp OFF | **Unconditional** — no guards, always executes |
+| `_sequence_cleanup(source)` | Clears seq_confirmed, always calls `_safe_standby()` | Replaces old guarded pattern |
+| `cmd_sequence_confirm()` | `CMD,sequence_confirm` | |
+| `cmd_emergency_stop()` | abort + `_safe_standby()` | Always active |
 
 ## UI Layout (4 tabs)  `[IMPLEMENTED]`
 
@@ -150,7 +160,7 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 
 ### Power Tab (3 expansions)
 1. **Power Control**: Slider, presets, curve (Plotly), linked settings, E-STOP
-2. **Calibration**: LPM input, Start/Stop, 3 phase cards (Baseline, Sweep Up, Sweep Down), progress, ECharts scatter (Sweep Up + Sweep Down only), file browser
+2. **Calibration**: LPM input | # Rnd Lvls input | Air ON toggle | Start/Stop, 4 phase cards (Baseline, Sweep Up, Sweep Down, Random), progress, ECharts scatter (Sweep Up blue + Sweep Down orange + Random green), file browser, Model Fitting section
 3. **Validation**: Power%/LPM inputs, Validate button, pass/fail result card (green passed / amber marginal / red failed with deviation + CV), ECharts O3 line chart
 
 ### Telemetry Tab
@@ -162,81 +172,39 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 ### Settings Tab
 - Notification level selector
 
-## What Changed This Session (Session 9)
+## What Changed This Session (Session 10)
 
-### Model Fitting System `[IMPLEMENTED]`
-- New `Interfaces/PC/analysis/` module with `power_o3_model.py`
-- 4-parameter sigmoid model: `O3 = L / (1 + exp(-k*(P - P0))) + b`
-- `fit_sigmoid_model()` — fits via `scipy.optimize.curve_fit`, computes R², RMSE
-- `save_model()` / `load_model()` — JSON persistence in `Models/O3Power/`
-- `predict_o3()` / `predict_power()` — model-aware with fallback to piecewise
-- `generate_curve()` — model-aware curve generation for Plotly
-- `aggregate_calibration_data()` — multi-CSV aggregation with exclusion support
-- Model fitted from 3 calibration CSVs: R²=0.9982, RMSE=0.028
+### Random Phase + Air Toggle  `[IMPLEMENTED]`
+- `_start_calibration()`: generates stratified random levels (N windows, one uniform sample each), arranged ascending+descending.  Builds `random=p1,p2,...` arg.
+- GUI adds `cal_rnd_input` (# Rnd Lvls, 0-50, default 15) and `cal_air_toggle` (Air ON switch) adjacent to `cal_lpm_input`
+- Both new inputs added to sequence lockable list
+- `O2 LPM` min lowered to 0.0 (air-only calibration support)
+- Flow validation: LPM=0 + air_comp=0 → negative notification, start blocked
+- `cal_step_cards` extended with `"random"` entry; ECharts scatter extended with green "Random" series
+- `S.seq_step_total` set to `203 + 2*N` dynamically
+- Phase descriptions updated for `"random"` and `"relay_setup"` (now just "Enabling relays")
 
-### Dashboard Integration
-- `predict_o3_from_power()` now dispatches to analysis module via `S.active_model`
-- `predict_power_from_o3()` now dispatches to analysis module via `S.active_model`
-- `generate_power_curve()` now dispatches to analysis module via `S.active_model`
-- `SystemState.active_model` — loaded `PowerO3Model` (or None for fallback)
-- `SystemState.model_status` — human-readable status string
-- `SystemState.load_model_for_current_condition()` — loads model matching (LPM, O2%)
-- Model auto-loads on startup, LPM change, and air compressor toggle
-- Calibration UI: "Model Fitting" section with per-condition Fit Model buttons
-- Model status card shows active model params and R² badge
+### Safe Standby  `[IMPLEMENTED]`
+- Added `async def _safe_standby()`: unconditionally sets power=0, all relays off.  No `seq_confirmed` guard.
+- `_sequence_cleanup()` rewritten to always call `_safe_standby()`.  The old `if not S.seq_confirmed and source != 'stop': return` guard is removed.
+- This fixes the dangerous behavior where calibration could exit with power at 86% and relays on.
 
-### Bug Fixes (from audit)
-- Reconnection race fix: `_close_client` guards `if self._writer is writer`
-- Dispatch exception safety: try/except around each handler
-- `seq_confirmed` reset on disconnect
-- COMPLETE/ABORTED deadlock fix: `seq_cleanup_pending` flag, deferred to `_tick`
-- Power rollback on `cmd_set_power` failure
-- time_sync unmatched RSP suppression
-- CSV logger exception logging
-- NiceGUI `.classes()` API instead of `_classes` mutation
+### DFRobot I2C Fix (ESP32)  `[IMPLEMENTED]`
+- `blocksi_pins.h`: I2C speed 400kHz → 100kHz
+- `dfrobot_ozone.c`: `sensor_read_reg()` rewritten with separate transactions + 100ms gap, `dfrobot_o3_is_present()` uses write-only probe
+- `peripherals.c`: `.sample_interval_ms = 0` disables driver auto-sample task
+- Room O3 now reads real values instead of -1.000 ppm
 
-### Cleanup
-- Removed 3 duplicate empty model directories: `Interfaces/Model/`, `Interfaces/Models/`, `Interfaces/PC/Model/`
-- Canonical model directory: `Models/O3Power/`
+### Single-Agent Model  `[DECIDED]`
+- collaboration_protocol.md updated: one agent handles both ESP32 and dashboard
+- Both summaries and interface_contract.md now updated together at end of session
 
-## What Changed in Session 8
-
-### Random phase cleanup
-- Removed `"Random Spots"` from `CAL_PHASES_DEF` (3 phases: Baseline, Sweep Up, Sweep Down)
-- Removed `"Random"` from ECharts calibration scatter legend and series
-- Removed `"random"` from `phase_order` list in tick function
-- Removed `rand_pts` filter and `series[2]` chart update (dead code)
-- Aligns with ESP32 decision 2026-02-28: random phase dropped
-
-### Sequence cleanup (from Session 7)
-- COMPLETE/ABORTED handlers call `_sequence_cleanup()` (power=0, all relays off)
-- New `_sequence_cleanup(source)` function: reusable cleanup for complete/abort/stop
-- `cmd_sequence_stop()` now does abort + full cleanup (not just alias)
-- `cmd_emergency_stop()` turns off ALL relays (air_comp + ozone_gen + o2_conc)
-- Calibration pre-flight: power=0% before sending `CMD,calibrate`
-- Validation: RSP queue enlarged to 300, 500ms drain before `seq_run`, timeout=5s
-- Stop buttons (Cal tab, Prompt dialog) wired to `cmd_sequence_stop()` with cleanup
-
-### Previous Session (Session 7) Changes
-
-### Removed (superseded by recipe protocol)
-- **Old message handlers**: `_handle_seq_done`, `_handle_cal_start`, `_handle_cal_data`, `_handle_cal_complete`, `_handle_val_start`, `_handle_val_data`, `_handle_val_result`
-- **Old dispatch routes**: `SEQ_DONE`, `CAL_START`, `CAL_DATA`, `CAL_COMPLETE`, `VAL_START`, `VAL_DATA`, `VAL_RESULT`
-- **Old SystemState field**: `seq_air` (air compressor OFF during all sequences)
-- **Old sequence type**: `"cal"` → renamed to `"calibrate"`
-
-### Added
-- `import random` for recipe generation
-- `generate_cal_recipe()`: Creates ~218 calibration steps
-- `generate_val_recipe()`: Creates 5 validation steps + 2 prompts
-- `_analyze_validation()`: Full PC-side pass/fail analysis with 4 criteria
-- `cmd_sequence_start()`: Sends complete recipe (start → steps × N → prompts × M → run)
-- `cmd_sequence_abort()`: Uses `sequence_abort` command instead of `sequence_stop`
-- `cmd_sequence_confirm()`: No prompt_id parameter (ESP32 unblocks pending)
-- New PROMPT_CONTENT entries: `check_flow`, `check_route`
-- SystemState: `seq_step_idx`, `seq_step_total` for step-based progress tracking
-- Cal chart: Phase-based series (Sweep Up / Sweep Down) — Random removed in Session 8
-- Val result: Shows pass/fail status + CV%
+### What Changed in Session 9
+- Sigmoid model fitting system (`Interfaces/PC/analysis/power_o3_model.py`)
+- Dashboard integration: `predict_o3_from_power/predict_power_from_o3/generate_power_curve` dispatch to `S.active_model`
+- `SystemState.active_model`, `model_status`, `load_model_for_current_condition()`
+- Model Fitting UI in Calibration expansion with per-condition Fit Model buttons
+- Bug fixes: reconnection race, dispatch exception safety, seq_confirmed reset, COMPLETE/ABORTED deadlock, power rollback, time_sync RSP suppression
 
 ## Pending Work
 
@@ -281,7 +249,7 @@ compute_effective_o2_pct(flow_lpm, air_comp_on) → int
 1. **Venv required**: Must use `.venv\Scripts\python.exe`, not system Python
 2. **NiceGUI**: `element.visible` toggles sequence banner, skeleton, result card
 3. **Quasar disable pattern**: `.props("disable")` / `.props(remove="disable")`
-4. **Recipe sending speed**: Validation steps still sent via raw TCP (fire-and-forget) with 5ms yields. Calibration uses single command — no buffering issues.
+4. **Recipe sending speed**: Validation steps still sent via raw TCP (fire-and-forget) with 5ms yields.  Calibration uses single command — no buffering issues.
 5. **ECharts dark mode**: All ECharts have `darkMode: True`
 6. **Plotly retained**: Power curve still uses `ui.plotly` (single Plotly chart remaining)
-7. **Air compressor check**: `cmd_sequence_start` validates `air_comp=0` before sending recipe
+7. **Random list length**: With N=50 levels, `random=` arg is ~400 chars.  `RX_LINE_SIZE` on ESP32 is 512 bytes (raised from 128 to accommodate this).

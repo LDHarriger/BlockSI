@@ -1055,18 +1055,37 @@ async def cmd_sequence_start(seq_type: str, **kwargs) -> bool:
 
 
 async def _start_calibration(**kwargs) -> bool:
-    """Single-command calibration: CMD,calibrate,flow=<lpm>.
+    """Single-command calibration: CMD,calibrate,flow=<lpm>[,air_comp=1][,random=p1,p2,...].
 
-    ESP32 builds the 203-step sweep internally and starts immediately.
-    Relay prereqs (O2 ON, O3 ON, Air OFF) are handled by the executor.
+    ESP32 builds the sweep internally and appends random hold steps if provided.
+    Relay prereqs (O2 ON if flow>0, O3 ON, Air per toggle) handled by executor.
     """
+    import random as _rng
+
     flow = kwargs.get("flow", DEFAULT_FLOW_LPM)
+    num_random = int(kwargs.get("num_random", 0))
+    air_comp = bool(kwargs.get("air_comp", False))
 
     # Pre-flight: ensure power starts at 0%
     log("Pre-flight: setting power to 0%", "seq")
     if not await cmd_set_power(0):
         _notify("Calibration aborted — failed to set power to 0%", "negative")
         return False
+
+    # Generate stratified random power levels (ascending then descending)
+    random_powers: list[int] = []
+    if num_random > 0:
+        # Divide [0, 100] into N windows, sample one from each
+        window = 100.0 / num_random
+        levels = sorted(set(
+            max(0, min(100, int(_rng.uniform(i * window, (i + 1) * window))))
+            for i in range(num_random)
+        ))
+        # Ascending then descending (mountain shape, minimises pot travel)
+        random_powers = levels + levels[::-1]
+
+    # Step count: 1 baseline + 101 up + 101 down + len(random_powers) random
+    total_steps = 203 + len(random_powers)
 
     # Prepare observer state (but do NOT set sequence_active yet)
     S.seq_type = "calibrate"
@@ -1076,20 +1095,30 @@ async def _start_calibration(**kwargs) -> bool:
     S.seq_start_time = 0.0
     S.seq_confirmed = False
     S.seq_step_idx = 0
-    S.seq_step_total = 203  # 1 baseline + 101 up + 101 down
+    S.seq_step_total = total_steps
     S.pending_prompt_id = ""
     S.pending_prompt_text = ""
     S.cal_samples = []
     S.cal_file = ""
     S.cal_lpm = flow
 
-    # Single command — ESP32 loads recipe + starts execution
-    resp = await tcp.send_command(f"calibrate,flow={flow}", timeout=5.0)
+    # Build command
+    cmd = f"calibrate,flow={flow}"
+    if air_comp:
+        cmd += ",air_comp=1"
+    else:
+        cmd += ",air_comp=0"
+    if random_powers:
+        pwr_str = ",".join(str(p) for p in random_powers)
+        cmd += f",random={pwr_str}"
+
+    resp = await tcp.send_command(cmd, timeout=5.0)
     if resp and "OK" in resp:
         S.sequence_active = True
         S.seq_confirmed = True
         S.seq_start_time = time.time()
-        log(f"Calibration started: flow={flow} LPM, 203 steps", "seq")
+        log(f"Calibration started: flow={flow} LPM, air={air_comp}, "
+            f"{num_random} rnd levels, {total_steps} steps", "seq")
         _notify("Calibration started", "positive")
         return True
 
@@ -1174,18 +1203,24 @@ async def cmd_sequence_stop() -> bool:
     return result
 
 
-async def _sequence_cleanup(source: str = "unknown") -> None:
-    """Power=0% and all relays off — only if ESP32 confirmed sequence start."""
-    if not S.seq_confirmed and source != "stop":
-        log(f"Skipping cleanup ({source}): ESP32 never confirmed start", "seq")
-        S.seq_confirmed = False
-        return
-    log(f"Dashboard cleanup ({source}): power=0, all relays off", "seq")
-    S.seq_confirmed = False
+async def _safe_standby() -> None:
+    """Unconditionally set power=0% and all relays off (safe state).
+
+    Called at end of any sequence or whenever the system must return to
+    a known-safe idle configuration.  No guards — always executes.
+    """
+    log("Safe standby: power=0, all relays off", "seq")
     await cmd_set_power(0)
-    await cmd_set_relay("air_comp", False)
     await cmd_set_relay("ozone_gen", False)
     await cmd_set_relay("o2_conc", False)
+    await cmd_set_relay("air_comp", False)
+
+
+async def _sequence_cleanup(source: str = "unknown") -> None:
+    """End-of-sequence cleanup — always returns to safe standby."""
+    log(f"Sequence cleanup ({source})", "seq")
+    S.seq_confirmed = False
+    await _safe_standby()
 
 
 async def cmd_sequence_confirm() -> bool:
@@ -1631,21 +1666,39 @@ async def index():
                     "w-full q-mb-sm"
                 ):
                     ui.markdown(
-                        "Single-command calibration (~17 min): Baseline → "
-                        "Sweep Up (0→100%) → Sweep Down (100→0%). "
+                        "Calibration: Baseline → Sweep Up (0→100%) → "
+                        "Sweep Down (100→0%) → Random hold (~20 samples each). "
                         "ESP32 runs sweep autonomously."
                     ).classes("text-caption text-grey q-mb-sm")
 
                     with ui.row().classes("q-gutter-sm items-end q-mb-sm"):
                         cal_lpm_input = ui.number(
                             label="O2 LPM", value=DEFAULT_FLOW_LPM,
-                            min=0.5, max=15, step=0.5, format="%.1f",
+                            min=0.0, max=15, step=0.5, format="%.1f",
                         ).classes("w-24")
+                        cal_rnd_input = ui.number(
+                            label="# Rnd Lvls", value=15,
+                            min=0, max=50, step=1, format="%.0f",
+                        ).classes("w-24")
+                        cal_air_toggle = ui.switch("Air ON").classes(
+                            "q-ml-sm"
+                        )
 
                         async def _start_cal():
-                            lpm = float(cal_lpm_input.value or DEFAULT_FLOW_LPM)
+                            lpm = float(cal_lpm_input.value or 0.0)
+                            num_rnd = int(cal_rnd_input.value or 0)
+                            air_on = bool(cal_air_toggle.value)
+                            # Validate: must have O2 flow and/or air compressor
+                            if lpm <= 0.0 and not air_on:
+                                _notify(
+                                    "Error: O2 LPM must be > 0 or Air "
+                                    "Compressor must be enabled",
+                                    "negative",
+                                )
+                                return
                             await cmd_sequence_start(
                                 "calibrate", flow=lpm,
+                                num_random=num_rnd, air_comp=air_on,
                             )
 
                         cal_start_btn = ui.button(
@@ -1665,6 +1718,7 @@ async def index():
                         ("baseline", "Baseline", "~37s @ 0%"),
                         ("sweep_up", "Sweep Up", "0 → 100%"),
                         ("sweep_down", "Sweep Down", "100 → 0%"),
+                        ("random", "Random", "Hold ~20 samp"),
                     ]
                     cal_step_cards: dict[str, Any] = {}
                     with ui.row().classes("w-full q-gutter-xs q-mb-sm"):
@@ -1686,7 +1740,7 @@ async def index():
                     cal_chart = ui.echart({
                         "darkMode": True,
                         "tooltip": {"trigger": "item"},
-                        "legend": {"data": ["Sweep Up", "Sweep Down"]},
+                        "legend": {"data": ["Sweep Up", "Sweep Down", "Random"]},
                         "xAxis": {"type": "value", "name": "Power %",
                                   "min": 0, "max": 100},
                         "yAxis": {"type": "value", "name": "O3 %vol"},
@@ -1695,6 +1749,8 @@ async def index():
                              "itemStyle": {"color": "#42A5F5"}},
                             {"name": "Sweep Down", "type": "scatter", "data": [],
                              "itemStyle": {"color": "#FFA726"}},
+                            {"name": "Random", "type": "scatter", "data": [],
+                             "itemStyle": {"color": "#66BB6A"}},
                         ],
                     }).classes("w-full").style("height: 280px")
 
@@ -2151,13 +2207,14 @@ async def index():
             phase = S.seq_phase
             _PHASE_DESCS = {
                 "loading": "Preparing...",
-                "starting": f"Starting @ {S.cal_lpm:.1f} LPM O2 w/o air",
+                "starting": f"Starting @ {S.cal_lpm:.1f} LPM",
                 "started": "Initializing...",
-                "relay_setup": "Enabling O2 + O3 relays",
+                "relay_setup": "Enabling relays",
                 "stabilizing": "Equipment warm-up (~3s)",
                 "baseline": f"Initial baseline (0% power)",
                 "sweep_up": f"Sweep up (0→100%)",
                 "sweep_down": f"Sweep down (100→0%)",
+                "random": f"Random hold @ {S.seq_power:.0f}%",
                 "saving": "Saving file...",
                 "complete": "Complete!",
             }
@@ -2191,7 +2248,8 @@ async def index():
         # Lock controls during sequences (power + relays + O2 input)
         lockable = [slider, inp_pwr, inp_o3, inp_mg, inp_g30,
                      btn_air, btn_o2, btn_o3, inp_lpm_sb,
-                     cal_start_btn, val_start_btn]
+                     cal_start_btn, cal_lpm_input, cal_rnd_input,
+                     cal_air_toggle, val_start_btn]
         lockable.extend(preset_btns)
         for _el in lockable:
             if S.sequence_active:
@@ -2267,11 +2325,12 @@ async def index():
                 "loading": "Preparing calibration",
                 "starting": f"Starting calibration @ {S.cal_lpm:.1f} LPM",
                 "started": "Initializing",
-                "relay_setup": "Enabling O2 + O3 relays",
+                "relay_setup": "Enabling relays",
                 "stabilizing": "Equipment warm-up",
                 "baseline": "Initial baseline (0% power)",
                 "sweep_up": f"Sweep up (0→100%) @ {S.seq_power:.0f}%",
                 "sweep_down": f"Sweep down (100→0%) @ {S.seq_power:.0f}%",
+                "random": f"Random hold @ {S.seq_power:.0f}%",
                 "saving": "Saving calibration file",
                 "complete": "Calibration complete",
             }
@@ -2290,8 +2349,8 @@ async def index():
                 f"Samples={len(S.cal_samples)}"
             )
             # Highlight active/completed phase cards
-            phase_order = ["baseline", "sweep_up", "sweep_down"]
-            # "saving" and "complete" mean all sweep phases are done
+            phase_order = ["baseline", "sweep_up", "sweep_down", "random"]
+            # "saving" and "complete" mean all phases are done
             if S.seq_phase in ("saving", "complete"):
                 active_idx = len(phase_order)  # all complete
             else:
@@ -2319,7 +2378,7 @@ async def index():
             for card in cal_step_cards.values():
                 card.style("opacity: 0.4; border: 1px solid #555")
 
-        # Cal scatter chart — by phase (air compressor OFF during cal)
+        # Cal scatter chart — by phase
         if S.cal_samples:
             sweep_up = [
                 [s["power_actual"], s["o3_pct"]]
@@ -2329,8 +2388,13 @@ async def index():
                 [s["power_actual"], s["o3_pct"]]
                 for s in S.cal_samples if s.get("phase") == "sweep_down"
             ]
+            random_pts = [
+                [s["power_actual"], s["o3_pct"]]
+                for s in S.cal_samples if s.get("phase") == "random"
+            ]
             cal_chart.options["series"][0]["data"] = sweep_up
             cal_chart.options["series"][1]["data"] = sweep_down
+            cal_chart.options["series"][2]["data"] = random_pts
             cal_chart.update()
 
         # -- validation observer UI ---------------------------------------

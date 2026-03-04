@@ -632,22 +632,28 @@ static void add_step_internal(uint16_t index, uint8_t power_pct,
 
 /* ── Built-in calibration recipe ────────────────────────────────── */
 
-esp_err_t seq_executor_load_calibration(float flow_lpm)
+esp_err_t seq_executor_load_calibration(float flow_lpm, bool air_comp_on,
+                                        const uint8_t *random_powers,
+                                        int num_random)
 {
     /*
      * Calibration sweep:
      *   Phase 1 — Baseline: 0% power, 15 samples (~37s)
      *   Phase 2 — Sweep Up: 0→100% in 1% steps, 2 samples each (~505s)
      *   Phase 3 — Sweep Down: 100→0% in 1% steps, 2 samples each (~505s)
+     *   Phase 4 — Random: PC-generated levels, 20 samples each (optional)
      *
-     * Total: 203 steps, ~1047s (~17.5 min)
+     * Total base: 203 steps + num_random random steps
      *
-     * Relay prereqs are baked in: O2=ON, O3=ON, Air=OFF.
+     * Relay prereqs: O2=ON if flow>0, O3=ON, Air per air_comp_on.
      * The executor applies these at run time.
      */
     char params[SEQ_EXEC_PARAMS_LEN];
+    int relay_o2 = (flow_lpm > 0.1f) ? 1 : 0;
+    int relay_air = air_comp_on ? 1 : 0;
     snprintf(params, sizeof(params),
-             "flow=%.1f,relay_o2=1,relay_o3=1,relay_air=0", flow_lpm);
+             "flow=%.1f,relay_o2=%d,relay_o3=1,relay_air=%d",
+             flow_lpm, relay_o2, relay_air);
 
     esp_err_t ret = seq_executor_begin("calibrate", params);
     if (ret != ESP_OK) return ret;
@@ -658,20 +664,27 @@ esp_err_t seq_executor_load_calibration(float flow_lpm)
     uint16_t idx = 0;
 
     /* Phase 1 — Baseline */
-    add_step_internal(idx++, 0, 15, "baseline", false);
+    add_step_internal(idx++, 0, 15, "baseline", air_comp_on);
 
     /* Phase 2 — Sweep Up: 0 → 100% */
     for (int pwr = 0; pwr <= 100; pwr++) {
-        add_step_internal(idx++, (uint8_t)pwr, 2, "sweep_up", false);
+        add_step_internal(idx++, (uint8_t)pwr, 2, "sweep_up", air_comp_on);
     }
 
     /* Phase 3 — Sweep Down: 100 → 0% */
     for (int pwr = 100; pwr >= 0; pwr--) {
-        add_step_internal(idx++, (uint8_t)pwr, 2, "sweep_down", false);
+        add_step_internal(idx++, (uint8_t)pwr, 2, "sweep_down", air_comp_on);
     }
 
-    ESP_LOGI(TAG, "Calibration recipe loaded: %d steps, flow=%.1f LPM",
-             s_exec.step_count, flow_lpm);
+    /* Phase 4 — Random hold (PC-generated, 20 samples each) */
+    if (random_powers != NULL && num_random > 0) {
+        for (int i = 0; i < num_random && idx < SEQ_EXEC_MAX_STEPS; i++) {
+            add_step_internal(idx++, random_powers[i], 20, "random", air_comp_on);
+        }
+    }
+
+    ESP_LOGI(TAG, "Calibration recipe loaded: %d steps, flow=%.1f LPM, air=%d, random=%d",
+             s_exec.step_count, flow_lpm, relay_air, num_random);
 
     xSemaphoreGive(s_exec.mutex);
     return ESP_OK;

@@ -1,0 +1,19 @@
+{
+  "L": 2.339933,
+  "k": 0.076352,
+  "P0": 45.907395,
+  "b": -0.048269,
+  "flow_lpm": 3.0,
+  "o2_pct": 95,
+  "r_squared": 0.998348,
+  "rmse": 0.03358,
+  "n_points": 101,
+  "source_files": [
+    "2026-03-01_155643_PowerO3Cal_3Lpm_95O2.csv"
+  ],
+  "excluded_files": [],
+  "fitted_at": "2026-03-01T16:06:01",
+  "notes": "",
+  "type": "sigmoid_4p",
+  "version": 1
+}

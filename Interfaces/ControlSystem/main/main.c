@@ -541,18 +541,47 @@ static bool lan_command_handler(const char *cmd, const char *args,
     // Single-command calibration  (replaces recipe protocol for calibration)
     // =========================================================================
     } else if (strcmp(cmd, "calibrate") == 0) {
-        // CMD,calibrate[,flow=4.0]
-        // Loads built-in calibration sweep and starts execution.
-        // Single command replaces: sequence_start + 203× seq_step + seq_run
+        // CMD,calibrate[,flow=4.0][,air_comp=0|1][,random=p1,p2,...,pN]
+        // Loads built-in calibration sweep (+ optional random hold steps)
+        // and starts execution.
         float flow = 4.0f;
+        bool air_comp_on = false;
+        uint8_t random_powers[100];
+        int num_random = 0;
+
         if (args) {
-            // Parse flow=<value> from args
+            // Parse flow=<value>
             const char *f = strstr(args, "flow=");
             if (f) flow = strtof(f + 5, NULL);
-        }
-        if (flow < 0.1f || flow > 15.0f) flow = 4.0f;
 
-        esp_err_t ret = seq_executor_load_calibration(flow);
+            // Parse air_comp=<0|1>
+            const char *ac = strstr(args, "air_comp=");
+            if (ac) air_comp_on = (ac[9] == '1');
+
+            // Parse random=p1,p2,...,pN (comma-separated uint8 power levels)
+            const char *rnd = strstr(args, "random=");
+            if (rnd) {
+                rnd += 7;  // skip "random="
+                while (*rnd && num_random < 100) {
+                    char *end = NULL;
+                    long v = strtol(rnd, &end, 10);
+                    if (end == rnd) break;  // no number found
+                    if (v < 0) v = 0;
+                    if (v > 100) v = 100;
+                    random_powers[num_random++] = (uint8_t)v;
+                    if (*end == ',') {
+                        rnd = end + 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        if (flow < 0.0f || flow > 15.0f) flow = 4.0f;
+
+        esp_err_t ret = seq_executor_load_calibration(
+            flow, air_comp_on,
+            num_random > 0 ? random_powers : NULL, num_random);
         if (ret != ESP_OK) {
             if (ret == ESP_ERR_INVALID_STATE) {
                 snprintf(response, response_size, "busy:sequence_active");
@@ -581,7 +610,7 @@ static bool lan_command_handler(const char *cmd, const char *args,
             else flow = strtof(args, NULL);  // bare number = LPM
             if (flow < 0.1f || flow > 15.0f) flow = 4.0f;
         }
-        esp_err_t ret = seq_executor_load_calibration(flow);
+        esp_err_t ret = seq_executor_load_calibration(flow, false, NULL, 0);
         if (ret != ESP_OK) {
             snprintf(response, response_size, "already_active_or_failed");
             return false;

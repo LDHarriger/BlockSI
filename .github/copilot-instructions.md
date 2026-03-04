@@ -123,13 +123,16 @@ AIR_COMP_O2_PCT = 21      # Atmospheric O2
 - **Calibration tab**: Automated sequence (~17 min), progress display, file browser, model fitting
 - **Debug tab**: Manual command entry, system state dump
 
-### Calibration sequence design:
-1. **Baseline**: 30s at 0% (Air OFF)
-2. **Sweep Up**: 0→100% in 1% steps, 2s each (Air OFF)
-3. **Sweep Down**: 100→0% in 1% steps, 2s each (Air OFF)
-4. **Random Pairs**: 15 random power levels × (Air OFF 20s + Air ON 20s)
+### Calibration sequence design (single-command, `CMD,calibrate`):
+1. **Baseline**: 0% power, 15 samples (~37s) — air state per toggle
+2. **Sweep Up**: 0→100% in 1% steps, 2 samples each — air state per toggle
+3. **Sweep Down**: 100→0% in 1% steps, 2 samples each — air state per toggle
+4. **Random Phase** (optional): N unique stratified levels × 2 visits (ascending + descending), 20 samples each — air state per toggle
+- GUI inputs: `O2 LPM` | `# Rnd Lvls` (0-50, default 15) | `Air ON` toggle
+- O2 concentrator only activated when LPM > 0; air-only mode (LPM=0, Air ON) valid
+- Total steps: 203 + 2×N
 - Files: `Data/Calibration/{YYYY-MM-DD}_{HHMMSS}_PowerO3Cal_{LPM}Lpm_{O2}O2.csv`
-- O2% is the weighted-average feed O2: `(F_conc × 95 + F_air × 21) / (F_conc + F_air)` rounded to int
+- O2% = weighted-average feed O2: `(F_conc × 95 + F_air × 21) / (F_conc + F_air)` rounded to int
 - CSV columns: timestamp, power_pct, o3_pct, o2_lpm, air_comp_on, total_lpm, o2_concentration_pct, cell_temp_c, phase
 
 ## Hardware-Specific Notes

@@ -23,8 +23,8 @@ static const char *TAG = "LAN";
 
 // Buffer sizes
 #define TX_BUFFER_SIZE 512
-#define RX_BUFFER_SIZE 256
-#define RX_LINE_SIZE   128
+#define RX_BUFFER_SIZE 1024
+#define RX_LINE_SIZE   512
 
 // Module state
 static struct {

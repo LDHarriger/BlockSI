@@ -5,6 +5,139 @@
 
 ---
 
+### 2026-03-04: Single-agent model for full-stack development
+
+**Context**: BlockSI features now routinely span the ESP32↔PC boundary
+(calibration phases, command argument formats, relay control, buffer sizes).
+The dual-agent model required updating `interface_contract.md`, then waiting
+for the other agent to read it in a new context window, leading to coordination
+lag, context drift, and subtle regressions (e.g. the `CMD,calibrate,random=`
+feature touched 5 files across both domains simultaneously).
+
+**Decision**:
+1. A **single GitHub Copilot agent** handles both ESP32 firmware and PC
+   dashboard work within the same chat session.
+2. `collaboration_protocol.md` updated to reflect the single-agent model.
+3. Both domain summaries (`dashboard_agent_summary.md` and
+   `esp32_agent_summary.md`) are still maintained as persistent memory
+   across context windows — they remain the new-chat startup documents.
+4. The agent is responsible for updating `interface_contract.md` and both
+   summaries at the end of each session (previously each agent updated only
+   its own summary).
+
+**Rationale**: With a single agent, both sides of a cross-boundary feature
+are implemented in one pass with consistent state.  The interface contract
+stays up to date because the same agent writes both sides.  Documentation
+handoffs (the primary source of coordination bugs) are eliminated.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-03-04: Random phase re-added to calibration with PC-generated levels
+
+**Context**: Decision 2026-02-28 dropped the random phase from calibration
+because the sweep up + down was sufficient for initial model fitting.  After
+collecting calibration data at multiple flow rates (3.0, 3.5, 4.0, 4.5,
+5.0 LPM), users wanted more samples at each power level with adequate
+stabilization time (~20 samples ≈ 50s), especially at lower flow rates where
+the sensor stabilizes more slowly.
+
+**Decision**: (Supersedes random-phase-dropped note in 2026-02-28 entry)
+1. **Optional random phase** appended after sweep_down.  PC generates `N`
+   unique stratified power levels (one per equal-width window across 0-100%),
+   arranged ascending then descending (mountain shape) to minimize pot travel.
+   Each level holds for 20 samples.
+2. **PC generates levels** (not ESP32) — upholds "ESP32 = Arms, PC = Brains".
+   Levels sent as comma-separated integers in `random=` arg.
+3. **N=0 (default)** produces identical 203-step behavior to prior decision.
+4. **Air compressor toggle** for entire calibration run (all phases).  Previously
+   always OFF.  `air_comp=1` enables for baseline, sweeps, and random phase.
+5. **O2 concentrator gating**: Only activated when `flow > 0`.  Air-only mode
+   (LPM=0, air_comp=1) is valid.  If both LPM=0 and air_comp=0, PC GUI
+   rejects start with an error notification.
+6. **GUI inputs added**: `# Rnd Lvls` (0-50, default 15) and `Air ON` toggle
+   adjacent to the existing `O2 LPM` input in the Calibration expansion.
+7. **Step total**: `203 + 2*N` (each unique level visited twice).
+8. **LAN command format**: `CMD,calibrate,flow=4.0,air_comp=1,random=3,22,...\n`
+   ESP32 parses `air_comp=` and `random=` from args.  `RX_LINE_SIZE` raised
+   512 bytes (was 128) to accommodate long random lists.
+9. **Max steps**: `SEQ_EXEC_MAX_STEPS` raised 512 (was 256) to accommodate
+   203 + up to 100 random steps (50 levels × 2 visits).
+
+**Rationale**: Motorized potentiometer takes ~15s to travel full range.
+Sorting random levels ascending then descending minimizes travel while
+providing symmetric data at each chosen power level.  Stratified windows
+ensure coverage across the full 0-100% range rather than clustering.
+20 samples per step ≈ 50s of stabilized readings — adequate for the
+sensor time constant at all tested flow rates.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-03-04: `_safe_standby()` — unconditional safe state function
+
+**Context**: `_sequence_cleanup()` had a `seq_confirmed` guard that skipped
+power/relay shutdown if the ESP32 had not confirmed sequence start.  This
+caused the dangerous behavior where calibration exiting set power to 86%
+(the pot's last position) with all relays remaining on, because the guard
+prevented the cleanup commands from being sent.
+
+**Decision**:
+1. New `async def _safe_standby()` function — unconditionally sends
+   `cmd_set_power(0)`, `relay ozone_gen OFF`, `relay o2_conc OFF`,
+   `relay air_comp OFF` with no guards.
+2. `_sequence_cleanup()` now always calls `_safe_standby()`, removing the
+   `seq_confirmed` guard that bypassed shutdown.
+3. `_safe_standby()` is the single reusable "all off" primitive — future
+   sequences call it instead of duplicating the relay/power shutdown logic.
+
+**Rationale**: The `seq_confirmed` guard's original intent was to avoid
+sending commands to a disconnected ESP32.  But `_safe_standby()` already
+handles TCP errors gracefully (commands fail silently if disconnected).
+The guard's side-effect — leaving equipment in a live state — is far more
+dangerous than the spurious error it was preventing.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-03-04: DFRobot SEN0321 I2C configuration fix
+
+**Context**: The room O3 sensor (DFRobot SEN0321 Gravity, address 0x73)
+was detected by the I2C bus scan but all register read/write operations
+failed.  Boot log showed alternating `ESP_ERR_TIMEOUT` on reads and
+`ESP_FAIL` on writes.  Room O3 read as -1.000 ppm.
+
+**Root causes identified**:
+1. I2C bus speed 400 kHz — sensor's internal STM8S MCU tested at 100 kHz only
+2. `i2c_master_write_read_device()` uses I2C repeated-start (Sr) — sensor
+   expects separate STOP/START transactions with 100ms gap between write and read
+3. `dfrobot_o3_is_present()` used a bare read (could corrupt register pointer)
+4. Two tasks (driver auto-sample + `sensor_aggregator`) hitting I2C without mutex
+5. Internal pull-ups (~45kΩ) are marginal, though less critical at 100kHz
+
+**Decision**:
+1. **`blocksi_pins.h`**: `I2C_MASTER_FREQ_HZ` 400000 → 100000
+2. **`dfrobot_ozone.c` `sensor_read_reg()`**: Rewritten — separate
+   `i2c_master_write_to_device()`, 100ms `vTaskDelay`, then
+   `i2c_master_read_from_device()`.  Matches DFRobot Arduino `i2cReadOzoneData()`.
+3. **`dfrobot_ozone.c` `dfrobot_o3_is_present()`**: Changed to write-only
+   probe (START → ADDR_W → STOP), matching DFRobot `begin()`.
+4. **`peripherals.c`**: `.sample_interval_ms = 0` disables internal auto-sample
+   task; `sensor_aggregator` is sole reader (500ms interval).
+5. External 4.7kΩ pull-ups: recommended hardware change, not yet added.
+
+**Rationale**: The scan succeeds at 400kHz because it's a short 1-byte probe.
+Longer multi-byte register transactions exceed the sensor MCU's timing budget
+at fast mode.  The repeated-start mismatch is the secondary cause — the sensor
+MCU needs the STOP condition and 100ms to prepare data.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
 ### 2026-02-28: 4-parameter sigmoid model for Power→O3 prediction
 
 **Context**: The dashboard used a hardcoded piecewise model

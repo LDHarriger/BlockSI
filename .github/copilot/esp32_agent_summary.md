@@ -1,12 +1,16 @@
 # ESP32 Agent Summary
 
-> Last updated: 2026-02-28 (single-command calibration + dashboard simplification)
+> Last updated: 2026-03-04 (Session 10 — Random phase, air toggle, DFRobot I2C fix, single-agent model)
 
 ## Current State
 
 The ESP32 firmware is an ESP-IDF v5.4+ project controlling ozone generation
 hardware, monitoring sensors, and bridging to both Golioth Cloud and a
 PC dashboard over LAN TCP.
+
+**Single-agent model** (as of 2026-03-04): One GitHub Copilot agent now handles
+both ESP32 firmware and PC dashboard.  See `collaboration_protocol.md` and
+`decisions_log.md` entry 2026-03-04.
 
 | Property | Value |
 |----------|-------|
@@ -103,7 +107,7 @@ store calibration data, or generate certificates.
 ### Single-command calibration
 | Command | Args | Purpose |
 |---------|------|---------|
-| `calibrate` | `flow=<lpm>` (optional) | Load + run 203-step calibration sweep |
+| `calibrate` | `flow=<lpm>` (opt), `air_comp=<0\|1>` (opt), `random=<p1,p2,...>` (opt) | Load + run calibration sweep with optional random phase |
 | `calibrate_start` | `[lpm]` | Legacy alias → `calibrate` |
 | `calibrate_stop` | none | Legacy alias → `sequence_abort` |
 | `calibrate_status` | none | Legacy alias → `sequence_status` |
@@ -124,8 +128,8 @@ Full specification in `interface_contract.md`.
 ## Pin Assignments (from `blocksi_pins.h`)
 
 | Bus/Function | GPIOs | Connected to |
-|-------------|-------|-------------|
-| I2C | 21, 22 | DFRobot O3 sensor |
+|-------------|-------|--------------|
+| I2C | 21, 22 | DFRobot O3 sensor (100kHz Standard Mode) |
 | SPI | 18, 19, 5 | MAX31855 thermocouple |
 | UART2 | 16, 17 | 106-H RS232 (via level shifter) |
 | Relays | 12, 13, 27 | SSR control (3 relays) |
@@ -141,10 +145,11 @@ Tag convention: `static const char *TAG = "MODULE_NAME";`
 
 ## Pending Work
 
-- `[IMPLEMENTED]` **Single-command calibration**: `CMD,calibrate,flow=<lpm>` loads
-  + runs 203-step sweep.  `seq_executor_load_calibration()` builds baseline +
-  sweep up (0→100%) + sweep down (100→0%) internally.  Eliminates the 221-command
-  recipe protocol for calibration.
+- `[IMPLEMENTED]` **Single-command calibration**: `CMD,calibrate,flow=<lpm>,air_comp=<0|1>,random=<p1,...>` loads
+  + runs sweep.  `seq_executor_load_calibration()` builds baseline + sweeps + optional random phase.
+  `SEQ_EXEC_MAX_STEPS` = 512.  Relay prereqs gated by flow and air_comp args.
+- `[IMPLEMENTED]` **DFRobot SEN0321 I2C fix**: 100kHz bus speed, separate read transactions,
+  write-only probe, single reader task.  Room O3 reading functional.
 - `[IMPLEMENTED]` **Executor-owned relay prerequisites**: `sequence_start` params
   specify relay states.  Executor saves originals, applies in safe order, waits 3s.
 - `[IMPLEMENTED]` **Hardware interlock**: Air compressor is internal to MP-8000.
@@ -159,55 +164,37 @@ Tag convention: `static const char *TAG = "MODULE_NAME";`
   by any command handler (all `calibrate_*` commands route to seq_executor).
   Can be removed from `CMakeLists.txt` in a future cleanup.
 
-## Recent Changes (2026-02-28)
+## Recent Changes (2026-03-04)
 
-### Single-command calibration  `[IMPLEMENTED]`
-- `seq_executor.c`: Added `add_step_internal()` (private helper for internal
-  recipe population without mutex/state-check) and `seq_executor_load_calibration(flow_lpm)`
-  (public function that calls `seq_executor_begin()` with baked-in relay prereqs,
-  builds 203 steps internally: baseline + sweep up 0→100% + sweep down 100→0%).
-- `seq_executor.h`: Added `seq_executor_load_calibration()` declaration.
-- `main.c`: Added `CMD,calibrate[,flow=<lpm>]` handler.  Remapped legacy
-  `calibrate_start`/`calibrate_stop`/`calibrate_status` to route through
-  seq_executor instead of `power_calibration_v2.c`.
-- Dashboard (`blocksi_dashboard.py`): Replaced 221-command recipe protocol
-  with single `send_command("calibrate,flow=X")`.  Removed `generate_cal_recipe()`.
-  Kept `_handle_seq()` parsing, scatter plot, CSV saving unchanged.
+### Random Phase + Air Toggle in Calibration  `[IMPLEMENTED]`
+- `seq_executor.h`: `SEQ_EXEC_MAX_STEPS` 256 → 512
+- `seq_executor.h/c`: `seq_executor_load_calibration()` signature updated to
+  `(float flow_lpm, bool air_comp_on, const uint8_t *random_powers, int num_random)`
+- `seq_executor.c`: Phase 4 loop added — iterates `random_powers[i]` with
+  `add_step_internal(idx++, random_powers[i], 20, "random", air_comp_on)`
+- `seq_executor.c`: Air compressor state applied uniformly to all phases
+  (baseline/sweep_up/sweep_down/random) via `air_comp_on`
+- `seq_executor.c`: O2 concentrator relay gated: `relay_o2 = (flow > 0.1) ? 1 : 0`
+- `main.c`: `CMD,calibrate` handler now parses `air_comp=<0|1>` and
+  `random=<p1,p2,...>` (up to 100 values) in addition to `flow=`
+- `lan_client.c`: `RX_LINE_SIZE` 128 → 512, `RX_BUFFER_SIZE` 256 → 1024
 
-### Executor-owned relay prerequisites + hardware interlock  `[IMPLEMENTED]`
-- `relay_control.c`: Hardware interlock in `relay_set_with_source()` —
-  (a) `air_comp ON` rejected when `ozone_gen OFF` (`ESP_ERR_INVALID_STATE`),
-  (b) `ozone_gen OFF` auto-sets `air_comp OFF`.
-- `seq_executor.c`: Added `seq_relay_prereqs_t`, `apply_relay_prereqs()`,
-  `restore_relays()`.  Parses `relay_o2/relay_o3/relay_air` from params.
-  Applies in safe order (O2 → O3 → Air), saves originals, waits 3s,
-  sends `SEQ,*,RELAY` notification.  Cleanup: abort kills O3+Air, completion
-  kills Air only.
-- `main.c`: Removed old preflight reject from `seq_run` handler.  Executor
-  now owns relay lifecycle.
-- Supersedes 2026-02-27 preflight reject approach.
+### DFRobot SEN0321 I2C Fix  `[IMPLEMENTED]`
+- `blocksi_pins.h`: `I2C_MASTER_FREQ_HZ` 400000 → 100000 (100kHz Standard Mode)
+- `dfrobot_ozone.c`: `sensor_read_reg()` rewritten — separate write+read
+  transactions with `vTaskDelay(100ms)` between them (matches Arduino library)
+- `dfrobot_ozone.c`: `dfrobot_o3_is_present()` changed to write-only probe
+  (START → ADDR_W → STOP) — prevents register pointer corruption
+- `peripherals.c`: `.sample_interval_ms = 0` — disables internal auto-sample
+  task; `sensor_aggregator` is sole I2C reader
+- Room O3 now reads real ppm values; build + flash verified working
 
-### Previous Changes (2026-02-26)
-- `seq_executor.c/.h`: Generic step executor — receives recipe from PC, executes
-  with sample-counted holds, streams `SEQ,<type>,SAMPLE,...` per 106-H reading
-- `seq_sensor_adapter.c/.h`: Monotonic 106-H sample counter, called from
-  `on_106h_sample()` in main.c
-- `sequence_runner.c/.h`: Added `sequence_runner_force_active()` and
-  `sequence_runner_force_idle()` bridge functions for executor lockout
-- `main.c`: New LAN command handlers for `seq_step`, `seq_prompt`, `seq_run`,
-  `sequence_abort`.  Modified `sequence_start` to call `seq_executor_begin()`.
-  Added `seq_sensor_notify_new_sample()` in `on_106h_sample()`.
-  Replaced old `seq_power_cal`/`seq_airflow_val` registration with `seq_executor_init()`.
-- `CMakeLists.txt`: Swapped old sequence files for new executor files.
-- Superseded messages: `CAL_DATA`, `CAL_START`, `CAL_COMPLETE`, `VAL_DATA`,
-  `VAL_START`, `VAL_RESULT`, `SEQ_DONE` — all replaced by generic `SEQ,<type>,*` format.
-
-### Previous Session Changes (2026-02-25)
-- Sequence runner framework + interactive prompt support
-- `seq_power_cal.c` + `seq_airflow_val.c` (now removed from build)
-- Relay source-tracking (`relay_source_t`, `relay_set_with_source()`)
-- NVS relay persistence with reset-reason awareness
-- LAN reconnect state push (`STATE,...`)
+### Previous Changes (2026-02-28)
+- `seq_executor.c`: Single-command calibration (`seq_executor_load_calibration`)
+- `main.c`: `CMD,calibrate[,flow=<lpm>]` handler
+- Legacy aliases `calibrate_start/stop/status` routed to seq_executor
+- Executor-owned relay prerequisites with hardware interlock
+- Air compressor dependency on ozone_gen enforced in `relay_control.c`
 
 ## Hardware Notes
 

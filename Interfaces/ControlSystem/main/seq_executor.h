@@ -45,7 +45,7 @@ extern "C" {
 
 /* ── Limits ─────────────────────────────────────────────────────── */
 
-#define SEQ_EXEC_MAX_STEPS      256     /**< Max steps in a recipe */
+#define SEQ_EXEC_MAX_STEPS      512     /**< Max steps in a recipe */
 #define SEQ_EXEC_MAX_PROMPTS    16      /**< Max prompts in a recipe */
 #define SEQ_EXEC_PHASE_LEN      24      /**< Max phase label length */
 #define SEQ_EXEC_PROMPT_ID_LEN  32      /**< Max prompt ID length */
@@ -169,13 +169,20 @@ int seq_executor_get_step_count(void);
  *   - Sweep Down: 100→0% in 1% steps, 2 samples each
  *   - Total: 203 steps
  *
- * Relay prereqs (O2=ON, O3=ON, Air=OFF) are baked in.
+ * Relay prereqs: O2=ON (if flow>0), O3=ON, Air per air_comp_on.
  * After calling this, call seq_executor_run() to start.
  *
- * @param flow_lpm  O2 flow rate in LPM (stored in metadata)
+ * @param flow_lpm        O2 flow rate in LPM (stored in metadata)
+ * @param air_comp_on     Air compressor relay state for entire sequence
+ * @param random_powers   PC-generated random power levels (ascending then
+ *                        descending), each held for 20 samples.  NULL = no
+ *                        random phase.
+ * @param num_random      Number of entries in random_powers (0 = skip)
  * @return ESP_OK, ESP_ERR_INVALID_STATE if already running
  */
-esp_err_t seq_executor_load_calibration(float flow_lpm);
+esp_err_t seq_executor_load_calibration(float flow_lpm, bool air_comp_on,
+                                        const uint8_t *random_powers,
+                                        int num_random);
 
 /**
  * @brief Load a built-in validation recipe

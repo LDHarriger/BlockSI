@@ -190,7 +190,7 @@ esp_err_t peripherals_init_lab_o3(void)
     dfrobot_o3_config_t o3_cfg = {
         .i2c_port = I2C_MASTER_PORT,
         .i2c_addr = I2C_ADDR_DFROBOT_O3,
-        .sample_interval_ms = LAB_O3_SAMPLE_INTERVAL_MS,
+        .sample_interval_ms = 0,  // Disable internal auto-sample; sensor_aggregator is sole reader
         .alarm_callback = lab_o3_alarm_handler,
     };
     

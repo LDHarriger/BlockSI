@@ -54,7 +54,7 @@
 #define I2C_MASTER_PORT         I2C_NUM_0
 #define I2C_MASTER_SDA_GPIO     21
 #define I2C_MASTER_SCL_GPIO     22
-#define I2C_MASTER_FREQ_HZ      400000      // 400kHz Fast Mode
+#define I2C_MASTER_FREQ_HZ      100000      // 100kHz Standard Mode (SEN0321 requirement)
 
 // I2C Device Addresses
 #define I2C_ADDR_DFROBOT_O3     0x73        // DFRobot Gravity O3 safety sensor

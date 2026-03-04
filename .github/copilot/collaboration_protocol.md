@@ -1,22 +1,40 @@
 # BlockSI Multi-Agent Collaboration Protocol
 
-> Last updated: 2026-02-25
+> Last updated: 2026-03-04
 
 ## Overview
 
-BlockSI development uses **domain-separated AI coding agents**, each working
-in its own chat session with focused context.  This document defines how
-those agents coordinate.
+BlockSI development previously used **domain-separated AI coding agents**
+(one for ESP32, one for the PC dashboard).  As of 2026-03-04, this has been
+**changed to a single-agent model** — one GitHub Copilot agent handles both
+the ESP32 firmware and the PC dashboard within the same chat session.
 
-## Active Agents
+**Rationale**: When a feature spans the ESP32↔PC boundary (e.g. adding a new
+calibration phase, changing a command argument format), the dual-agent model
+required writing the interface contract, waiting for the other agent to read
+it, and coordinating through documentation handoffs.  This introduced lag,
+context drift, and subtle regressions.  A single agent with full-stack context
+builds both sides of a feature simultaneously, keeping the interface contract
+always in sync.
+
+**The collaboration docs remain active**: They serve as persistent memory
+across context windows (summaries), architectural reference (interface contract),
+and decision history (decisions log) — all valuable regardless of how many
+agents are active.
+
+## Active Agent
 
 | Agent | Domain | Owns |
 |-------|--------|------|
-| **Dashboard Agent** | `Interfaces/PC/` | `blocksi_dashboard.py`, PC-side calibration logic, NiceGUI UI |
-| **ESP32 Agent** | `Interfaces/ControlSystem/` | All firmware `.c/.h` files, `CMakeLists.txt`, `sdkconfig` |
+| **BlockSI Agent** | Full-stack | All firmware `.c/.h` files, `Interfaces/PC/blocksi_dashboard.py`, collaboration docs |
 
-Either agent may **read** any file in the repo, but must only **write** to
-files in its own domain, plus the shared collaboration docs listed below.
+> **Previous model** (before 2026-03-04): Two domain-separated agents —
+> "Dashboard Agent" (Interfaces/PC/) and "ESP32 Agent" (Interfaces/ControlSystem/).
+> See decisions_log.md entry 2026-03-04 for rationale.
+
+Either session may **read and write** any file in the repo.  Both summaries
+(`dashboard_agent_summary.md` and `esp32_agent_summary.md`) are still maintained
+for continuity — they cover their respective domains.
 
 ## Collaboration Documents (`.github/copilot/`)
 

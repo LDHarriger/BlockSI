@@ -54,6 +54,7 @@
 #include "sequence_runner.h"
 #include "seq_executor.h"
 #include "seq_sensor_adapter.h"
+#include "data_cache.h"
 
 static const char *TAG = "BLOCKSI";
 
@@ -370,6 +371,37 @@ static void lan_event_callback(bool connected)
                  s_current_flow_lpm);
         
         lan_client_send_message(state_msg);
+
+        /* ── Backfill cached DATA lines ─────────────────────────────
+         * Wait 500 ms so the PC has time to process the time_sync RSP
+         * before we flood it with historical DATA lines.
+         */
+        uint16_t n = data_cache_count();
+        if (n > 0) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            char header[48];
+            snprintf(header, sizeof(header), "BACKFILL_START,%u\n", (unsigned)n);
+            lan_client_send_message(header);
+            ESP_LOGI(TAG, "Backfill: sending %u cached DATA lines", (unsigned)n);
+
+            char line_buf[DATA_CACHE_LINE_MAX];
+            uint16_t sent = 0;
+            while (data_cache_peek(line_buf, sizeof(line_buf))) {
+                if (lan_client_send_message(line_buf) == ESP_OK) {
+                    data_cache_pop();
+                    sent++;
+                } else {
+                    ESP_LOGW(TAG, "Backfill: send failed after %u lines", (unsigned)sent);
+                    break;
+                }
+                /* Yield briefly every 50 lines to avoid starving other tasks */
+                if (sent % 50 == 0) {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+            }
+            lan_client_send_message("BACKFILL_END\n");
+            ESP_LOGI(TAG, "Backfill: sent %u / %u lines", (unsigned)sent, (unsigned)n);
+        }
     } else {
         ESP_LOGW(TAG, "LAN disconnected — relay and power states preserved");
     }
@@ -1098,6 +1130,8 @@ static void on_106h_sample(const m106h_sample_t *sample)
                             wiper_voltage);                      // Wiper voltage (0-3.3V)
 
     if (data_len > 0 && data_len < (int)sizeof(data_line)) {
+        /* Always cache — backfilled on reconnect if PC was offline */
+        data_cache_push(data_line);
         lan_client_send_message(data_line);
     }
 #endif
@@ -1220,6 +1254,12 @@ void app_main(void)
     ESP_LOGI(TAG, "Initializing backup storage...");
     if (backup_storage_init() != ESP_OK) {
         ESP_LOGW(TAG, "Backup storage init failed (continuing without backup)");
+    }
+
+    // Initialize RAM data cache for LAN disconnect backfill
+    ESP_LOGI(TAG, "Initializing data cache...");
+    if (data_cache_init() != ESP_OK) {
+        ESP_LOGW(TAG, "Data cache init failed (continuing without backfill)");
     }
     
     // Initialize all peripherals (I2C, SPI, DAC, sensors)

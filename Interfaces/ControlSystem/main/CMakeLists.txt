@@ -19,6 +19,7 @@ idf_component_register(
         "sequence_runner.c"         # Generic autonomous sequence framework
         "seq_executor.c"            # Recipe-based step executor (replaces seq_power_cal/seq_airflow_val)
         "seq_sensor_adapter.c"      # 106-H sample counter for executor
+        "data_cache.c"              # RAM ring buffer for DATA telemetry during LAN disconnect
     INCLUDE_DIRS 
         "."
     REQUIRES 

@@ -233,7 +233,7 @@ Models/            — Git-tracked fitted models
 
 ### File Naming Convention
 - Calibration: `{YYYY-MM-DD}_{HHMMSS}_PowerO3Cal_{LPM}Lpm_{O2}O2.csv`
-- Telemetry: `{YYYY-MM-DD}_Stream.csv` (daily, appended)
+- Telemetry: `{YYYY-MM-DD}_{HHMMSS}_Stream.csv` (per-connection session, not daily)
 - O2% = weighted average: `(F_conc × 95 + F_air × 21) / (F_conc + F_air)`, rounded to int
 
 ### O2% Calculation

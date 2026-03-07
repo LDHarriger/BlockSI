@@ -226,6 +226,10 @@ class SystemState:
         self.val_result: dict = {}
         # Settings
         self.notify_level: str = "all"     # "all" | "errors" | "none"
+        # Backfill state (during BACKFILL_START..BACKFILL_END from ESP32)
+        self.backfill_active: bool = False
+        self.backfill_expected: int = 0
+        self.backfill_received: int = 0
         # Derived (kept in sync by update_derived)
         self.target_o3_pct: float = 0.0
         self.target_mg_per_s: float = 0.0
@@ -369,24 +373,36 @@ def _notify(msg: str, level: str = "positive") -> None:
 
 
 # =============================================================================
-# CSV logger  (stream telemetry to daily files)
+# CSV logger  (stream telemetry — new file per connection session)
 # =============================================================================
+CSV_HEADER = (
+    "timestamp,esp_ts_ms,vessel_o3_pct,cell_temp_c,"
+    "pressure_mbar,room_o3_ppm,vessel_temp_c,"
+    "power_target,power_actual,wiper_v\n"
+)
+
+
 class _CSVLogger:
     def __init__(self) -> None:
-        self._path = os.path.join(
-            TELEMETRY_DIR, f"{datetime.now():%Y-%m-%d}_Stream.csv"
-        )
+        self._path: Optional[str] = None
         self._header = False
 
+    def reset(self, connect_time: Optional[datetime] = None) -> None:
+        """Start a new CSV file.  Called on each ESP32 (re)connection."""
+        ts = connect_time or datetime.now()
+        self._path = os.path.join(
+            TELEMETRY_DIR, f"{ts:%Y-%m-%d_%H%M%S}_Stream.csv"
+        )
+        self._header = False
+        log(f"CSV → {os.path.basename(self._path)}")
+
     def write(self, s: dict) -> None:
+        if self._path is None:
+            return  # no active session yet
         try:
             if not self._header:
                 with open(self._path, "w") as f:
-                    f.write(
-                        "timestamp,esp_ts_ms,vessel_o3_pct,cell_temp_c,"
-                        "pressure_mbar,room_o3_ppm,vessel_temp_c,"
-                        "power_target,power_actual,wiper_v\n"
-                    )
+                    f.write(CSV_HEADER)
                 self._header = True
             with open(self._path, "a") as f:
                 f.write(
@@ -608,6 +624,7 @@ class TCPServer:
             self._writer = None
             self._reader = None
         S.connected = False
+        S.time_synced = False          # force re-sync on next connection
 
     # -- connection handler -----------------------------------------------
     async def _on_connect(
@@ -621,6 +638,9 @@ class TCPServer:
         self._reader = reader
         self._writer = writer
         S.connected = True
+
+        # Start a new CSV file for this connection session
+        csv_logger.reset(datetime.now())
 
         # Time-sync immediately
         pc_ms = int(time.time() * 1000)
@@ -665,12 +685,23 @@ class TCPServer:
     async def _dispatch(self, line: str) -> None:
         prefix = line.split(",", 1)[0]
         try:
-            if prefix == "DATA":
+            if prefix == "BACKFILL_START":
+                self._handle_backfill_start(line)
+            elif prefix == "BACKFILL_END":
+                self._handle_backfill_end()
+            elif prefix == "DATA":
                 sample = parse_data_line(line)
                 if sample:
-                    apply_telemetry(sample)
-                    data_buf.append(sample)
-                    csv_logger.write(sample)
+                    if S.backfill_active:
+                        # Historical data — write to CSV + graph buffer, but
+                        # do NOT update live sensor displays.
+                        S.backfill_received += 1
+                        data_buf.append(sample)
+                        csv_logger.write(sample)
+                    else:
+                        apply_telemetry(sample)
+                        data_buf.append(sample)
+                        csv_logger.write(sample)
             elif prefix == "RSP":
                 self._handle_rsp(line)
             elif prefix == "STATE":
@@ -681,6 +712,29 @@ class TCPServer:
                 log(f"Unknown line: {line[:80]}", "warn")
         except Exception as exc:
             log(f"Dispatch error ({prefix}): {exc}  line={line[:80]}", "error")
+
+    # -- Backfill handlers -------------------------------------------------
+    def _handle_backfill_start(self, line: str) -> None:
+        parts = line.split(",")
+        n = int(parts[1]) if len(parts) >= 2 else 0
+        S.backfill_active = True
+        S.backfill_expected = n
+        S.backfill_received = 0
+        log(f"Backfill started — expecting {n} cached DATA lines", "info")
+
+    def _handle_backfill_end(self) -> None:
+        log(
+            f"Backfill complete — received {S.backfill_received}"
+            f"/{S.backfill_expected} samples",
+            "info",
+        )
+        _notify(
+            f"Backfill: {S.backfill_received} cached samples recovered",
+            "positive",
+        )
+        S.backfill_active = False
+        S.backfill_expected = 0
+        S.backfill_received = 0
 
     # -- RSP handler -------------------------------------------------------
     def _handle_rsp(self, line: str) -> None:

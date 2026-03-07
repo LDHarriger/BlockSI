@@ -1,6 +1,6 @@
 # BlockSI Interface Contract
 
-> Last updated: 2026-03-04
+> Last updated: 2026-03-07
 >
 > This is the **single source of truth** for everything shared between
 > the ESP32 firmware and the PC dashboard.  Both agents MUST read this
@@ -46,6 +46,31 @@ Sent automatically by ESP32 immediately after TCP connection is established.
 PC dashboard should parse this to synchronize its relay/power display with
 the ESP32's actual state.  This ensures the PC is never out of sync after
 a disconnect/reconnect cycle.
+
+### ESP32 -> PC:  Backfill (cached data on reconnect)  `[IMPLEMENTED]`
+
+When the PC was disconnected, the ESP32 caches DATA lines in a RAM ring
+buffer (500 slots).  On reconnect the ESP32 waits 500 ms (so the PC can
+process `time_sync`), then sends:
+
+```
+BACKFILL_START,<count>\n          -- Number of cached DATA lines to follow
+DATA,...\n                         -- Oldest cached sample (same DATA format)
+DATA,...\n                         -- ...
+BACKFILL_END\n                     -- All cached lines sent
+```
+
+**Timing**: STATE is sent first, then `time_sync` RSP is processed, then
+backfill begins after 500 ms.  This guarantees `esp_time_offset_ms` is
+valid before backfill DATA is parsed.
+
+**Reboot**: RAM cache is cleared on reboot, so all backfill data is from
+the current boot epoch.  `esp_timestamp_ms` values are valid with the
+current `time_sync` offset.
+
+**PC handling**: During backfill, DATA samples are written to the CSV log
+and appended to the graph buffer but do NOT update live sensor displays
+(to avoid displaying stale values in the sidebar).
 
 ### ESP32 -> PC:  Recipe sequence messages  `[IMPLEMENTED]`
 

@@ -350,8 +350,9 @@ static void executor_task(void *arg)
                  i + 1, s_exec.step_count, step->power_pct,
                  step->hold_samples, step->phase, step->air_comp ? 1 : 0);
 
-        /* Set power level */
-        o3_power_set(step->power_pct);
+        /* Set power level — must go through state manager so validator
+         * task sees the updated target_pct and doesn't fight us. */
+        blocksi_state_set_power(step->power_pct);
 
         /* Wait for motor to settle (~500ms typical) */
         vTaskDelay(pdMS_TO_TICKS(500));
@@ -583,8 +584,9 @@ static void apply_relay_prereqs(void)
  */
 static void restore_relays(void)
 {
-    /* Always kill power first */
-    o3_power_set(0);
+    /* Always kill power first — use state API so validator doesn't restore
+     * power back toward the old target_pct after we zero it here. */
+    blocksi_state_set_power(0);
 
     /* Always turn off air compressor (it's inside the MP-8000) */
     if (relay_get_state(RELAY_AIR_COMP) == RELAY_ON) {

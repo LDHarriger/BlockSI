@@ -697,12 +697,16 @@ esp_err_t seq_executor_load_validation(uint8_t power_pct, float flow_lpm)
     /*
      * Validation sequence:
      *   Phase 1 — Baseline: 0% power, 15 samples (~37s)
-     *   Phase 2 — Spot Low: ~33% of target, 5 samples (~12s)
-     *   Phase 3 — Spot High: ~66% of target, 5 samples (~12s)
-     *   Phase 4 — Target: full power, 15 samples (~37s)
+     *   Phase 2 — Spot Low: ~33% of target, 20 samples (~50s)
+     *   Phase 3 — Spot High: ~66% of target, 20 samples (~50s)
+     *   Phase 4 — Target: full power, 20 samples (~50s)
      *   Phase 5 — Cooldown: 0% power, 5 samples (~12s)
      *
-     * Total: 5 steps, ~112s (~1.9 min)
+     * Total: 5 steps, 80 samples, ~200s (~3.3 min)
+     *
+     * The 20-sample holds allow ~7 transient samples for motor pot
+     * settling + gas transit to the 106-H sensor, leaving ~13 stable
+     * samples for the PC-side analysis (VAL_TRANSIENT_SKIP).
      *
      * Relay prereqs: O2=ON, O3=ON, Air=OFF.
      * Prompts: check_flow before baseline, check_route before spot_low.
@@ -723,11 +727,11 @@ esp_err_t seq_executor_load_validation(uint8_t power_pct, float flow_lpm)
     if (spot1 < 10) spot1 = 10;
     if (spot2 < 10) spot2 = 10;
 
-    /* Steps */
+    /* Steps — 20-sample holds give 13 stable samples after transient skip */
     add_step_internal(0, 0,          15, "baseline",  false);
-    add_step_internal(1, spot1,       5, "spot_low",  false);
-    add_step_internal(2, spot2,       5, "spot_high", false);
-    add_step_internal(3, power_pct,  15, "target",    false);
+    add_step_internal(1, spot1,      20, "spot_low",  false);
+    add_step_internal(2, spot2,      20, "spot_high", false);
+    add_step_internal(3, power_pct,  20, "target",    false);
     add_step_internal(4, 0,           5, "cooldown",  false);
 
     xSemaphoreGive(s_exec.mutex);

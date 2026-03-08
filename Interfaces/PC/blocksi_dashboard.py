@@ -239,6 +239,7 @@ class SystemState:
         self.val_lpm: float = DEFAULT_FLOW_LPM
         self.val_samples: list[dict] = []
         self.val_result: dict = {}
+        self.val_file: str = ""
         # Settings
         self.notify_level: str = "all"     # "all" | "errors" | "none"
         # Backfill state (during BACKFILL_START..BACKFILL_END from ESP32)
@@ -522,6 +523,24 @@ def _save_cal_csv(samples: list[dict], lpm: float, o2_pct: int) -> str:
     if samples:
         pd.DataFrame(samples).to_csv(fpath, index=False)
         log(f"Saved {len(samples)} cal samples -> {fname}", "cal")
+    return fname
+
+
+def _save_val_csv(samples: list[dict], power: float, lpm: float) -> str:
+    """Save validation samples to CSV, return filename.
+
+    Naming: ``{YYYY-MM-DD}_{HHMMSS}_Validation_{pwr}pct_{LPM}Lpm.csv``
+    """
+    now = datetime.now()
+    lpm_s = f"{lpm:.0f}" if lpm == int(lpm) else f"{lpm:.1f}"
+    fname = (
+        f"{now:%Y-%m-%d_%H%M%S}_Validation_"
+        f"{int(power)}pct_{lpm_s}Lpm.csv"
+    )
+    fpath = os.path.join(VALIDATION_DIR, fname)
+    if samples:
+        pd.DataFrame(samples).to_csv(fpath, index=False)
+        log(f"Saved {len(samples)} val samples -> {fname}", "seq")
     return fname
 
 
@@ -979,51 +998,74 @@ class TCPServer:
             )
             # Show "saving" phase while we save/analyze
             S.seq_phase = "saving"
-            # Post-sequence analysis
-            if seq_type == "calibrate":
-                if S.cal_samples:
-                    o2 = compute_effective_o2_pct(S.cal_lpm, S.relay_air_comp)
-                    S.cal_file = _save_cal_csv(S.cal_samples, S.cal_lpm, o2)
+            # Post-sequence analysis — wrapped in try/finally to
+            # guarantee S.sequence_active is cleared even on errors.
+            try:
+                if seq_type == "calibrate":
+                    if S.cal_samples:
+                        o2 = compute_effective_o2_pct(
+                            S.cal_lpm, S.relay_air_comp
+                        )
+                        S.cal_file = _save_cal_csv(
+                            S.cal_samples, S.cal_lpm, o2
+                        )
+                        _notify(
+                            f"Calibration: {len(S.cal_samples)} samples saved",
+                            "positive",
+                        )
+                    else:
+                        _notify(
+                            "Calibration complete (no samples)", "warning"
+                        )
+                elif seq_type == "validate":
+                    # Save validation data to CSV
+                    S.val_file = _save_val_csv(
+                        S.val_samples, S.val_power, S.val_lpm
+                    )
+                    S.val_result = _analyze_validation(
+                        S.val_samples, S.val_power, S.val_lpm
+                    )
+                    dev = S.val_result.get("deviation_pct", 0.0)
+                    n = len(S.val_samples)
+                    if S.val_result.get("passed"):
+                        _notify(
+                            f"Validation PASSED — {dev:.1f}% deviation"
+                            f" ({n} samples saved)",
+                            "positive",
+                        )
+                    elif dev < 20:
+                        _notify(
+                            f"Validation marginal — {dev:.1f}% deviation"
+                            f" ({n} samples saved)",
+                            "warning",
+                        )
+                    else:
+                        _notify(
+                            f"Validation FAILED — {dev:.1f}% deviation"
+                            f" ({n} samples saved)",
+                            "negative",
+                        )
+                else:
                     _notify(
-                        f"Calibration: {len(S.cal_samples)} samples saved",
+                        f"{seq_type.title()} completed ({elapsed:.0f}s)",
                         "positive",
                     )
-                else:
-                    _notify("Calibration complete (no samples)", "warning")
-            elif seq_type == "validate":
-                S.val_result = _analyze_validation(
-                    S.val_samples, S.val_power, S.val_lpm
+            except Exception as exc:
+                log(f"Post-sequence analysis error: {exc}", "error")
+                _notify(f"Sequence error: {exc}", "negative")
+            finally:
+                # ALWAYS release UI. Relay/power cleanup is deferred to
+                # _tick (next 1s cycle) because sending commands from
+                # inside _handle_seq deadlocks the TCP read loop.
+                S.pending_prompt_id = ""
+                S.pending_prompt_text = ""
+                S.seq_phase = "complete"
+                S.sequence_active = False
+                S.seq_cleanup_pending = True
+                log(
+                    "Sequence complete — cleanup deferred to _tick",
+                    "seq",
                 )
-                dev = S.val_result.get("deviation_pct", 0.0)
-                if S.val_result.get("passed"):
-                    _notify(
-                        f"Validation PASSED — {dev:.1f}% deviation",
-                        "positive",
-                    )
-                elif dev < 20:
-                    _notify(
-                        f"Validation marginal — {dev:.1f}% deviation",
-                        "warning",
-                    )
-                else:
-                    _notify(
-                        f"Validation FAILED — {dev:.1f}% deviation",
-                        "negative",
-                    )
-            else:
-                _notify(
-                    f"{seq_type.title()} completed ({elapsed:.0f}s)",
-                    "positive",
-                )
-            # Release UI immediately. Relay/power cleanup is deferred to
-            # _tick (next 1s cycle) because sending commands from inside
-            # _handle_seq deadlocks the TCP read loop.
-            S.pending_prompt_id = ""
-            S.pending_prompt_text = ""
-            S.seq_phase = "complete"
-            S.sequence_active = False
-            S.seq_cleanup_pending = True
-            log("Sequence complete — cleanup deferred to _tick", "seq")
 
         elif action == "ABORTED":
             # SEQ,calibrate,ABORTED,user_request
@@ -1273,6 +1315,7 @@ async def _start_validation(**kwargs) -> bool:
     S.pending_prompt_text = ""
     S.val_samples = []
     S.val_result = {}
+    S.val_file = ""
 
     # Single command — ESP32 builds recipe internally
     resp = await tcp.send_command(
@@ -2470,13 +2513,34 @@ async def index():
                     )
                     val_result_card.visible = False
                     with val_result_card:
-                        val_result_icon = ui.icon("check_circle").classes("text-h3")
-                        val_result_title = ui.label("").classes("text-h6")
+                        with ui.row().classes(
+                            "w-full items-center justify-between"
+                        ):
+                            with ui.row().classes("items-center q-gutter-sm"):
+                                val_result_icon = ui.icon(
+                                    "check_circle"
+                                ).classes("text-h3")
+                                val_result_title = ui.label("").classes(
+                                    "text-h6"
+                                )
+
+                            def _dismiss_val_result():
+                                S.val_result = {}
+                                val_result_card.visible = False
+
+                            ui.button(
+                                icon="close",
+                                on_click=_dismiss_val_result,
+                                color="grey",
+                            ).props("flat dense round size=sm")
                         with ui.row().classes("q-gutter-md q-mt-sm"):
                             val_mean_lbl = ui.label("")
                             val_expected_lbl = ui.label("")
                             val_dev_lbl = ui.label("")
                             val_std_lbl = ui.label("")
+                        val_file_lbl = ui.label("").classes(
+                            "text-caption text-grey q-mt-xs"
+                        )
 
                     # Live O3 chart during validation
                     val_chart = ui.echart({
@@ -2858,6 +2922,10 @@ async def index():
                 "sweep_up": f"Sweep up (0→100%)",
                 "sweep_down": f"Sweep down (100→0%)",
                 "random": f"Random hold @ {S.seq_power:.0f}%",
+                "spot_low": f"Spot check low ({S.seq_power:.0f}%)",
+                "spot_high": f"Spot check high ({S.seq_power:.0f}%)",
+                "target": f"Target hold ({S.seq_power:.0f}%)",
+                "cooldown": "Cooldown (0%)",
                 "fill": f"Filling @ 100% — O3={S.vessel_o3_pct:.3f}%",
                 "transition": "Saving fill, switching to evac...",
                 "evac": f"Evacuating @ 0% — O3={S.vessel_o3_pct:.4f}%",
@@ -3080,11 +3148,17 @@ async def index():
             val_result_icon._classes = [f"text-h3 text-{color}"]
             val_result_icon.update()
             status = "PASSED" if passed else "FAILED"
-            val_result_title.text = f"{status} — {dev:.1f}% deviation"
+            n = r.get("total_samples", 0)
+            val_result_title.text = (
+                f"{status} — {dev:.1f}% deviation ({n} samples)"
+            )
             val_mean_lbl.text = f"Mean O3: {r.get('mean_o3', 0):.3f}%"
             val_expected_lbl.text = f"Expected: {r.get('expected_o3', 0):.3f}%"
             val_dev_lbl.text = f"CV: {cv:.1f}%"
             val_std_lbl.text = f"Std: {r.get('std_o3', 0):.4f}%"
+            val_file_lbl.text = (
+                f"Saved: {S.val_file}" if S.val_file else ""
+            )
 
         # -- fill/evac observer UI ----------------------------------------
         if S.fill_active or S.fill_phase in ("complete", "error"):

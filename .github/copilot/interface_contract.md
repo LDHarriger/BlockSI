@@ -315,7 +315,7 @@ These constants must match between ESP32 firmware and PC dashboard:
 
 | Constant | Value | Used by |
 |----------|-------|---------|
-| `O3_MASS_FLOW_K` | 0.357 | mg/s = %vol * LPM * K |
+| `O3_MASS_FLOW_K` | 0.3327 | mg/s = %vol × LPM × K.  K = M_O3 / (V_m × 60 × 100), V_m=24.04 L/mol at 20°C |
 | `AIR_COMP_LPM` | 10.0 | LPM added when air compressor on |
 | `POWER_MODEL_A` | 1.78 | O3_max = A/F + B (to be replaced by fitted model) |
 | `POWER_MODEL_B` | 1.40 | O3_max = A/F + B |
@@ -533,3 +533,95 @@ When the Dashboard receives `SEQ,<type>,PROMPT,<prompt_id>,<text>`:
 4. **Send** `CMD,sequence_confirm` when operator confirms
 5. **Show "Executing..." spinner** after confirming
 
+---
+
+## Gas Path Topology  `[IMPLEMENTED]`
+
+```
+O2 Concentrator (95% O2) ──┐
+                            ├──→ MP-8000 Generator ──→ Vessel ──→ 106-H Sensor (outlet)
+Air Compressor (~21% O2) ──┘                                         │
+                                                                     ↓
+                                                              Exhaust / charcoal filter
+```
+
+- **106-H is on the outlet**: Measures O3 leaving the vessel, not entering.
+- **L-valve (manual)**: Switchable between vessel-through and direct-to-sensor paths.
+  Direct path bypasses the vessel for validation (inlet ≈ outlet when no vessel).
+- **Mass balance**: `mg_absorbed = mg_produced(model) - mg_measured(106-H) - mg_decayed(Arrhenius)`
+- Vessel: ~11.3L modified pressure tank, ~60% fill with substrate → ~4L residual gas volume.
+  Actual gas volume determined by fill/evac CSTR calibration.
+
+---
+
+## Fill / Evacuation Calibration  `[IMPLEMENTED]`
+
+PC-driven sequence for determining system gas volume via CSTR model fitting.
+Unlike calibration/validation (ESP32-driven), the PC orchestrates this
+directly using `power_set` and `relay_set` commands, monitoring DATA telemetry.
+
+### Protocol
+
+```
+PC                                  ESP32
+──                                  ─────
+cmd_set_power(0)                 →  RSP,OK,power_set,...
+cmd_set_relay("ozone_gen", 1)    →  RSP,OK,relay_set,...
+cmd_set_relay("o2_conc", 1)      →  RSP,OK,relay_set,...
+cmd_set_relay("air_comp", 0|1)   →  RSP,OK,relay_set,...
+  (15 baseline samples at 0%)
+cmd_set_power(100)               →  RSP,OK,power_set,...
+  (monitor DATA until 5 consecutive samples ≥ 95% of target O3)
+  → Save fill CSV
+  (optional: toggle air_comp for evac)
+cmd_set_power(0)                 →  RSP,OK,power_set,...
+  (monitor DATA until 5 consecutive samples < 0.01% vol)
+  → Save evac CSV
+  → Safe standby (power=0, all relays off)
+```
+
+### CSTR Model
+
+- **Fill**: `C_out(t) = C_in × (1 - exp(-(t - t_d)/τ))`
+- **Evac**: `C_out(t) = C_ss × exp(-(t - t_d)/τ)`
+- `τ` = time constant (seconds), `t_d` = transport delay
+- `V_system = mean(τ_fill, τ_evac) × F` where F = flow in L/s
+- Fitted via `scipy.optimize.curve_fit`, stored in `Models/Fill/` as JSON
+
+### File Naming
+
+- Fill: `Data/Fill/{YYYY-MM-DD}_{HHMMSS}_Fill_{LPM}Lpm[_air].csv`
+- Evac: `Data/Evac/{YYYY-MM-DD}_{HHMMSS}_Evac_{LPM}Lpm[_air].csv`
+- Model: `Models/Fill/fill_evac_{LPM}lpm_{O2}o2.json`
+
+---
+
+## Dosimetry Strategy  `[DECIDED]`
+
+### Mass Balance (steady-state)
+
+```
+mg_produced   = C_model(power) × F × K × Δt
+mg_evacuated  = C_106H(outlet) × F × K × Δt
+mg_decayed    = Arrhenius(T, RH) × V_gas × C_vessel × Δt   (< 1% of throughput)
+mg_absorbed   = mg_produced - mg_evacuated - mg_decayed
+```
+
+Where K = 0.3327 mg·min / (%vol·L) at 20°C.
+
+### Scope
+
+- **Dosimetry computation**: PC-only (dashboard aggregates batch data)
+- **ESP32 dosimetry.c**: Provides per-sample decay estimates and accumulator,
+  but batch-level calculations done on PC with validated model
+- **Transients**: CSTR model handles fill/evac phases; steady-state mass
+  balance for production phase
+
+### Sterilization Batch (future)
+
+Three-phase batch: Fill → Hold (sterilize) → Evac.
+- Fill: 100% power, monitor until steady-state
+- Hold: timed at set power, accumulate dose
+- Evac: 0% power, purge until safe
+- Total dose = Σ(mg_absorbed) across all phases
+- Implementation deferred to future session

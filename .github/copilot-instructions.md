@@ -6,13 +6,16 @@ BlockSI is an ozone sterilization monitoring and control system for Shroom-E Co.
 - **ESP32 Firmware** (`Interfaces/ControlSystem/`): ESP-IDF v5.4+ project controlling ozone generation, monitoring sensors, and streaming data
 - **PC Dashboard** (`Interfaces/PC/`): Being migrated from Streamlit (v9) to **NiceGUI**. The Streamlit version (`blocksi_dashboard_v9.py`) is the last working version but has fundamental limitations.
 - **Data** (`Data/`): CSV telemetry and sequence logs, organised by type:
-  - `Data/Telemetry/` — Daily stream CSVs (renamed from `Stream/`)
-  - `Data/Calibration/` — Power-O3 characterisation CSVs (renamed from `O3PowerCalibration/`)
+  - `Data/Telemetry/` — Per-connection stream CSVs
+  - `Data/Calibration/` — Power-O3 characterisation CSVs
   - `Data/Validation/` — Validation run CSVs
-  - `Data/Fill/`, `Data/Decay/`, `Data/Sterilization/` — Future sequence types
+  - `Data/Fill/` — Fill calibration CSVs (CSTR fill curves)
+  - `Data/Evac/` — Evacuation calibration CSVs (CSTR evac curves)
+  - `Data/Decay/`, `Data/Sterilization/` — Future sequence types
 - **Models** (`Models/`): Fitted prediction models (git-tracked):
-  - `Models/O3Power/` — Power→O3 models
-  - `Models/Fill/`, `Models/Decay/` — Future model families
+  - `Models/O3Power/` — Power→O3 sigmoid models (JSON)
+  - `Models/Fill/` — Fill/Evac CSTR models (JSON, system volume estimation)
+  - `Models/Decay/` — Future model families
 
 ## Collaboration Protocol
 
@@ -38,12 +41,14 @@ documentation.  All collaboration docs live in `.github/copilot/`:
 ## Architecture & Data Flow
 
 ```
-106-H Ozone Monitor (RS232) → ESP32 (UART2) → Golioth Cloud + LAN TCP → PC Dashboard
-        ↓                         ↓
-   O3 wt% readings         Control: Relays, Motor Pot, Dosimetry
+106-H Ozone Monitor (RS232, on vessel OUTLET) → ESP32 (UART2) → Golioth Cloud + LAN TCP → PC Dashboard
+        ↓                                          ↓
+   O3 wt% readings                          Control: Relays, Motor Pot, Dosimetry
 ```
 
 Key integration pattern: The ESP32 acts as a bridge between industrial equipment (106-H monitor, MP-8000 generator) and cloud/PC interfaces. The LAN client (`lan_client.c`) uses a comma-separated text command protocol over TCP.
+
+**Gas path**: O2 concentrator (+ optional air compressor) → MP-8000 generator → Vessel → 106-H sensor (outlet). L-valve switchable for direct-to-sensor bypass (validation). Vessel: ~11.3L modified tank, ~60% fill with substrate → ~4L residual gas volume.
 
 ## LAN Command Protocol (CRITICAL)
 
@@ -100,14 +105,14 @@ idf.py menuconfig               # WiFi, Golioth PSK, pins
 The dashboard has been fully migrated from Streamlit to NiceGUI.
 See `.github/copilot/dashboard_agent_summary.md` for current state.
 
-- **File**: `Interfaces/PC/blocksi_dashboard.py` (~1570 lines, NiceGUI)
+- **File**: `Interfaces/PC/blocksi_dashboard.py` (~3190 lines, NiceGUI)
 - **Reference**: `blocksi_dashboard_v9.py` (Streamlit, kept for reference only)
 - **Run**: `.venv\Scripts\python.exe Interfaces\PC\blocksi_dashboard.py`
 - **Dependencies**: nicegui, numpy, pandas, plotly (in `.venv`)
 
 ### Key constants:
 ```python
-O3_MASS_FLOW_K = 0.357   # mg/s per (%vol * LPM)
+O3_MASS_FLOW_K = 0.3327   # mg/s per (%vol * LPM), V_m=24.04 at 20°C
 AIR_COMP_LPM = 10.0      # Additional LPM when air compressor on
 POWER_MODEL_A = 1.78      # O3_max = A/F + B
 POWER_MODEL_B = 1.40
@@ -118,10 +123,10 @@ AIR_COMP_O2_PCT = 21      # Atmospheric O2
 
 ### UI layout (from hand-drawn mockup):
 - **Sidebar**: Connection status, Air/O2/O3 relay toggles, O2 LPM input, sensor readings
-- **Power tab**: Slider (0-100%), graduated preset buttons, Power-O3 curve graph, settings boxes (LPM, %Power, %vol O3, mg O3/s, g O3 @ 30min) — all linked via conversions
+- **Power tab**: Slider (0-100%), graduated preset buttons, Power-O3 curve graph, settings boxes (LPM, %Power, %vol O3, mg O3/s, g O3 @ 30min) — all linked via conversions. Expansion sections: Power Control, Calibration, Validation, Fill/Evac Calibration
 - **Telemetry tab**: Dual-axis time-series plots (O3 + Room O3, Power + Temp)
-- **Calibration tab**: Automated sequence (~17 min), progress display, file browser, model fitting
 - **Debug tab**: Manual command entry, system state dump
+- **Settings tab**: Notification preferences
 
 ### Calibration sequence design (single-command, `CMD,calibrate`):
 1. **Baseline**: 0% power, 15 samples (~37s) — air state per toggle

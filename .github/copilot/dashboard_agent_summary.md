@@ -1,17 +1,16 @@
 # Dashboard Agent Summary
 
-> Last updated: 2026-03-04 (Session 10 — Random phase, air toggle, safe standby, single-agent model)
+> Last updated: 2026-03-07 (Session 11 — Dosimetry infrastructure, fill/evac calibration, K constant)
 
 ## Current State
 
-The PC dashboard has been updated to use **single-command calibration with optional random phase**.
-Calibration sends one command (`CMD,calibrate,flow=<lpm>,air_comp=<0|1>[,random=<p1,...>]`) — the
-ESP32 runs the sweep autonomously and appends random hold steps if provided.  Other sequences
-(validate) still use the recipe protocol.  The PC does ALL analysis.
+The PC dashboard now includes **fill/evacuation calibration** for CSTR system volume
+estimation, alongside the existing power-O3 calibration and validation sequences.
+The K constant has been reconciled to 20°C reference across ESP32 and dashboard.
 
 | Property | Value |
 |----------|-------|
-| File | `Interfaces/PC/blocksi_dashboard.py` (~2460 lines) |
+| File | `Interfaces/PC/blocksi_dashboard.py` (~3190 lines) |
 | Framework | NiceGUI 3.8.0 (Quasar UI components, WebSocket push) |
 | Python | 3.14 in `.venv` |
 | Dependencies | nicegui, numpy, pandas, plotly, scipy |
@@ -206,11 +205,25 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 - Model Fitting UI in Calibration expansion with per-condition Fit Model buttons
 - Bug fixes: reconnection race, dispatch exception safety, seq_confirmed reset, COMPLETE/ABORTED deadlock, power rollback, time_sync RSP suppression
 
+### What Changed in Session 11
+- **K constant reconciliation**: `O3_MASS_FLOW_K = 0.3327` (20°C, V_m=24.04 L/mol)
+- **Fill/Evac analysis module**: `Interfaces/PC/analysis/fill_model.py` — FillModel dataclass, CSTR curves, fitting, JSON persistence
+- **Fill/Evac sequence coroutine**: `_start_fill_evac()` — PC-driven async coroutine with baseline→fill→transition→evac phases
+- **Fill/Evac UI expansion**: In Power tab — O2 LPM input, air comp toggles (fill/evac), progress bar, live chart, fit model button
+- **`_fit_and_save_fill_model()`**: One-click CSTR model fitting from most recent fill/evac CSVs
+- **SystemState fill fields**: `active_fill_model`, `fill_model_status`, `fill_active`, `fill_phase`, `fill_samples`, `evac_samples`, etc.
+- **Fill model auto-load**: `load_fill_model_for_current_condition()` at startup and after fitting
+- **ESP32 dosimetry defaults**: `dosimetry.c` vessel=11.3L, material=7.3L, flow=4.0 LPM
+- **Data directories**: `Data/Fill/`, `Data/Evac/` with .gitkeep
+- **Telemetry improvements** (sub-session): Per-connection stream naming, time-sync safety on disconnect, data cache + backfill protocol
+- **Documentation**: Gas path topology, fill/evac protocol, dosimetry strategy, batch plans in interface_contract.md and decisions_log.md
+
 ## Pending Work
 
 - `[IMPLEMENTED]` **Power→O3 model fitting**: 4-parameter sigmoid model, fitted per (LPM, O2%) condition, stored in `Models/O3Power/` as JSON. Analysis module at `Interfaces/PC/analysis/`.
+- `[IMPLEMENTED]` **Fill/Evac CSTR calibration**: PC-driven fill/evacuation sequence for system volume estimation. CSTR model fitting, stored in `Models/Fill/` as JSON. Analysis module at `Interfaces/PC/analysis/fill_model.py`.
 - `[PROPOSED]` **Historical data viewer**: Load and plot old CSV files from `Data/Telemetry/`.
-- `[PROPOSED]` **Future sequence types**: `fill`, `decay`, `sterilize` — recipe generators to be added.
+- `[PROPOSED]` **Sterilization batch**: Three-phase batch (Fill→Hold→Evac) with real-time dosimetry. Documented in interface_contract.md, implementation deferred.
 - `[PROPOSED]` **Validation certificate**: Generate JSON certificate with 24h validity on pass.
 - `[PROPOSED]` **Migrate power curve to ECharts**: Last remaining Plotly chart.
 
@@ -219,21 +232,24 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 ### Folder Structure
 ```
 Data/
-  Telemetry/       — Daily stream CSVs (was Stream/)
-  Calibration/     — Power-O3 calibration CSVs (was O3PowerCalibration/)
-  Validation/      — Validation run CSVs (new)
-  Fill/            — Future
+  Telemetry/       — Per-connection stream CSVs
+  Calibration/     — Power-O3 calibration CSVs
+  Validation/      — Validation run CSVs
+  Fill/            — Fill calibration CSVs (CSTR fill curves)
+  Evac/            — Evacuation calibration CSVs (CSTR evac curves)
   Decay/           — Future
   Sterilization/   — Future
 Models/            — Git-tracked fitted models
-  O3Power/         — Power→O3 models (was Model/O3Power/)
-  Fill/            — Future
+  O3Power/         — Power→O3 sigmoid models (JSON)
+  Fill/            — Fill/Evac CSTR models (JSON)
   Decay/           — Future
 ```
 
 ### File Naming Convention
 - Calibration: `{YYYY-MM-DD}_{HHMMSS}_PowerO3Cal_{LPM}Lpm_{O2}O2.csv`
 - Telemetry: `{YYYY-MM-DD}_{HHMMSS}_Stream.csv` (per-connection session, not daily)
+- Fill: `{YYYY-MM-DD}_{HHMMSS}_Fill_{LPM}Lpm[_air].csv`
+- Evac: `{YYYY-MM-DD}_{HHMMSS}_Evac_{LPM}Lpm[_air].csv`
 - O2% = weighted average: `(F_conc × 95 + F_air × 21) / (F_conc + F_air)`, rounded to int
 
 ### O2% Calculation

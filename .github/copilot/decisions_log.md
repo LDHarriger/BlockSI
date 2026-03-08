@@ -766,3 +766,108 @@ Phase-aware banner gives immediate visual feedback during all sequence phases.
 Belt-and-suspenders ensures relays are enabled even if one path fails.
 
 **Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-03-07: K constant reconciliation to 20°C reference
+
+**Context**: Dashboard used `O3_MASS_FLOW_K = 0.357` (derived with
+V_m = 22.4 L/mol at 0°C STP).  ESP32 dosimetry used `3.27e-5`
+(derived with V_m = 24.5 at 25°C).  The rotameter is likely calibrated
+at 20°C (1 atm), so V_m = 24.04 L/mol is the correct reference.
+
+**Decision**:
+1. Dashboard: `O3_MASS_FLOW_K = 0.3327` (= 48000 / (24.04 × 60 × 100))
+2. ESP32: `PPM_TO_MGS_FACTOR = 3.327e-5` (= 48 / (24.04 × 60 × 1e6) × 1e3)
+3. Both use `V_m = 24.04` with comments noting 20°C, 1 atm reference
+4. Updated shared constant in `interface_contract.md`
+
+**Rationale**: Consistent temperature reference eliminates ~7% systematic
+error in mass flow calculations.  20°C matches rotameter calibration.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-03-07: Fill/evacuation CSTR calibration — PC-driven
+
+**Context**: Dosimetry requires knowing the system gas volume to model
+fill/evacuation transients.  The vessel is a modified 11.3L pressure
+tank with ~60% fill (substrate), leaving ~4L residual gas volume —
+but the actual effective volume includes tubing and dead space.
+
+**Decision**:
+1. **PC-driven sequence** (not ESP32-driven like calibration/validation):
+   PC sends `power_set` and `relay_set` commands directly, monitors
+   DATA telemetry for steady-state detection.
+2. **Fill phase**: 100% power, monitor until 5 consecutive samples ≥ 95%
+   of target O3 (from validated power model)
+3. **Evac phase**: 0% power, monitor until 5 consecutive samples < 0.01% vol
+4. **CSTR model**: Fit exponential fill and evac curves separately,
+   average τ values to compute system volume = mean(τ) × flow
+5. **Separate CSVs**: `Data/Fill/` and `Data/Evac/` directories
+6. **Model persistence**: JSON in `Models/Fill/`, keyed by (LPM, O2%)
+7. **Air compressor toggleable** per phase (fill default off, evac default on)
+
+**Rationale**: PC-driven is simpler than adding another ESP32 sequence
+type — the PC already has direct command access and full DATA stream.
+Separate fill/evac curves give two independent τ estimates (cross-validation).
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-03-07: Decay — use literature Arrhenius, skip empirical calibration
+
+**Context**: O3 decay in the vessel (thermal/catalytic decomposition)
+affects dosimetry accuracy.  Options: (a) empirical fill-hold-measure
+decay calibration, (b) literature Arrhenius model.
+
+**Decision**: Use Arrhenius model from ESP32 `dosimetry.c`
+(k0=0.0003, α=0.02, Ea/R=2500) as minor correction term.  Skip
+empirical decay calibration.
+
+**Rationale**: At 4 LPM through ~8-12L vessel, decay is < 1% of O3
+throughput.  Empirical calibration would add complexity for negligible
+improvement.  The Arrhenius coefficients can be refined later if needed.
+
+**Status**: `[DECIDED]`
+
+---
+
+### 2026-03-07: 106-H sensor on outlet; dosimetry scope on PC
+
+**Context**: The 106-H ozone monitor is physically connected to the
+**outlet** of the sterilization vessel, not the inlet.  A manual L-valve
+allows switching between vessel-through and direct-to-sensor paths.
+
+**Decision**:
+1. Document 106-H outlet placement in `interface_contract.md` gas path
+2. Mass balance: `absorbed = produced(model) - evacuated(106-H) - decayed`
+3. All batch-level dosimetry computation on PC only
+4. ESP32 `dosimetry.c` provides per-sample helpers (decay rate, sample
+   accumulation) but is not the authority for batch dose
+
+**Rationale**: PC has the validated model, the full data stream, and
+the computing power for model-based mass balance.  ESP32 provides
+real-time per-sample estimates for monitoring/safety.
+
+**Status**: `[DECIDED]`
+
+---
+
+### 2026-03-07: ESP32 dosimetry defaults updated to match hardware
+
+**Context**: Default vessel volume was 2.0L (placeholder), flow was 5.0 LPM.
+Actual hardware: 11.3L modified tank, ~60% fill, 4.0 LPM standard flow.
+
+**Decision**: Updated `dosimetry.c` defaults:
+- `DEFAULT_VESSEL_VOL_L` = 11.3 (total tank)
+- `DEFAULT_MATERIAL_VOL_L` = 7.3 (~60% fill → ~4.0L residual gas)
+- `DEFAULT_FLOW_LPM` = 4.0
+- `DEFAULT_HUMIDITY_PCT` = 60.0 (unchanged, typical indoor)
+
+**Rationale**: Defaults should reflect actual hardware for meaningful
+fallback calculations when PC is not connected.
+
+**Status**: `[IMPLEMENTED]`

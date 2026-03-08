@@ -15,16 +15,17 @@ static const char *TAG = "DOSIMETRY";
 
 // Physical constants
 #define MOLAR_MASS_O3       48.0f       // g/mol
-#define MOLAR_VOLUME_STP    24.5f       // L/mol at 25°C, 1 atm
+#define MOLAR_VOLUME_20C    24.04f      // L/mol at 20°C, 1 atm (rotameter ref)
 #define GAS_CONSTANT_R      8.314f      // J/(mol·K)
 
-// Default parameters
-#define DEFAULT_FLOW_LPM        5.0f
-#define DEFAULT_VESSEL_VOL_L    2.0f
-#define DEFAULT_MATERIAL_VOL_L  1.0f
+// Default parameters — updated to match actual BlockSI hardware
+// Vessel volume refined via fill/evac CSTR calibration on PC dashboard
+#define DEFAULT_FLOW_LPM        4.0f    // Standard O2 concentrator setting
+#define DEFAULT_VESSEL_VOL_L    11.3f   // Modified pressure tank (total)
+#define DEFAULT_MATERIAL_VOL_L  7.3f    // ~60% fill → ~4.0L residual gas volume
 #define DEFAULT_TEMP_C          25.0f
-#define DEFAULT_HUMIDITY_PCT    60.0f
-#define DEFAULT_SENSOR_PATH_L   0.1f
+#define DEFAULT_HUMIDITY_PCT    60.0f   // Typical indoor RH; adjust per environment
+#define DEFAULT_SENSOR_PATH_L   0.1f    // Tubing from vessel outlet to 106-H sensor
 
 // Decay model parameters (empirical - adjust based on literature/experiments)
 #define DECAY_K0            0.0003f     // Base decay rate at 25°C, dry (1/s)
@@ -33,10 +34,10 @@ static const char *TAG = "DOSIMETRY";
 #define DECAY_T_REF_K       298.15f     // Reference temperature (25°C in K)
 
 // Conversion factor: ppm to mg/s at 1 LPM
-// = (48 g/mol) / (24.5 L/mol) × (1 L/min) × (1 min/60 s) × (1 mg/1000 g) × (1/1e6 for ppm)
-// = 48 / 24.5 / 60 / 1000 / 1e6 × 1e6 = 48 / 24.5 / 60 / 1000
-// = 3.27e-5 mg/s per ppm per LPM
-#define PPM_TO_MGS_FACTOR   3.27e-5f
+// = M_O3 / (V_m × 60) / 1e6 × 1e3  [g→mg]
+// = 48 / (24.04 × 60 × 1e6) × 1e3 = 3.327e-5
+// V_m at 20°C (aligned with rotameter calibration temperature)
+#define PPM_TO_MGS_FACTOR   3.327e-5f
 
 // Module state
 static struct {

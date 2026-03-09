@@ -5,6 +5,57 @@
 
 ---
 
+### 2026-03-09: Plotly `react` for live power curve updates
+
+**Context**: The green dot (actual O3 vs actual power) and black ring (target power prediction) on the Power-O3 curve never moved from (0, 0) after page load. `_update_power_curve()` rebuilt a full `go.Figure` and pushed it via `power_plot.figure = fig; power_plot.update()`. NiceGUI's element-diff mechanism compares the Python-side figure dict and sends only diffs — but figure replacement does not reliably push trace-data changes through this path.
+
+**Decision**: Replace `power_plot.figure = fig; power_plot.update()` with:
+```python
+fd = fig.to_dict()
+power_plot.run_method('react', fd['data'], fd['layout'])
+```
+`run_method('react', ...)` calls Plotly.js's `Plotly.react()` directly on the DOM element, bypassing NiceGUI's diff and guaranteeing a full re-render on every call.
+
+**Rationale**: `Plotly.react()` is designed for efficient full-data updates and is the documented way to update Plotly charts from JavaScript. The Python figure dict is serialized directly — no element diff, no stale state. This also makes sequence live-tracking (green dot moving during validation) work correctly at no additional cost.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-03-09: Validation baseline is advisory only — pre-flight warning dialog
+
+**Context**: The 106-H sensor reports exactly 0.0200 %vol as its floor when fully zeroed. The original baseline gate (`baseline_ok = bl_mean < 0.02`) failed any run where the sensor read its own noise floor. Changing `<` to `<=` would fix this case but not the real issue: a warm sensor drifting back toward zero may read > 0.02 legitimately, and hard-failing the run prevents collecting data on whether the warm-up affects results.
+
+**Decision**:
+1. `_analyze_validation()`: `baseline_ok` no longer appears in `result["passed"]`. It remains in the result dict as `baseline_mean` / `baseline_ok` for informational display.
+2. `_start_validation()`: pre-flight check — if `S.vessel_o3_pct > 0.01` at the moment the user clicks Validate, a persistent `ui.dialog` shows the current reading and offers "Cancel" / "Proceed anyway". Uses `asyncio.Event` to suspend the coroutine until user responds.
+
+**Rationale**: The sensor floor ambiguity is a hardware characteristic (106-H), not a system fault. Treating it as a soft warning gives the operator context while allowing data collection in ambiguous cases. Pass/fail is fully determined by the target-phase accuracy and stability — quantities the operator cannot meaningfully affect by re-zeroing.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-03-09: ±1σ Confidence bands on Power-O3 curve via Jacobian propagation
+
+**Context**: The Power-O3 curve showed the fitted sigmoid with no uncertainty information. Users had no way to assess model quality visually — only the scalar R² and RMSE in the model summary. The fitting already used `scipy.optimize.curve_fit` which returns `pcov` (parameter covariance matrix), but `pcov` was discarded.
+
+**Decision**:
+1. `PowerO3Model`: added `ci_power: list[float]` and `ci_sigma: list[float]` fields (default empty list — backward compatible with existing JSONs).
+2. `fit_sigmoid_model()`: after goodness-of-fit, compute a 101-point ±1σ band using Jacobian propagation:
+   - `J[n,i]` = partial derivative of sigmoid w.r.t. parameter `i` at power level `n`
+   - `var_curve[n] = J @ pcov @ J.T` (via `np.einsum('ni,ij,nj->n', J, pcov, J)`)
+   - `ci_sigma = sqrt(max(var_curve, 0))`
+3. Stored in the model JSON as `ci_power` / `ci_sigma` (101 floats each).
+4. `load_model()`: filter unknown keys against `__dataclass_fields__` — prevents future schema additions from crashing old-model loads.
+5. `_make_power_fig()`: if `S.active_model.ci_sigma` is non-empty, adds a `fill="toself"` Plotly scatter trace as the closed polygon `(pwr, o3+σ) + (pwr_rev, o3_rev−σ)` in `rgba(65,105,225,0.15)`. No band rendered for the piecewise fallback model (no `pcov`).
+
+**Rationale**: Jacobian propagation is the correct first-order uncertainty treatment for nonlinear least squares — it accounts for parameter correlations (off-diagonal `pcov` terms) and produces a band that naturally widens in the steep transition region where k and P0 uncertainty dominates. This is more informative than symmetric ±RMSE which is homoscedastic and ignores parameter covariance.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
 ### 2026-03-04: Single-agent model for full-stack development
 
 **Context**: BlockSI features now routinely span the ESP32↔PC boundary

@@ -1,20 +1,19 @@
 {
-  "L": 1.875783,
-  "k": 0.07652,
-  "P0": 45.494808,
-  "b": -0.037929,
+  "L": 1.891305,
+  "k": 0.075478,
+  "P0": 45.688093,
+  "b": -0.020011,
   "flow_lpm": 4.0,
   "o2_pct": 95,
-  "r_squared": 0.99818,
-  "rmse": 0.02825,
+  "r_squared": 0.997726,
+  "rmse": 0.031681,
   "n_points": 101,
   "source_files": [
-    "2026-02-27_203704_PowerO3Cal_4Lpm_95O2.csv",
-    "2026-02-27_220230_PowerO3Cal_4Lpm_95O2.csv",
-    "2026-02-27_222630_PowerO3Cal_4Lpm_95O2.csv"
+    "2026-03-09_121050_PowerO3Cal_4Lpm_95O2.csv",
+    "2026-03-09_141808_PowerO3Cal_4Lpm_95O2.csv"
   ],
   "excluded_files": [],
-  "fitted_at": "2026-03-01T13:26:48",
+  "fitted_at": "2026-03-09T14:22:59",
   "notes": "",
   "type": "sigmoid_4p",
   "version": 1

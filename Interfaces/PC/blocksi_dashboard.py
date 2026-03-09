@@ -663,10 +663,9 @@ def _analyze_validation(samples: list[dict], power_pct: float,
             "target_ok": False, "stable": False,
         })
 
-    # Overall pass/fail
+    # Overall pass/fail (baseline is advisory only — shown as warning dialog)
     result["passed"] = (
-        result.get("baseline_ok", False)
-        and result.get("spots_ok", True)
+        result.get("spots_ok", True)
         and result.get("target_ok", False)
         and result.get("stable", False)
     )
@@ -1326,6 +1325,43 @@ async def _start_validation(**kwargs) -> bool:
         log("Pre-disabling air compressor relay", "seq")
         await cmd_set_relay("air_comp", False)
 
+    # Pre-flight: warn if baseline O3 reading is elevated
+    if S.vessel_o3_pct > 0.01:
+        proceed = asyncio.Event()
+        cancelled = [False]
+
+        with ui.dialog().props("persistent") as bl_dlg:
+            with ui.card().classes("q-pa-lg").style("min-width: 420px"):
+                ui.icon("warning").classes("text-h3 text-amber q-mb-sm")
+                ui.label("Baseline may not be stable").classes(
+                    "text-h5 q-mb-sm"
+                )
+                ui.label(
+                    f"Current O\u2083 reading: {S.vessel_o3_pct:.3f} %vol. "
+                    "The sensor may not have fully zeroed. "
+                    "Proceeding may affect data accuracy."
+                ).classes("text-body1 q-mb-lg")
+                with ui.row().classes("justify-end w-full q-gutter-sm"):
+                    def _cancel():
+                        cancelled[0] = True
+                        bl_dlg.close()
+                        proceed.set()
+
+                    def _proceed():
+                        bl_dlg.close()
+                        proceed.set()
+
+                    ui.button("Cancel", color="red",
+                              on_click=_cancel).props("flat")
+                    ui.button("Proceed anyway", color="green",
+                              on_click=_proceed).props("unelevated")
+        bl_dlg.open()
+        await proceed.wait()
+        if cancelled[0]:
+            log("Validation cancelled — elevated baseline", "seq")
+            _notify("Validation cancelled by user", "warning")
+            return False
+
     # Prepare observer state (do NOT set sequence_active yet)
     S.seq_type = "validate"
     S.seq_phase = "starting"
@@ -1978,8 +2014,8 @@ async def index():
             S.power_target_pct, target_o3,
             S.power_actual_pct, S.vessel_o3_pct,
         )
-        power_plot.figure = fig
-        power_plot.update()
+        fd = fig.to_dict()
+        power_plot.run_method('react', fd['data'], fd['layout'])
 
     def _make_power_fig(pwr, o3, tgt_pct, tgt_o3, act_pct, act_o3):
         fig = go.Figure()
@@ -1988,6 +2024,21 @@ async def index():
             line=dict(color="royalblue", width=2),
             showlegend=False, name="Model",
         ))
+        # ±1σ confidence band (if model has Jacobian-propagated CI)
+        mdl = S.active_model
+        if mdl and mdl.ci_sigma and mdl.ci_power:
+            ci_pwr = np.array(mdl.ci_power)
+            ci_o3 = np.array([mdl.predict(p) for p in ci_pwr])
+            ci_s = np.array(mdl.ci_sigma)
+            fig.add_trace(go.Scatter(
+                x=list(ci_pwr) + list(ci_pwr[::-1]),
+                y=list(ci_o3 + ci_s) + list((ci_o3 - ci_s)[::-1]),
+                fill="toself",
+                fillcolor="rgba(65,105,225,0.15)",
+                line=dict(width=0),
+                showlegend=False, name="±1σ",
+                hoverinfo="skip",
+            ))
         fig.add_trace(go.Scatter(
             x=[tgt_pct], y=[tgt_o3], mode="markers",
             marker=dict(color="rgba(0,0,0,0)", size=18,
@@ -3177,12 +3228,7 @@ async def index():
             val_result_icon._classes = [f"text-h3 text-{color}"]
             val_result_icon.update()
             status = "PASSED" if passed else "FAILED"
-            ns = r.get("stable_samples", 0)
-            nt = r.get("total_samples", 0)
-            val_result_title.text = (
-                f"{status} — {dev:.1f}% deviation "
-                f"({ns}/{nt} stable samples)"
-            )
+            val_result_title.text = f"{status} — {dev:.1f}% deviation"
             val_mean_lbl.text = f"Mean O3: {r.get('mean_o3', 0):.3f}%"
             val_expected_lbl.text = f"Expected: {r.get('expected_o3', 0):.3f}%"
             val_dev_lbl.text = f"CV: {cv:.1f}%"

@@ -1,6 +1,6 @@
 # Dashboard Agent Summary
 
-> Last updated: 2026-03-07 (Session 11 — Dosimetry infrastructure, fill/evac calibration, K constant)
+> Last updated: 2026-03-09 (Session 12 — Power curve live update, validation UX, CI confidence band)
 
 ## Current State
 
@@ -70,7 +70,7 @@ are still maintained as startup documents for new chat sessions.
 ### Validation Pass/Fail Criteria (PC-computed)
 | Check | Criterion |
 |-------|-----------|
-| Baseline | Mean O3 < 0.02 %vol |
+| Baseline | Advisory only — warning dialog if > 0.01 %vol at start; not a hard gate |
 | Spot correlation | Within 0.15 %vol or 15% relative of model |
 | Target accuracy | Mean within 10% relative of prediction |
 | Target stability | CV < 5% |
@@ -171,7 +171,26 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 ### Settings Tab
 - Notification level selector
 
-## What Changed This Session (Session 10)
+## What Changed This Session (Session 12)
+
+### Power Curve Live Update Fix  `[IMPLEMENTED]`
+- `_update_power_curve()`: replaced `power_plot.figure = fig; power_plot.update()` with `power_plot.run_method('react', fd['data'], fd['layout'])` — NiceGUI's element-diff mechanism does not reliably push Plotly trace-data changes; calling Plotly.js `react` directly fixes the green dot (actual O3) and black ring (target power) never updating.
+
+### Validation Baseline: Advisory Warning, Not Hard Gate  `[IMPLEMENTED]`
+- `_analyze_validation()`: `baseline_ok` removed from `result["passed"]` — baseline is informational only.
+- `_start_validation()`: pre-flight check added — if `S.vessel_o3_pct > 0.01` at start, shows a `ui.dialog` with current reading and "Cancel" / "Proceed anyway" buttons; uses `asyncio.Event` to await user choice before continuing. Protects against sensor warm-up drift without hard-failing valid runs.
+
+### ±1σ Confidence Band on Power-O3 Curve  `[IMPLEMENTED]`
+- `PowerO3Model` dataclass: added `ci_power: list[float]` and `ci_sigma: list[float]` fields (`default_factory=list`).
+- `fit_sigmoid_model()`: after fitting, computes `_sigmoid_jacobian()` (partial derivatives w.r.t. L, k, P0, b), then `var_curve = einsum('ni,ij,nj->n', J, pcov, J)` → `ci_sigma = sqrt(max(var_curve, 0))`. Band widens at the steep transition (k, P0 uncertainty dominates) and narrows at the tails — correct treatment for nonlinear least squares.
+- Stored as 101-point grids in the model JSON; old JSONs without these fields default to empty lists on load (backward compatible).
+- `load_model()`: hardened to filter unknown JSON keys against `__dataclass_fields__` — prevents `TypeError` on future schema additions.
+- `_make_power_fig()`: if `S.active_model.ci_sigma` is non-empty, adds a `fill="toself"` Plotly trace at `±1σ` in translucent royal blue (`rgba(65,105,225,0.15)`). Absent on fallback (piecewise) model.
+
+### Validation Result Card Simplified  `[IMPLEMENTED]`
+- `val_result_title.text` changed from `"{status} — {dev:.1f}% deviation ({ns}/{nt} stable samples)"` to `"{status} — {dev:.1f}% deviation"` — the sample count was confusing (it counted only target-phase stable samples out of all-phases total).
+
+## What Changed in Session 10
 
 ### Random Phase + Air Toggle  `[IMPLEMENTED]`
 - `_start_calibration()`: generates stratified random levels (N windows, one uniform sample each), arranged ascending+descending.  Builds `random=p1,p2,...` arg.

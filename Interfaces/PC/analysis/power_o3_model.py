@@ -60,6 +60,10 @@ class PowerO3Model:
     fitted_at: str = ""
     notes: str = ""
 
+    # ±1σ confidence band (Jacobian-propagated parameter uncertainty)
+    ci_power: list[float] = field(default_factory=list)
+    ci_sigma: list[float] = field(default_factory=list)
+
     def predict(self, power_pct: float) -> float:
         """Predict O3 %vol from power %."""
         if power_pct <= 0:
@@ -287,6 +291,25 @@ def fit_sigmoid_model(
     r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
     rmse = float(np.sqrt(ss_res / len(o3)))
 
+    # ±1σ confidence band via Jacobian-propagated parameter uncertainty
+    pwr_grid = np.linspace(0, 100, 101)
+
+    def _sigmoid_jacobian(P, L, k, P0, b):
+        """Partial derivatives of sigmoid w.r.t. [L, k, P0, b] at each P."""
+        z = -k * (P - P0)
+        ez = np.exp(np.clip(z, -500, 500))
+        denom = 1.0 + ez
+        denom2 = denom * denom
+        dL = 1.0 / denom
+        dk = L * (P - P0) * ez / denom2
+        dP0 = -L * k * ez / denom2
+        db = np.ones_like(P)
+        return np.column_stack([dL, dk, dP0, db])  # (N, 4)
+
+    J = _sigmoid_jacobian(pwr_grid, L_fit, k_fit, P0_fit, b_fit)
+    var_curve = np.einsum('ni,ij,nj->n', J, pcov, J)
+    ci_sigma_arr = np.sqrt(np.maximum(var_curve, 0))
+
     # Build source file list (only non-excluded)
     exclude_set = set(exclude_files or [])
     used_files = [
@@ -308,6 +331,8 @@ def fit_sigmoid_model(
         source_files=used_files,
         excluded_files=list(exclude_set),
         fitted_at=datetime.now().isoformat(timespec="seconds"),
+        ci_power=pwr_grid.tolist(),
+        ci_sigma=ci_sigma_arr.tolist(),
     )
 
 
@@ -344,6 +369,8 @@ def load_model(filepath: str) -> PowerO3Model:
     # Strip non-dataclass keys
     data.pop("type", None)
     data.pop("version", None)
+    valid_fields = {f.name for f in PowerO3Model.__dataclass_fields__.values()}
+    data = {k: v for k, v in data.items() if k in valid_fields}
 
     return PowerO3Model(**data)
 

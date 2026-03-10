@@ -409,13 +409,24 @@ def log(msg: str, cat: str = "info") -> None:
     debug_log.appendleft((ts, cat, msg))
 
 
+_notify_queue: deque[tuple[str, str]] = deque()
+
+
 def _notify(msg: str, level: str = "positive") -> None:
-    """Show toast notification respecting user preference."""
+    """Show toast notification respecting user preference.
+
+    Safe to call from background tasks (asyncio.create_task context): if
+    NiceGUI's slot context is unavailable, the message is queued and the
+    periodic _tick loop will flush it with the correct context.
+    """
     if S.notify_level == "none":
         return
     if S.notify_level == "errors" and level == "positive":
         return
-    ui.notify(msg, type=level, position="bottom-right", timeout=3000)
+    try:
+        ui.notify(msg, type=level, position="bottom-right", timeout=3000)
+    except RuntimeError:
+        _notify_queue.append((msg, level))
 
 
 # =============================================================================
@@ -523,22 +534,62 @@ def _save_cal_csv(samples: list[dict], lpm: float, o2_pct: int) -> str:
     return fname
 
 
-def _save_val_csv(samples: list[dict], power: float, lpm: float) -> str:
+def _save_val_csv(samples: list[dict], power: float, lpm: float,
+                  passed: bool) -> str:
     """Save validation samples to CSV, return filename.
 
-    Naming: ``{YYYY-MM-DD}_{HHMMSS}_Validation_{pwr}pct_{LPM}Lpm.csv``
+    Naming: ``{YYYY-MM-DD}_{HHMMSS}_Validation_{pwr}pct_{LPM}Lpm_PASS.csv``
+            ``{YYYY-MM-DD}_{HHMMSS}_Validation_{pwr}pct_{LPM}Lpm_FAIL.csv``
     """
     now = datetime.now()
     lpm_s = f"{lpm:.0f}" if lpm == int(lpm) else f"{lpm:.1f}"
+    result_tag = "PASS" if passed else "FAIL"
     fname = (
         f"{now:%Y-%m-%d_%H%M%S}_Validation_"
-        f"{int(power)}pct_{lpm_s}Lpm.csv"
+        f"{int(power)}pct_{lpm_s}Lpm_{result_tag}.csv"
     )
     fpath = os.path.join(VALIDATION_DIR, fname)
     if samples:
         pd.DataFrame(samples).to_csv(fpath, index=False)
         log(f"Saved {len(samples)} val samples -> {fname}", "seq")
     return fname
+
+
+def _find_valid_cert(power_pct: float, flow_lpm: float,
+                     max_age_h: float = 24.0) -> "str | None":
+    """Return path to the most-recent PASS cert for (power_pct, flow_lpm).
+
+    Searches VALIDATION_DIR for files matching the naming convention::
+
+        {YYYY-MM-DD}_{HHMMSS}_Validation_{pwr}pct_{LPM}Lpm_PASS.csv
+
+    Returns the path of the newest matching file that is younger than
+    *max_age_h* hours, or ``None`` if no such file exists.
+    """
+    lpm_s = f"{flow_lpm:.0f}" if flow_lpm == int(flow_lpm) else f"{flow_lpm:.1f}"
+    pattern = re.compile(
+        rf"^(\d{{4}}-\d{{2}}-\d{{2}}_\d{{6}})_Validation_"
+        rf"{int(power_pct)}pct_{re.escape(lpm_s)}Lpm_PASS\.csv$"
+    )
+    cutoff = datetime.now().timestamp() - max_age_h * 3600
+    best: tuple[float, str] | None = None
+    try:
+        entries = os.listdir(VALIDATION_DIR)
+    except FileNotFoundError:
+        return None
+    for name in entries:
+        m = pattern.match(name)
+        if not m:
+            continue
+        try:
+            dt = datetime.strptime(m.group(1), "%Y-%m-%d_%H%M%S")
+        except ValueError:
+            continue
+        ts = dt.timestamp()
+        if ts >= cutoff:
+            if best is None or ts > best[0]:
+                best = (ts, os.path.join(VALIDATION_DIR, name))
+    return best[1] if best else None
 
 
 # =============================================================================
@@ -1038,12 +1089,13 @@ class TCPServer:
                             "Calibration complete (no samples)", "warning"
                         )
                 elif seq_type == "validate":
-                    # Save validation data to CSV
-                    S.val_file = _save_val_csv(
-                        S.val_samples, S.val_power, S.val_lpm
-                    )
+                    # Analyze first so we know pass/fail for the filename
                     S.val_result = _analyze_validation(
                         S.val_samples, S.val_power, S.val_lpm
+                    )
+                    S.val_file = _save_val_csv(
+                        S.val_samples, S.val_power, S.val_lpm,
+                        passed=S.val_result.get("passed", False),
                     )
                     dev = S.val_result.get("deviation_pct", 0.0)
                     n = len(S.val_samples)
@@ -2652,6 +2704,38 @@ async def index():
                     with ui.row().classes("q-gutter-sm items-center q-mb-sm"):
                         async def _start_fill_seq():
                             lpm = float(fill_lpm_input.value or DEFAULT_FLOW_LPM)
+                            cert = _find_valid_cert(100, lpm)
+                            if cert is None:
+                                with ui.dialog() as _cert_dlg, ui.card().classes("q-pa-md"):
+                                    ui.label(
+                                        "No valid validation certificate found"
+                                    ).classes("text-subtitle1 text-bold q-mb-sm")
+                                    ui.label(
+                                        "A 100% power validation at the selected flow rate "
+                                        "must pass within the last 24 hours before running "
+                                        "CSTR calibration. This ensures the C_in used for "
+                                        "model fitting is accurate."
+                                    ).classes("text-body2 q-mb-md")
+                                    with ui.row().classes("q-gutter-sm justify-end"):
+                                        ui.button(
+                                            "Cancel", on_click=_cert_dlg.close,
+                                        ).props("flat")
+
+                                        async def _run_val_from_dlg():
+                                            _cert_dlg.close()
+                                            val_pwr_input.value = 100
+                                            val_lpm_input.value = lpm
+                                            await cmd_sequence_start(
+                                                "validate", power=100, flow=lpm,
+                                            )
+
+                                        ui.button(
+                                            "Run Validation", icon="verified",
+                                            on_click=_run_val_from_dlg,
+                                            color="blue",
+                                        )
+                                _cert_dlg.open()
+                                return
                             await cmd_sequence_start(
                                 "cstr_cal",
                                 flow=lpm,
@@ -2896,6 +2980,11 @@ async def index():
 
     async def _tick_inner() -> None:
         nonlocal _updating, _relay_ts, _echart_has_data, _last_prompt_id
+
+        # -- flush notifications queued from background tasks ----------------
+        while _notify_queue:
+            _msg, _lvl = _notify_queue.popleft()
+            _notify(_msg, _lvl)
 
         # -- deferred sequence cleanup (set by COMPLETE/ABORTED handler) ---
         if S.seq_cleanup_pending and S.connected:

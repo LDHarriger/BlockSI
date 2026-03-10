@@ -442,8 +442,12 @@ prompts = [
 | Target accuracy | Mean O3 within 10% relative of model prediction | Fail — "Concentration off" |
 | Target stability | CV < 5% | Fail — "Unstable output" |
 
-Certificate valid for **24 hours**.  Filename:
-`YYYY-MM-DD_HHMMSS_{flow}LPM_{power}pwr_Validation.json`
+Certificate valid for **24 hours**.  Filename (CSV, not JSON):
+`YYYY-MM-DD_HHMMSS_Validation_{pwr}pct_{LPM}Lpm_PASS.csv` (pass)
+`YYYY-MM-DD_HHMMSS_Validation_{pwr}pct_{LPM}Lpm_FAIL.csv` (fail)
+
+CSTR calibration requires a `_PASS.csv` for 100% power at the target LPM within 24h.
+`_find_valid_cert(power_pct, flow_lpm, max_age_h=24)` scans `Data/Validation/` for a matching PASS cert.
 
 ### Relay Prerequisites for Sequences  `[IMPLEMENTED]`
 

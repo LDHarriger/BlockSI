@@ -1,6 +1,6 @@
 # Dashboard Agent Summary
 
-> Last updated: 2026-03-10 (Session 13 — Decay-aware CSTR model, directory restructure)
+> Last updated: 2026-03-10 (Session 13b — _notify queue fix, validation certificate pre-flight)
 
 ## Current State
 
@@ -173,6 +173,20 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 ### Settings Tab
 - Notification level selector
 
+## What Changed This Session (Session 13b)
+
+### `_notify` Background-Task Safety  `[IMPLEMENTED]`
+- Added `_notify_queue: deque[tuple[str, str]]` at module level.
+- `_notify()` now wraps `ui.notify()` in `try/except RuntimeError`; if called from a background `asyncio.create_task` (no NiceGUI slot context), appends to queue instead of crashing.
+- `_tick_inner()` drains `_notify_queue` at the start of every 1s tick cycle, which always has the correct NiceGUI slot context.
+- **Fixes**: `_start_fill_evac` sequence halting immediately after baseline collection (crash on first `_notify()` call inside background task).
+
+### Validation Certificate (PASS/FAIL filename + pre-flight check)  `[IMPLEMENTED]`
+- `_save_val_csv()`: now accepts `passed: bool`; appends `_PASS` or `_FAIL` before `.csv` in filename.  File naming: `{YYYY-MM-DD}_{HHMMSS}_Validation_{pwr}pct_{LPM}Lpm_PASS.csv`.
+- Sequence handler: `_analyze_validation()` now runs **before** `_save_val_csv()` so the result is known when saving.
+- `_find_valid_cert(power_pct, flow_lpm, max_age_h=24) -> str | None`: scans `VALIDATION_DIR` for matching `_PASS.csv` files, parses datetime from filename prefix, returns newest path younger than `max_age_h` hours (or `None`).
+- `_start_fill_seq` (CSTR Calibration "Start" button): calls `_find_valid_cert(100, lpm)` before launching the sequence.  If no cert, shows a `ui.dialog` with explanation + "Run Validation" button (pre-fills val inputs to 100% / selected LPM and calls `cmd_sequence_start("validate", ...)`).
+
 ## What Changed This Session (Session 13)
 
 ### Decay-Aware CSTR Model  `[IMPLEMENTED]`
@@ -273,7 +287,7 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 - `[IMPLEMENTED]` **Decay-aware CSTR calibration**: PC-driven fill/evacuation sequence with first-order O3 decay model. Fits V (volume), k_d (decay rate), V_dead (dead volume) — parameters generalise across flow rates. Stored in `Models/CSTR/cstr_model.json`. Analysis module at `Interfaces/PC/analysis/fill_model.py`.
 - `[PROPOSED]` **Historical data viewer**: Load and plot old CSV files from `Data/Telemetry/`.
 - `[PROPOSED]` **Sterilization batch**: Three-phase batch (Fill→Hold→Evac) with real-time dosimetry. Documented in interface_contract.md, implementation deferred.
-- `[PROPOSED]` **Validation certificate**: Generate JSON certificate with 24h validity on pass.
+- `[IMPLEMENTED]` **Validation certificate**: PASS/FAIL suffix on CSV filename; `_find_valid_cert()` scans for valid certs; CSTR calibration requires a 100% PASS cert within 24h before starting.
 - `[PROPOSED]` **Migrate power curve to ECharts**: Last remaining Plotly chart.
 
 ## Data Management  `[IMPLEMENTED]`
@@ -294,6 +308,7 @@ Models/            — Git-tracked fitted models
 ### File Naming Convention
 - Calibration: `{YYYY-MM-DD}_{HHMMSS}_PowerO3Cal_{LPM}Lpm_{O2}O2.csv`
 - Telemetry: `{YYYY-MM-DD}_{HHMMSS}_Stream.csv` (per-connection session, not daily)
+- Validation: `{YYYY-MM-DD}_{HHMMSS}_Validation_{pwr}pct_{LPM}Lpm_PASS.csv` / `_FAIL.csv`
 - CSTR: `{YYYY-MM-DD}_{HHMMSS}_CSTR_{LPM}Lpm.csv` (single file with `phase` column)
 - CSTR model: `cstr_model.json` (universal — one file, all conditions)
 - O2% = weighted average: `(F_conc × 95 + F_air × 21) / (F_conc + F_air)`, rounded to int

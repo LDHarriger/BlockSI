@@ -1,6 +1,6 @@
 # ESP32 Agent Summary
 
-> Last updated: 2026-03-04 (Session 10 — Random phase, air toggle, DFRobot I2C fix, single-agent model)
+> Last updated: 2026-03-10 (Session 10 — no ESP32 changes since; two-agent model adopted)
 
 ## Current State
 
@@ -8,9 +8,9 @@ The ESP32 firmware is an ESP-IDF v5.4+ project controlling ozone generation
 hardware, monitoring sensors, and bridging to both Golioth Cloud and a
 PC dashboard over LAN TCP.
 
-**Single-agent model** (as of 2026-03-04): One GitHub Copilot agent now handles
-both ESP32 firmware and PC dashboard.  See `collaboration_protocol.md` and
-`decisions_log.md` entry 2026-03-04.
+**Two-agent model** (as of 2026-03-10): VS Code Copilot and Claude Code both
+contribute to this repo. See `collaboration_protocol.md` and `decisions_log.md`
+entry 2026-03-04 for background.
 
 | Property | Value |
 |----------|-------|

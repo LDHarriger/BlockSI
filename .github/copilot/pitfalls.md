@@ -189,47 +189,78 @@ async def _start_fill_seq():         # ← button click, has slot context
 
 ---
 
-## 5. Plotly live markers — two-tier update strategy
+## 5. Power-O3 chart live markers — two-tier update strategy
 
-### Symptom A — markers never move after page load
-The `power_plot.figure = fig; power_plot.update()` pattern stays stuck at
-(0, 0) after page load regardless of the actual power level.
+### Symptom
+The live markers (green dot = actual O3, black ring = power target) on the
+Power-O3 curve never move — stuck at (0, 0) after page load.
 
-**Fix**: Use `run_method('react', data, layout)` which calls `Plotly.react()`
-directly on the DOM element, bypassing NiceGUI's element-diff path.
+### Root cause & history
+- `power_plot.figure = fig; power_plot.update()` DOES work for full figure
+  redraws (NiceGUI routes this through `Plotly.react()` internally) — but
+  calling it on every 1s tick adds unnecessary full-chart serialization work.
+- `power_plot.run_method('react', fd['data'], fd['layout'])` was tried and
+  **FAILS** — raises `"Method 'react' not found"`. NiceGUI's Vue component does
+  not expose a `react` method directly. Do not attempt this.
+- `power_plot.run_method('restyle', ...)` is similarly **unverified** — NiceGUI's
+  plotly Vue component does not document a 'restyle' method. Do not attempt this.
+  Use `ui.run_javascript()` to call `Plotly.restyle()` directly on the DOM element.
 
-### Symptom B — markers only update on manual interactions, not in real-time
-`run_method('react', ...)` called every second from `_tick_inner` rebuilds the
-**entire figure** (model curve + CI band polygon + markers) every tick.  This
-is a large WebSocket payload (~5–10 KB/s) that the browser's Plotly renderer
-may batch or drop, making the dots appear frozen during sequences.
+### Fix (already in place — two-tier approach)
+**Full redraws** (LPM change, model reload, model fit): use `_update_power_curve()`
+which calls `power_plot.figure = fig; power_plot.update()`.
 
-### Fix (already in place — do not revert)
-The marker update is split into two functions:
-
+**Per-tick marker updates** (every 1s): use `_restyle_markers()` which calls:
 ```python
-def _update_power_curve():
-    """Full react — call only when model/LPM/CI band changes."""
-    ...
-    power_plot.run_method('react', fd['data'], fd['layout'])
-
-def _update_power_markers():
-    """Lightweight restyle — safe to call every tick."""
-    tgt_o3 = predict_o3_from_power(S.power_target_pct, S.flow_lpm)
-    power_plot.run_method(
-        'restyle',
-        {'x': [[S.power_target_pct], [S.power_actual_pct]],
-         'y': [[tgt_o3], [S.vessel_o3_pct]]},
-        [2, 3],
-    )
+ui.run_javascript(f'''
+  const el = getElement("{power_plot.id}");
+  if (el && el.$el) {{
+    Plotly.restyle(el.$el,
+      {{x: [[{target_pwr}], [{actual_pwr}]], y: [[{target_o3}], [{actual_o3}]]}},
+      [2, 3]);
+  }}
+''')
 ```
+`Plotly.restyle()` is O(1) — it patches specific trace data without
+re-rendering the full chart. Fixed trace indices (0=curve, 1=CI band,
+2=target ring, 3=actual dot) make this safe.
 
-`_tick_inner` calls `_update_power_markers()` (tiny restyle, <100 bytes).
-`_on_lpm_change`, model fitting, and preset clicks call `_update_power_curve()`
-(full react, rare).
+> **⚠ CRITICAL — DOM access for `ui.plotly`**: `getElement(id)` returns a NiceGUI
+> custom Vue component (NOT a Quasar component). Use `el.$el` — the root DOM
+> element (the Plotly div). **Do NOT use `el.$refs.qRef`** — it is `undefined`
+> on `ui.plotly`. The guard `if(el && el.$refs.qRef)` silently skips every
+> restyle call. This rule applies to all NiceGUI `ui.*` components; only
+> Quasar-wrapped components expose `$refs.qRef`.
 
-### Critical constraint: trace indices must stay fixed
-`restyle` addresses traces by index.  `_make_power_fig` **always** adds the CI
-band trace at index 1 (with empty `x`/`y` lists when no CI data is available),
-so the target marker is always index 2 and the actual marker is always index 3.
-Never reorder the traces or add traces before index 2.
+### `ui.run_javascript()` also crashes on dead client — must try/except
+`_restyle_markers()` calls `ui.run_javascript()`. When the browser tab disconnects
+(closes, refreshes, or the connection is lost), the NiceGUI slot is cleaned up and
+`context.client` raises `RuntimeError: The parent element this slot belongs to has
+been deleted.` — identical in class to the `ui.notify()` crash from Pitfall #1.
+
+If this exception is not caught, it propagates through `_tick_inner()` → `_tick()`,
+and then **NiceGUI's own exception handler also crashes** (it tries to access the
+same dead client to log the error). This kills the timer task permanently, stopping
+all tick-based updates including the `_notify_queue` drain, sequence cleanup, and
+relay sync — which is why the CSTR sequence appeared to halt.
+
+**Fix (already in place)**:
+```python
+try:
+    ui.run_javascript(js)
+except RuntimeError:
+    pass  # client disconnected — skip silently
+```
+**General rule**: every call to `ui.run_javascript()` or any `ui.*` function inside
+`_tick_inner()` (or any timer callback) must be wrapped in `try/except RuntimeError`.
+
+### CI band visibility
+If the CI band appears invisible despite the model having `ci_sigma` data: the
+fill may be physically too narrow (e.g. ~2px on a 300px chart for a well-fitted
+model with `ci_sigma ≈ 0.007` on a 2.1 %vol y-range). Fix: add a visible border
+line so the ±1σ boundary is drawn regardless of fill width:
+```python
+line=dict(color="rgba(65,105,225,0.5)", width=1)  # was: line=dict(width=0)
+```
+Do not inflate σ or switch to ±2σ/3σ — a well-fitted model (R²≈0.998) *should*
+have narrow CI. The boundary just needs to be visible as a line.

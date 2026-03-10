@@ -157,5 +157,10 @@ git push                # Try again
 ```
 If there are merge conflicts, resolve them and inform the user.
 
+> **Critical rule**: When evaluating whether to accept or reject a Claude Code
+> commit/cherry-pick, VS Code Copilot MUST present the conflict or proposed
+> rejection to the human for review and decision — **never auto-reject silently**.
+> Show what the conflict is, explain the tradeoffs, and let the user decide.
+
 ### 3. Confirm to the user
 Report: number of commits, what was pushed, and any issues encountered.

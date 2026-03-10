@@ -213,11 +213,32 @@ which calls `power_plot.figure = fig; power_plot.update()`.
 **Per-tick marker updates** (every 1s): use `_restyle_markers()` which calls:
 ```python
 ui.run_javascript(f'''
-  const gd = getElement("{power_plot.id}").$refs.qRef;
-  Plotly.restyle(gd, {{x: [[{target_pwr}]], y: [[{target_o3}]]}}, [2]);
-  Plotly.restyle(gd, {{x: [[{actual_pwr}]], y: [[{actual_o3}]]}}, [3]);
+  const el = getElement("{power_plot.id}");
+  if (el && el.$el) {{
+    Plotly.restyle(el.$el,
+      {{x: [[{target_pwr}], [{actual_pwr}]], y: [[{target_o3}], [{actual_o3}]]}},
+      [2, 3]);
+  }}
 ''')
 ```
 `Plotly.restyle()` is O(1) — it patches specific trace data without
 re-rendering the full chart. Fixed trace indices (0=curve, 1=CI band,
 2=target ring, 3=actual dot) make this safe.
+
+> **⚠ CRITICAL — DOM access for `ui.plotly`**: `getElement(id)` returns a NiceGUI
+> custom Vue component (NOT a Quasar component). Use `el.$el` — the root DOM
+> element (the Plotly div). **Do NOT use `el.$refs.qRef`** — it is `undefined`
+> on `ui.plotly`. The guard `if(el && el.$refs.qRef)` silently skips every
+> restyle call. This rule applies to all NiceGUI `ui.*` components; only
+> Quasar-wrapped components expose `$refs.qRef`.
+
+### CI band visibility
+If the CI band appears invisible despite the model having `ci_sigma` data: the
+fill may be physically too narrow (e.g. ~2px on a 300px chart for a well-fitted
+model with `ci_sigma ≈ 0.007` on a 2.1 %vol y-range). Fix: add a visible border
+line so the ±1σ boundary is drawn regardless of fill width:
+```python
+line=dict(color="rgba(65,105,225,0.5)", width=1)  # was: line=dict(width=0)
+```
+Do not inflate σ or switch to ±2σ/3σ — a well-fitted model (R²≈0.998) *should*
+have narrow CI. The boundary just needs to be visible as a line.

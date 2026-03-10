@@ -2088,7 +2088,7 @@ async def index():
                 y=list(ci_o3 + ci_s) + list((ci_o3 - ci_s)[::-1]),
                 fill="toself",
                 fillcolor="rgba(65,105,225,0.25)",
-                line=dict(width=0),
+                line=dict(color="rgba(65,105,225,0.5)", width=1),
                 showlegend=False, name="±1σ",
                 hoverinfo="skip",
             ))
@@ -2125,11 +2125,10 @@ async def index():
         target_o3 = predict_o3_from_power(S.power_target_pct, S.flow_lpm)
         js = (
             f"const el = getElement({power_plot.id});"
-            f"if(el && el.$refs.qRef){{"
-            f"Plotly.restyle(el.$refs.qRef,"
-            f"{{x:[[{S.power_target_pct}]],y:[[{target_o3:.6f}]]}},[2]);"
-            f"Plotly.restyle(el.$refs.qRef,"
-            f"{{x:[[{S.power_actual_pct}]],y:[[{S.vessel_o3_pct:.6f}]]}},[3]);"
+            f"if(el && el.$el){{"
+            f"Plotly.restyle(el.$el,"
+            f"{{x:[[{S.power_target_pct}],[{S.power_actual_pct}]],"
+            f"y:[[{target_o3:.6f}],[{S.vessel_o3_pct:.6f}]]}},[2,3]);"
             f"}}"
         )
         ui.run_javascript(js)

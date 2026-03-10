@@ -17,6 +17,49 @@
 
 **Status**: `[DECIDED]`
 
+> **Superseded by** the entry below — Claude Code's *diagnosis* (markers not
+> updating per tick) was in fact correct. Only their proposed fix was wrong.
+
+---
+
+### 2026-03-10: Confirm `$el` DOM fix + CI band border — power-O3 chart
+
+**Context**: Post-implementation investigation after Session 13b revealed two
+additional bugs in the power-O3 chart:
+
+1. **`_restyle_markers()` silently skipping every tick**: `el.$refs.qRef` does
+   not exist on `ui.plotly` — NiceGUI's `ui.plotly` is a custom Vue component
+   (not Quasar). `$refs.qRef` is `undefined`, so the guard
+   `if(el && el.$refs.qRef)` evaluates False on every call and the restyle
+   body never executes. This is why markers never moved from live telemetry.
+   Claude Code's commit `435b8e2` correctly diagnosed this problem; their
+   proposed fix (`run_method('restyle')`) was wrong but the bug report was right.
+
+2. **CI band invisible despite correct code**: `ci_sigma` loads properly from
+   JSON via `load_model()`. The guard `if mdl and mdl.ci_sigma and mdl.ci_power`
+   evaluates True for the 4 LPM model. The band IS added as trace 1. It appears
+   invisible because `ci_sigma ≈ 0.007 %vol` on a 2.1 %vol y-axis at 300px
+   height ≈ 2px fill width. The rendering code was correct — visibility was the
+   issue, not the logic.
+
+**Decision**:
+1. Replace `el.$refs.qRef` with `el.$el` (Vue component root DOM) everywhere in
+   `_restyle_markers()`. Combine the two separate `Plotly.restyle()` calls into
+   one multi-trace call: `Plotly.restyle(el.$el, {x:[[tgt],[act]], y:[[tgt_o3],[act_o3]]}, [2,3])`.
+2. Change CI band `line=dict(width=0)` → `line=dict(color="rgba(65,105,225,0.5)", width=1)`.
+   This draws visible ±1σ boundary lines regardless of fill width.
+3. Updated `pitfalls.md` Pitfall #5 with confirmed `$el` finding and CI band note.
+4. Updated `collaboration_protocol.md` with explicit rule: Copilot must present
+   conflicts/rejections to the user before acting — never auto-reject.
+
+**Rationale**: `$el` is the documented Vue 2/3 root DOM element. All NiceGUI
+`ui.*` components are custom Vue SFCs; only Quasar-wrapped ones expose
+`$refs.qRef`. A well-fitted model (R²=0.998) has narrow CI by definition —
+inflating σ would be wrong. The border line approach preserves statistical
+correctness while making the band visible.
+
+**Status**: `[IMPLEMENTED]`
+
 ---
 
 ### 2026-03-10: CSTR model with first-order O3 decay — supersedes fill/evac model

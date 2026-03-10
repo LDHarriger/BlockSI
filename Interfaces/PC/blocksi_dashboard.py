@@ -30,6 +30,7 @@ import math
 import os
 import re
 import time
+import traceback
 from collections import deque
 from datetime import datetime
 from typing import Any, Optional
@@ -211,6 +212,7 @@ class SystemState:
         self.esp_time_offset_ms: int = 0
         self.time_synced: bool = False
         self.last_update: Optional[datetime] = None
+        self.last_esp_ts_ms: int = 0  # raw ESP32 ms timestamp from most recent DATA frame
         # Connection
         self.connected: bool = False
         # ------------------------------------------------------------------
@@ -378,6 +380,7 @@ def apply_telemetry(sample: dict) -> None:
     S.cell_temp_c = sample.get("cell_temp_c", 0.0)
     S.pressure_mbar = sample.get("pressure_mbar", 0.0)
     S.last_update = sample.get("timestamp")
+    S.last_esp_ts_ms = sample.get("esp_ts_ms", S.last_esp_ts_ms)
     # power_target_pct: PC is sole authority — never accept from telemetry
     S.update_derived()
     S.power_error = (
@@ -1520,6 +1523,12 @@ EVAC_THRESHOLD_PCT = 0.01   # O3 %vol below which vessel is considered evacuated
 EVAC_STEADY_COUNT = 5       # Consecutive samples below threshold to declare evacuated
 FILL_BASELINE_SAMPLES = 15  # Number of baseline samples at 0% power
 FILL_SAMPLE_INTERVAL = 2.5  # Approximate seconds between DATA samples
+FILL_MAX_SAMPLES = 600      # Hard limit: abort fill if steady-state not reached in N samples (~25 min)
+EVAC_MAX_SAMPLES = 400      # Hard limit: abort evac if not cleared in N samples (~17 min)
+CSTR_STALE_THRESHOLD = 8.0  # Seconds: warn if telemetry hasn't updated since last sample
+CSTR_CMD_RETRIES = 3        # Retries for critical commands (power_set) before aborting
+CSTR_CMD_RETRY_DELAY = 1.5  # Seconds between command retries
+CSTR_CHECKPOINT_INTERVAL = 10  # Write intermediate CSV every N samples during fill/evac
 
 
 def _make_cstr_csv_path(lpm: float) -> str:
@@ -1553,6 +1562,75 @@ def _write_cstr_csv(path: str, samples: list[dict]) -> None:
     log(f"Saved {len(samples)} samples -> {os.path.basename(path)}", "seq")
 
 
+# ---------------------------------------------------------------------------
+# CSTR sequence: file-based debug logger
+# ---------------------------------------------------------------------------
+_cstr_debug_file: Optional[str] = None   # set at sequence start
+
+
+def _cstr_flog(msg: str) -> None:
+    """Write a timestamped line to the CSTR debug log file AND in-memory log.
+
+    The file persists across restarts — essential for post-mortem debugging
+    when the app crashes or the connection drops mid-sequence.
+    """
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    log(msg, "seq")
+    if _cstr_debug_file:
+        try:
+            with open(_cstr_debug_file, "a") as _f:
+                _f.write(f"[{ts}] {msg}\n")
+        except OSError:
+            pass  # don't cascade file errors during an already-failing sequence
+
+
+def _cstr_flog_state(label: str) -> None:
+    """Snapshot key SystemState fields into the debug log — call at each phase boundary."""
+    _cstr_flog(
+        f"STATE@{label}: connected={S.connected} "
+        f"O3={S.vessel_o3_pct:.4f}% pwr_tgt={S.power_target_pct}% "
+        f"pwr_act={S.power_actual_pct:.1f}% "
+        f"last_update={S.last_update.strftime('%H:%M:%S') if S.last_update else 'None'} "
+        f"esp_ts={S.last_esp_ts_ms} "
+        f"relay(o3={S.relay_o3_gen} o2={S.relay_o2_conc} air={S.relay_air_comp})"
+    )
+
+
+async def _cstr_set_power(pct: int) -> None:
+    """Set power with retries; raises RuntimeError if all retries exhausted."""
+    for attempt in range(1, CSTR_CMD_RETRIES + 1):
+        _cstr_flog(f"cmd_set_power({pct}%) attempt {attempt}/{CSTR_CMD_RETRIES}")
+        ok = await cmd_set_power(pct)
+        if ok:
+            _cstr_flog(f"cmd_set_power({pct}%) -> OK")
+            return
+        _cstr_flog(
+            f"cmd_set_power({pct}%) attempt {attempt} FAILED "
+            f"(connected={S.connected}, pwr_act={S.power_actual_pct:.1f}%)"
+        )
+        if attempt < CSTR_CMD_RETRIES:
+            await asyncio.sleep(CSTR_CMD_RETRY_DELAY)
+    raise RuntimeError(
+        f"Failed to set power to {pct}% after {CSTR_CMD_RETRIES} attempts"
+    )
+
+
+async def _cstr_set_relay(name: str, on: bool) -> None:
+    """Set relay with retries; raises RuntimeError if all retries exhausted."""
+    for attempt in range(1, CSTR_CMD_RETRIES + 1):
+        _cstr_flog(f"cmd_set_relay({name},{on}) attempt {attempt}/{CSTR_CMD_RETRIES}")
+        ok = await cmd_set_relay(name, on)
+        if ok:
+            _cstr_flog(f"cmd_set_relay({name},{on}) -> OK")
+            return
+        _cstr_flog(f"cmd_set_relay({name},{on}) attempt {attempt} FAILED")
+        if attempt < CSTR_CMD_RETRIES:
+            await asyncio.sleep(CSTR_CMD_RETRY_DELAY)
+    raise RuntimeError(
+        f"Failed to set relay {name}={on} after {CSTR_CMD_RETRIES} attempts"
+    )
+
+
 async def _start_fill_evac(**kwargs) -> bool:
     """PC-driven fill/evacuation calibration sequence.
 
@@ -1572,7 +1650,12 @@ async def _start_fill_evac(**kwargs) -> bool:
       5. Transition: prepare evac
       6. Evac: 0% power, monitor until 5 consecutive samples < 0.01% vol
       7. Cleanup: save combined CSV, safe standby, offer model fitting
+
+    Debugging: a persistent log file is written to Data/CSTR/ alongside the
+    CSV so post-mortem analysis is possible even after an app restart.
     """
+    global _cstr_debug_file
+
     if not S.connected:
         _notify("Not connected to ESP32", "negative")
         return False
@@ -1605,76 +1688,123 @@ async def _start_fill_evac(**kwargs) -> bool:
     S.seq_progress = 0.0
     S.seq_start_time = time.time()
 
-    log(
-        f"CSTR calibration starting: flow={flow} LPM, "
-        f"target C_in={target_o3:.3f} %vol (no air comp)",
-        "seq",
+    # Open persistent debug log for this run
+    now_tag = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    _cstr_debug_file = os.path.join(
+        CSTR_DATA_DIR, f"{now_tag}_CSTR_debug.log"
     )
+
+    _cstr_flog(
+        f"CSTR calibration starting: flow={flow} LPM, "
+        f"target C_in={target_o3:.3f} %vol (no air comp)"
+    )
+    _cstr_flog_state("start")
+
+    # Helper: collect one telemetry snapshot with freshness check
+    def _snap(phase: str) -> dict:
+        now = datetime.now()
+        staleness = (now - S.last_update).total_seconds() if S.last_update else 999.0
+        if staleness > CSTR_STALE_THRESHOLD:
+            _cstr_flog(
+                f"WARN stale telemetry in {phase}: last_update "
+                f"{staleness:.1f}s ago (>{CSTR_STALE_THRESHOLD}s) — "
+                f"O3={S.vessel_o3_pct:.4f}% may be stale"
+            )
+        return {
+            "timestamp": now,
+            "esp_ts_ms": S.last_esp_ts_ms,
+            "vessel_o3_pct": S.vessel_o3_pct,
+            "cell_temp_c": S.cell_temp_c,
+            "vessel_temp_c": S.vessel_temp_c,
+            "power_pct": S.power_target_pct,
+            "phase": phase,
+            "_staleness_s": round(staleness, 2),
+        }
+
+    # Helper: write intermediate checkpoint CSV (preserves data on mid-run abort)
+    def _checkpoint(label: str) -> None:
+        if not S.cstr_samples:
+            return
+        try:
+            ckpt_path = os.path.join(
+                CSTR_DATA_DIR,
+                f"{now_tag}_CSTR_checkpoint_{label}.csv",
+            )
+            _write_cstr_csv(ckpt_path, S.cstr_samples)
+            _cstr_flog(
+                f"Checkpoint saved: {os.path.basename(ckpt_path)} "
+                f"({len(S.cstr_samples)} samples)"
+            )
+        except OSError as ckpt_err:
+            _cstr_flog(f"WARN checkpoint write failed: {ckpt_err}")
 
     try:
         # -- Phase 1: Relay setup ------------------------------------------
         S.fill_phase = "relay_setup"
         S.seq_phase = "relay_setup"
-        log("Setting up relays for CSTR calibration", "seq")
+        _cstr_flog("Phase 1: relay setup")
 
         # Power to 0% first (safe starting point)
-        if not await cmd_set_power(0):
-            raise RuntimeError("Failed to set power to 0%")
+        await _cstr_set_power(0)
 
-        # Enable O3 generator
+        # Enable O3 generator (required — fail hard if relay doesn't respond)
         if not S.relay_o3_gen:
-            await cmd_set_relay("ozone_gen", True)
+            await _cstr_set_relay("ozone_gen", True)
+        else:
+            _cstr_flog("ozone_gen already ON — skipping relay_set")
         # Enable O2 concentrator if flow > 0
         if flow > 0 and not S.relay_o2_conc:
-            await cmd_set_relay("o2_conc", True)
+            await _cstr_set_relay("o2_conc", True)
+        elif flow > 0:
+            _cstr_flog("o2_conc already ON — skipping relay_set")
         # Air compressor OFF for calibration (best k_d sensitivity)
         if S.relay_air_comp:
-            await cmd_set_relay("air_comp", False)
+            await _cstr_set_relay("air_comp", False)
 
         # Allow relays to stabilize
+        _cstr_flog("Relay setup complete — waiting 3 s for stabilization")
         await asyncio.sleep(3.0)
+        _cstr_flog_state("post_relay_setup")
 
         # -- Phase 2: Baseline (15 samples at 0% power) -------------------
         S.fill_phase = "baseline"
         S.seq_phase = "baseline"
-        log(f"Recording {FILL_BASELINE_SAMPLES} baseline samples at 0% power", "seq")
+        _cstr_flog(
+            f"Phase 2: baseline — {FILL_BASELINE_SAMPLES} samples at 0% power"
+        )
 
         baseline_collected = 0
 
         while baseline_collected < FILL_BASELINE_SAMPLES:
             if not S.fill_active or not S.connected:
-                raise RuntimeError("CSTR sequence aborted or disconnected")
+                raise RuntimeError(
+                    f"CSTR sequence aborted or disconnected "
+                    f"(fill_active={S.fill_active} connected={S.connected})"
+                )
 
             await asyncio.sleep(FILL_SAMPLE_INTERVAL)
 
-            sample = {
-                "timestamp": datetime.now(),
-                "esp_ts_ms": int(time.time() * 1000),
-                "vessel_o3_pct": S.vessel_o3_pct,
-                "cell_temp_c": S.cell_temp_c,
-                "vessel_temp_c": S.vessel_temp_c,
-                "power_pct": S.power_target_pct,
-                "phase": "baseline",
-            }
+            sample = _snap("baseline")
             S.cstr_samples.append(sample)
             baseline_collected += 1
-            S.seq_progress = (baseline_collected / FILL_BASELINE_SAMPLES) * 10  # 0-10%
-            log(
+            S.seq_progress = (baseline_collected / FILL_BASELINE_SAMPLES) * 10
+            _cstr_flog(
                 f"Baseline {baseline_collected}/{FILL_BASELINE_SAMPLES}: "
-                f"O3={S.vessel_o3_pct:.4f}%",
-                "seq",
+                f"O3={sample['vessel_o3_pct']:.4f}% "
+                f"esp_ts={sample['esp_ts_ms']} stale={sample['_staleness_s']}s"
             )
 
-        log("Baseline complete", "seq")
+        _cstr_flog_state("baseline_complete")
+        _checkpoint("baseline")
 
         # -- Phase 3: Fill (100% power, wait for steady-state) -------------
         S.fill_phase = "fill"
         S.seq_phase = "fill"
-        log(f"Starting fill: setting power to 100%, C_in={target_o3:.3f}% vol", "seq")
+        _cstr_flog(f"Phase 3: fill — ramping to 100%, C_in={target_o3:.3f}% vol")
         _notify("Fill phase — ramping to 100% power", "info")
 
-        if not await cmd_set_power(100):
-            raise RuntimeError("Failed to set power to 100%")
+        await _cstr_set_power(100)
+        _cstr_flog_state("fill_power_set")
 
         fill_sample_idx = 0
         # Ring buffer of recent O3 readings for range-based steady-state check
@@ -1682,29 +1812,26 @@ async def _start_fill_evac(**kwargs) -> bool:
 
         while True:
             if not S.fill_active or not S.connected:
-                raise RuntimeError("CSTR sequence aborted or disconnected")
+                raise RuntimeError(
+                    f"CSTR sequence aborted or disconnected during fill "
+                    f"(fill_active={S.fill_active} connected={S.connected})"
+                )
 
             await asyncio.sleep(FILL_SAMPLE_INTERVAL)
 
-            sample = {
-                "timestamp": datetime.now(),
-                "esp_ts_ms": int(time.time() * 1000),
-                "vessel_o3_pct": S.vessel_o3_pct,
-                "cell_temp_c": S.cell_temp_c,
-                "vessel_temp_c": S.vessel_temp_c,
-                "power_pct": S.power_target_pct,
-                "phase": "fill",
-            }
+            sample = _snap("fill")
             S.cstr_samples.append(sample)
             fill_sample_idx += 1
 
             # Track recent readings for stability check
-            recent_o3.append(S.vessel_o3_pct)
+            recent_o3.append(sample["vessel_o3_pct"])
             if len(recent_o3) > FILL_STEADY_COUNT:
                 recent_o3.pop(0)
 
             # Progress bar: map O3 level to % of target
-            fill_frac = min(1.0, S.vessel_o3_pct / target_o3) if target_o3 > 0 else 0
+            fill_frac = (
+                min(1.0, sample["vessel_o3_pct"] / target_o3) if target_o3 > 0 else 0
+            )
             S.seq_progress = 10 + fill_frac * 40  # 10-50% of total
 
             # Check for steady-state: range of last N samples < threshold
@@ -1712,24 +1839,43 @@ async def _start_fill_evac(**kwargs) -> bool:
                 len(recent_o3) >= FILL_STEADY_COUNT
                 and (max(recent_o3) - min(recent_o3)) < FILL_STEADY_RANGE
             )
+            rng = (max(recent_o3) - min(recent_o3)) if len(recent_o3) >= 2 else 999.0
 
             if fill_sample_idx % 10 == 0 or is_stable:
-                rng = (max(recent_o3) - min(recent_o3)) if len(recent_o3) >= 2 else 999
-                log(
-                    f"Fill sample {fill_sample_idx}: O3={S.vessel_o3_pct:.4f}% "
-                    f"({fill_frac*100:.1f}% of C_in), "
-                    f"range={rng:.4f} ({len(recent_o3)}/{FILL_STEADY_COUNT})",
-                    "seq",
+                _cstr_flog(
+                    f"Fill #{fill_sample_idx}: O3={sample['vessel_o3_pct']:.4f}% "
+                    f"({fill_frac*100:.1f}% of C_in) range={rng:.4f}% "
+                    f"window={len(recent_o3)}/{FILL_STEADY_COUNT} "
+                    f"stale={sample['_staleness_s']}s"
                 )
 
+            # Intermediate checkpoint every N samples
+            if fill_sample_idx % CSTR_CHECKPOINT_INTERVAL == 0:
+                _checkpoint(f"fill_{fill_sample_idx}")
+
             if is_stable:
-                rng = max(recent_o3) - min(recent_o3)
-                log(
-                    f"Fill steady-state reached: O3={S.vessel_o3_pct:.4f}%, "
-                    f"range={rng:.4f}% over {FILL_STEADY_COUNT} samples",
-                    "seq",
+                _cstr_flog(
+                    f"Fill steady-state reached: O3={sample['vessel_o3_pct']:.4f}%, "
+                    f"range={rng:.4f}% over {FILL_STEADY_COUNT} samples"
                 )
                 break
+
+            # Hard limit: avoid infinite loop if steady-state never arrives
+            if fill_sample_idx >= FILL_MAX_SAMPLES:
+                _cstr_flog(
+                    f"WARN fill hard limit reached ({FILL_MAX_SAMPLES} samples). "
+                    f"Steady-state NOT detected (range={rng:.4f}% > {FILL_STEADY_RANGE}%). "
+                    f"Proceeding to evac with available data."
+                )
+                _notify(
+                    f"Fill limit reached ({FILL_MAX_SAMPLES} samples) — "
+                    f"steady-state not achieved, proceeding anyway",
+                    "warning",
+                )
+                break
+
+        _cstr_flog_state("fill_complete")
+        _checkpoint(f"fill_final_{fill_sample_idx}")
 
         # -- Phase 4: Transition (prepare evac) ----------------------------
         S.fill_phase = "transition"
@@ -1745,61 +1891,76 @@ async def _start_fill_evac(**kwargs) -> bool:
         # -- Phase 5: Evacuation (0% power, wait for O3 to clear) ----------
         S.fill_phase = "evac"
         S.seq_phase = "evac"
-        log("Starting evacuation: setting power to 0%", "seq")
+        _cstr_flog("Phase 5: evacuation — setting power to 0%")
         _notify("Evac phase — power off, purging vessel", "info")
 
-        if not await cmd_set_power(0):
-            raise RuntimeError("Failed to set power to 0% for evacuation")
+        await _cstr_set_power(0)
+        _cstr_flog_state("evac_power_set")
 
         evac_start_o3 = S.vessel_o3_pct
         steady_count = 0
         evac_sample_idx = 0
+        _cstr_flog(f"Evac start O3={evac_start_o3:.4f}%, threshold={EVAC_THRESHOLD_PCT}%")
 
         while True:
             if not S.fill_active or not S.connected:
-                raise RuntimeError("CSTR sequence aborted or disconnected")
+                raise RuntimeError(
+                    f"CSTR sequence aborted or disconnected during evac "
+                    f"(fill_active={S.fill_active} connected={S.connected})"
+                )
 
             await asyncio.sleep(FILL_SAMPLE_INTERVAL)
 
-            sample = {
-                "timestamp": datetime.now(),
-                "esp_ts_ms": int(time.time() * 1000),
-                "vessel_o3_pct": S.vessel_o3_pct,
-                "cell_temp_c": S.cell_temp_c,
-                "vessel_temp_c": S.vessel_temp_c,
-                "power_pct": S.power_target_pct,
-                "phase": "evac",
-            }
+            sample = _snap("evac")
             S.cstr_samples.append(sample)
             evac_sample_idx += 1
 
             # Progress: map O3 decay to 50-90%
             if evac_start_o3 > 0:
-                evac_frac = 1.0 - min(1.0, S.vessel_o3_pct / evac_start_o3)
+                evac_frac = 1.0 - min(1.0, sample["vessel_o3_pct"] / evac_start_o3)
             else:
                 evac_frac = 1.0
             S.seq_progress = 50 + evac_frac * 40  # 50-90% of total
 
             # Check for evacuation complete
-            if S.vessel_o3_pct < EVAC_THRESHOLD_PCT:
+            if sample["vessel_o3_pct"] < EVAC_THRESHOLD_PCT:
                 steady_count += 1
             else:
                 steady_count = 0
 
             if evac_sample_idx % 10 == 0 or steady_count > 0:
-                log(
-                    f"Evac sample {evac_sample_idx}: O3={S.vessel_o3_pct:.4f}%, "
-                    f"steady={steady_count}/{EVAC_STEADY_COUNT}",
-                    "seq",
+                _cstr_flog(
+                    f"Evac #{evac_sample_idx}: O3={sample['vessel_o3_pct']:.4f}% "
+                    f"steady={steady_count}/{EVAC_STEADY_COUNT} "
+                    f"stale={sample['_staleness_s']}s"
                 )
 
+            # Intermediate checkpoint every N samples
+            if evac_sample_idx % CSTR_CHECKPOINT_INTERVAL == 0:
+                _checkpoint(f"evac_{evac_sample_idx}")
+
             if steady_count >= EVAC_STEADY_COUNT:
-                log(
-                    f"Evacuation complete: O3={S.vessel_o3_pct:.4f}% < "
-                    f"{EVAC_THRESHOLD_PCT}% for {EVAC_STEADY_COUNT} consecutive",
-                    "seq",
+                _cstr_flog(
+                    f"Evacuation complete: O3={sample['vessel_o3_pct']:.4f}% < "
+                    f"{EVAC_THRESHOLD_PCT}% for {EVAC_STEADY_COUNT} consecutive"
                 )
                 break
+
+            # Hard limit: avoid infinite loop if vessel never clears
+            if evac_sample_idx >= EVAC_MAX_SAMPLES:
+                _cstr_flog(
+                    f"WARN evac hard limit reached ({EVAC_MAX_SAMPLES} samples). "
+                    f"O3={sample['vessel_o3_pct']:.4f}% still above threshold. "
+                    f"Proceeding to save with available data."
+                )
+                _notify(
+                    f"Evac limit reached ({EVAC_MAX_SAMPLES} samples) — "
+                    f"vessel not fully cleared, proceeding to save",
+                    "warning",
+                )
+                break
+
+        _cstr_flog_state("evac_complete")
 
         # -- Phase 6: Save combined CSV and cleanup ------------------------
         S.fill_phase = "saving"
@@ -1809,7 +1970,7 @@ async def _start_fill_evac(**kwargs) -> bool:
         csv_path = _make_cstr_csv_path(flow)
         S.cstr_csv_path = csv_path
         _write_cstr_csv(csv_path, S.cstr_samples)
-        log(f"CSTR CSV saved: {os.path.basename(csv_path)}", "seq")
+        _cstr_flog(f"Final CSV saved: {os.path.basename(csv_path)}")
 
         # Cleanup — safe standby
         await _safe_standby()
@@ -1821,18 +1982,21 @@ async def _start_fill_evac(**kwargs) -> bool:
 
         n_fill = sum(1 for s in S.cstr_samples if s.get("phase") == "fill")
         n_evac = sum(1 for s in S.cstr_samples if s.get("phase") == "evac")
+        _cstr_flog(
+            f"CSTR calibration COMPLETE: {len(S.cstr_samples)} total samples "
+            f"({FILL_BASELINE_SAMPLES} baseline + {n_fill} fill + {n_evac} evac)"
+        )
         _notify(
             f"CSTR calibration complete — {n_fill} fill + {n_evac} evac samples",
             "positive",
         )
-        log(
-            f"CSTR calibration complete: {len(S.cstr_samples)} total samples, "
-            f"csv={os.path.basename(csv_path)}",
-            "seq",
-        )
         return True
 
     except RuntimeError as exc:
+        tb = traceback.format_exc()
+        _cstr_flog(f"ERROR (RuntimeError): {exc}\n{tb}")
+        _cstr_flog_state("error")
+        _checkpoint("error")
         log(f"CSTR calibration error: {exc}", "error")
         _notify(f"CSTR calibration failed: {exc}", "negative")
         await _safe_standby()
@@ -1843,6 +2007,10 @@ async def _start_fill_evac(**kwargs) -> bool:
         return False
 
     except Exception as exc:
+        tb = traceback.format_exc()
+        _cstr_flog(f"ERROR (unexpected): {exc}\n{tb}")
+        _cstr_flog_state("error")
+        _checkpoint("error")
         log(f"CSTR calibration unexpected error: {exc}", "error")
         _notify(f"CSTR calibration error: {exc}", "negative")
         await _safe_standby()
@@ -1943,6 +2111,8 @@ async def index():
         if e.value is None:
             return
         if _updating or S.sequence_active:
+            return
+        if e.value is None:   # field cleared — ignore
             return
         _updating = True
         pct = int(e.value)
@@ -2086,6 +2256,7 @@ async def index():
 
     # -- chart update helpers ---------------------------------------------
     def _update_power_curve() -> None:
+        """Full rebuild — call when model, LPM, or CI band changes."""
         pwr, o3 = generate_power_curve(S.flow_lpm)
         target_o3 = predict_o3_from_power(S.power_target_pct, S.flow_lpm)
         fig = _make_power_fig(
@@ -2151,7 +2322,13 @@ async def index():
 
     def _restyle_markers() -> None:
         """Lightweight update of ONLY the target ring (trace 2) and actual
-        dot (trace 3) via Plotly.restyle — avoids full figure rebuild."""
+        dot (trace 3) via Plotly.restyle — avoids full figure rebuild.
+
+        Silently skips if the NiceGUI client context is gone (browser
+        disconnected / tab closed).  Matches the same guard pattern used
+        by _notify() to prevent cascading RuntimeErrors that can kill the
+        timer permanently.
+        """
         target_o3 = predict_o3_from_power(S.power_target_pct, S.flow_lpm)
         js = (
             f"const el = getElement({power_plot.id});"
@@ -2161,7 +2338,10 @@ async def index():
             f"y:[[{target_o3:.6f}],[{S.vessel_o3_pct:.6f}]]}},[2,3]);"
             f"}}"
         )
-        ui.run_javascript(js)
+        try:
+            ui.run_javascript(js)
+        except RuntimeError:
+            pass  # client disconnected — skip silently, tick will retry next second
 
     # =====================================================================
     # BUILD THE PAGE

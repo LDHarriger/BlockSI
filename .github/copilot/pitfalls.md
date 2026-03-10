@@ -232,6 +232,28 @@ re-rendering the full chart. Fixed trace indices (0=curve, 1=CI band,
 > restyle call. This rule applies to all NiceGUI `ui.*` components; only
 > Quasar-wrapped components expose `$refs.qRef`.
 
+### `ui.run_javascript()` also crashes on dead client — must try/except
+`_restyle_markers()` calls `ui.run_javascript()`. When the browser tab disconnects
+(closes, refreshes, or the connection is lost), the NiceGUI slot is cleaned up and
+`context.client` raises `RuntimeError: The parent element this slot belongs to has
+been deleted.` — identical in class to the `ui.notify()` crash from Pitfall #1.
+
+If this exception is not caught, it propagates through `_tick_inner()` → `_tick()`,
+and then **NiceGUI's own exception handler also crashes** (it tries to access the
+same dead client to log the error). This kills the timer task permanently, stopping
+all tick-based updates including the `_notify_queue` drain, sequence cleanup, and
+relay sync — which is why the CSTR sequence appeared to halt.
+
+**Fix (already in place)**:
+```python
+try:
+    ui.run_javascript(js)
+except RuntimeError:
+    pass  # client disconnected — skip silently
+```
+**General rule**: every call to `ui.run_javascript()` or any `ui.*` function inside
+`_tick_inner()` (or any timer callback) must be wrapped in `try/except RuntimeError`.
+
 ### CI band visibility
 If the CI band appears invisible despite the model having `ci_sigma` data: the
 fill may be physically too narrow (e.g. ~2px on a 300px chart for a well-fitted

@@ -43,7 +43,9 @@
 #define POSITION_FINE_THRESHOLD 100     // Switch to slow speed within this range
 
 // Timeout Protection
-#define MOTOR_TIMEOUT_MS        5000    // Max time for any movement
+// Full travel (0→100%) takes ~8 s at MOTOR_PWM_DEFAULT speed.
+// 15 s provides margin for any mechanical resistance or fine-approach time.
+#define MOTOR_TIMEOUT_MS        15000   // Max time for any movement (was 5000 — too short for full travel)
 #define MOTOR_SETTLE_MS         50      // Time to wait after stopping
 
 // ============================================================================

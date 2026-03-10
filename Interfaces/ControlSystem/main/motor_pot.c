@@ -27,7 +27,7 @@ static const char *TAG = "MOTOR_POT";
 
 // Stall detection parameters
 #define STALL_ADC_THRESHOLD     8       // Minimum ADC change to consider movement
-#define STALL_COUNT_LIMIT       30      // Iterations before declaring stall (30 * 20ms = 600ms)
+#define STALL_COUNT_LIMIT       30      // Iterations before declaring stall (30 * 25ms = 750ms)
 
 // ============================================================================
 // Module State
@@ -467,18 +467,32 @@ esp_err_t motor_pot_goto_position(float target_percent, uint32_t timeout_ms)
             break;
         }
         
-        // Stall detection - use STALL_ADC_THRESHOLD for noise immunity
-        if (abs((int32_t)current_adc - (int32_t)last_adc) < STALL_ADC_THRESHOLD) {
-            stall_count++;
-            if (stall_count > STALL_COUNT_LIMIT) {
-                motor_pot_stop();
-                ESP_LOGW(TAG, "Stall detected at ADC=%u (target=%u, error=%ld)", 
-                         current_adc, target_adc, (long)error);
-                // Accept if close enough (within 2x deadband)
-                result = (abs(error) <= POSITION_DEADBAND * 2) ? ESP_OK : ESP_ERR_TIMEOUT;
-                break;
+        // Stall detection — only active during full-speed approach.
+        //
+        // In the fine-approach zone (abs(error) < POSITION_FINE_THRESHOLD) the
+        // motor runs at MOTOR_PWM_SLOW (~39% duty) which produces only ~4-5 ADC
+        // counts per 25 ms loop iteration — below STALL_ADC_THRESHOLD=8.  Running
+        // stall detection at slow speed causes a guaranteed false-stall after
+        // STALL_COUNT_LIMIT iterations and stops the motor before it reaches the
+        // deadband.  In the fine zone we simply let the position loop run until the
+        // deadband or the overall timeout is reached.
+        if (abs(error) >= POSITION_FINE_THRESHOLD) {
+            if (abs((int32_t)current_adc - (int32_t)last_adc) < STALL_ADC_THRESHOLD) {
+                stall_count++;
+                if (stall_count > STALL_COUNT_LIMIT) {
+                    motor_pot_stop();
+                    ESP_LOGW(TAG, "Stall detected at ADC=%u (target=%u, error=%ld)",
+                             current_adc, target_adc, (long)error);
+                    // Accept if close enough (within 2x deadband)
+                    result = (abs(error) <= POSITION_DEADBAND * 2) ? ESP_OK : ESP_ERR_TIMEOUT;
+                    break;
+                }
+            } else {
+                stall_count = 0;
             }
         } else {
+            // Entered fine-approach zone — reset stall counter so any earlier
+            // near-miss counts don't carry over when we re-enter at full speed.
             stall_count = 0;
         }
         last_adc = current_adc;

@@ -189,22 +189,47 @@ async def _start_fill_seq():         # ← button click, has slot context
 
 ---
 
-## 5. `Plotly.react` — do not use `power_plot.figure = fig; power_plot.update()`
+## 5. Plotly live markers — two-tier update strategy
 
-### Symptom
-The live marker (green dot = actual O3, black ring = power target) on the
-Power-O3 curve never moves — it stays at (0, 0) after page load regardless of
-the actual power level.
+### Symptom A — markers never move after page load
+The `power_plot.figure = fig; power_plot.update()` pattern stays stuck at
+(0, 0) after page load regardless of the actual power level.
 
-### Root cause
-NiceGUI's `ui.plotly` diffs the Python-side figure dict and sends only deltas.
-Assigning a new `Figure` object does not reliably push trace-data changes
-through this diff path.
+**Fix**: Use `run_method('react', data, layout)` which calls `Plotly.react()`
+directly on the DOM element, bypassing NiceGUI's element-diff path.
 
-### Fix (already in place)
+### Symptom B — markers only update on manual interactions, not in real-time
+`run_method('react', ...)` called every second from `_tick_inner` rebuilds the
+**entire figure** (model curve + CI band polygon + markers) every tick.  This
+is a large WebSocket payload (~5–10 KB/s) that the browser's Plotly renderer
+may batch or drop, making the dots appear frozen during sequences.
+
+### Fix (already in place — do not revert)
+The marker update is split into two functions:
+
 ```python
-fd = fig.to_dict()
-power_plot.run_method('react', fd['data'], fd['layout'])
+def _update_power_curve():
+    """Full react — call only when model/LPM/CI band changes."""
+    ...
+    power_plot.run_method('react', fd['data'], fd['layout'])
+
+def _update_power_markers():
+    """Lightweight restyle — safe to call every tick."""
+    tgt_o3 = predict_o3_from_power(S.power_target_pct, S.flow_lpm)
+    power_plot.run_method(
+        'restyle',
+        {'x': [[S.power_target_pct], [S.power_actual_pct]],
+         'y': [[tgt_o3], [S.vessel_o3_pct]]},
+        [2, 3],
+    )
 ```
-`run_method('react', ...)` calls `Plotly.react()` directly on the DOM element,
-bypassing the diff and guaranteeing a full re-render.
+
+`_tick_inner` calls `_update_power_markers()` (tiny restyle, <100 bytes).
+`_on_lpm_change`, model fitting, and preset clicks call `_update_power_curve()`
+(full react, rare).
+
+### Critical constraint: trace indices must stay fixed
+`restyle` addresses traces by index.  `_make_power_fig` **always** adds the CI
+band trace at index 1 (with empty `x`/`y` lists when no CI data is available),
+so the target marker is always index 2 and the actual marker is always index 3.
+Never reorder the traces or add traces before index 2.

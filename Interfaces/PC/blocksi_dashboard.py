@@ -2031,6 +2031,7 @@ async def index():
 
     # -- chart update helpers ---------------------------------------------
     def _update_power_curve() -> None:
+        """Full rebuild — call when model, LPM, or CI band changes."""
         pwr, o3 = generate_power_curve(S.flow_lpm)
         target_o3 = predict_o3_from_power(S.power_target_pct, S.flow_lpm)
         fig = _make_power_fig(
@@ -2041,6 +2042,26 @@ async def index():
         fd = fig.to_dict()
         power_plot.run_method('react', fd['data'], fd['layout'])
 
+    def _update_power_markers() -> None:
+        """Lightweight marker-only update via restyle — safe to call every tick.
+
+        Trace layout is always fixed (CI band always present, even if empty):
+          0: model line
+          1: ±1σ CI band
+          2: target marker  (black ring)
+          3: actual marker  (green dot)
+        """
+        tgt_o3 = predict_o3_from_power(S.power_target_pct, S.flow_lpm)
+        act_o3 = S.vessel_o3_pct
+        power_plot.run_method(
+            'restyle',
+            {
+                'x': [[S.power_target_pct], [S.power_actual_pct]],
+                'y': [[tgt_o3], [act_o3]],
+            },
+            [2, 3],
+        )
+
     def _make_power_fig(pwr, o3, tgt_pct, tgt_o3, act_pct, act_o3):
         fig = go.Figure()
         fig.add_trace(go.Scatter(
@@ -2048,27 +2069,33 @@ async def index():
             line=dict(color="royalblue", width=2),
             showlegend=False, name="Model",
         ))
-        # ±1σ confidence band (if model has Jacobian-propagated CI)
+        # ±1σ confidence band — always add trace so indices stay fixed.
+        # Populated only when the model has Jacobian-propagated CI data.
         mdl = S.active_model
         if mdl and mdl.ci_sigma and mdl.ci_power:
             ci_pwr = np.array(mdl.ci_power)
             ci_o3 = np.array([mdl.predict(p) for p in ci_pwr])
             ci_s = np.array(mdl.ci_sigma)
-            fig.add_trace(go.Scatter(
-                x=list(ci_pwr) + list(ci_pwr[::-1]),
-                y=list(ci_o3 + ci_s) + list((ci_o3 - ci_s)[::-1]),
-                fill="toself",
-                fillcolor="rgba(65,105,225,0.15)",
-                line=dict(width=0),
-                showlegend=False, name="±1σ",
-                hoverinfo="skip",
-            ))
+            ci_x = list(ci_pwr) + list(ci_pwr[::-1])
+            ci_y = list(ci_o3 + ci_s) + list((ci_o3 - ci_s)[::-1])
+        else:
+            ci_x, ci_y = [], []
+        fig.add_trace(go.Scatter(
+            x=ci_x, y=ci_y,
+            fill="toself",
+            fillcolor="rgba(65,105,225,0.15)",
+            line=dict(width=0),
+            showlegend=False, name="±1σ",
+            hoverinfo="skip",
+        ))
+        # trace index 2: target marker (black ring)
         fig.add_trace(go.Scatter(
             x=[tgt_pct], y=[tgt_o3], mode="markers",
             marker=dict(color="rgba(0,0,0,0)", size=18,
                         line=dict(color="black", width=3)),
             showlegend=False, name="Target",
         ))
+        # trace index 3: actual marker (green dot)
         fig.add_trace(go.Scatter(
             x=[act_pct], y=[act_o3], mode="markers",
             marker=dict(color="limegreen", size=14),
@@ -3128,8 +3155,8 @@ async def index():
         elif not S.pending_prompt_id:
             _last_prompt_id = ""
 
-        # -- power curve ---------------------------------------------------
-        _update_power_curve()
+        # -- power curve markers (restyle only — full react is in _update_power_curve) --
+        _update_power_markers()
 
         # -- telemetry ECharts ---------------------------------------------
         if data_buf:

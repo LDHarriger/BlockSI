@@ -17,6 +17,10 @@ Interfaces/PC/*.csv
 Interfaces/PC/Data/
 Interfaces/Data/
 Data/
+# TODO: re-add "Interfaces/Data/CSTR/" to the line above once CSTR sequence is
+# stable (currently force-tracked for debugging). Run:
+#   git rm -r --cached Interfaces/Data/CSTR
+#   and restore the Interfaces/Data/ rule to cover CSTR again.
 
 # IDE
 .vscode/

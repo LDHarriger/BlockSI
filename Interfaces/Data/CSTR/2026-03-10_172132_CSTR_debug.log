@@ -1,0 +1,83 @@
+[17:21:32.398] CSTR calibration starting: flow=4.0 LPM, target C_in=1.840 %vol (no air comp)
+[17:21:32.399] STATE@start: connected=True O3=0.0000% pwr_tgt=0% pwr_act=49.4% last_update=17:21:30 esp_ts=99468 relay(o3=False o2=False air=False)
+[17:21:32.400] Phase 1: relay setup
+[17:21:32.400] cmd_set_power(0%) — single attempt, timeout=25.0s
+[17:21:37.256] cmd_set_power(0%) -> RSP OK (pwr_act=6.3%)
+[17:21:37.257] cmd_set_relay(ozone_gen,True) attempt 1/3
+[17:21:37.724] cmd_set_relay(ozone_gen,True) -> OK
+[17:21:37.725] cmd_set_relay(o2_conc,True) attempt 1/3
+[17:21:37.801] cmd_set_relay(o2_conc,True) -> OK
+[17:21:37.802] Relay setup complete — waiting 3 s for stabilization
+[17:21:40.812] STATE@post_relay_setup: connected=True O3=0.0000% pwr_tgt=0% pwr_act=0.0% last_update=17:21:40 esp_ts=109468 relay(o3=True o2=True air=False)
+[17:21:40.813] Phase 2: baseline — 15 samples at 0% power
+[17:21:43.322] Baseline 1/15: O3=0.0000% esp_ts=111468 stale=1.22s
+[17:21:45.832] Baseline 2/15: O3=0.0000% esp_ts=113468 stale=1.73s
+[17:21:48.341] Baseline 3/15: O3=0.0000% esp_ts=115468 stale=2.24s
+[17:21:50.849] Baseline 4/15: O3=0.0000% esp_ts=119468 stale=0.75s
+[17:21:53.363] Baseline 5/15: O3=0.0000% esp_ts=121468 stale=1.27s
+[17:21:55.866] Baseline 6/15: O3=0.0000% esp_ts=123468 stale=1.77s
+[17:21:58.379] Baseline 7/15: O3=0.0000% esp_ts=125468 stale=2.28s
+[17:22:00.889] Baseline 8/15: O3=0.0000% esp_ts=129468 stale=0.79s
+[17:22:03.401] Baseline 9/15: O3=0.0000% esp_ts=131468 stale=1.3s
+[17:22:05.914] Baseline 10/15: O3=0.0000% esp_ts=133468 stale=1.82s
+[17:22:08.421] Baseline 11/15: O3=0.0000% esp_ts=135468 stale=2.32s
+[17:22:10.930] Baseline 12/15: O3=0.0000% esp_ts=139468 stale=0.83s
+[17:22:13.439] Baseline 13/15: O3=0.0000% esp_ts=141468 stale=1.34s
+[17:22:15.950] Baseline 14/15: O3=0.0000% esp_ts=143468 stale=1.85s
+[17:22:18.456] Baseline 15/15: O3=0.0000% esp_ts=145468 stale=2.36s
+[17:22:18.457] STATE@baseline_complete: connected=True O3=0.0000% pwr_tgt=0% pwr_act=0.0% last_update=17:22:16 esp_ts=145468 relay(o3=True o2=True air=False)
+[17:22:18.459] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_baseline.csv (15 samples)
+[17:22:18.460] Phase 3: fill — ramping to 100%, C_in=1.840% vol
+[17:22:18.460] cmd_set_power(100%) — single attempt, timeout=25.0s
+[17:22:26.980] cmd_set_power(100%) -> RSP OK (pwr_act=92.5%)
+[17:22:26.981] STATE@fill_power_set: connected=True O3=0.0000% pwr_tgt=100% pwr_act=92.5% last_update=17:22:26 esp_ts=155468 relay(o3=True o2=True air=False)
+[17:22:52.045] Fill #10: O3=0.0100% (0.5% of C_in) range=0.0100% window=10/30 stale=1.95s
+[17:22:52.047] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_10.csv (25 samples)
+[17:23:14.616] WARN stale telemetry in fill: last_update 8.5s ago (>8.0s) — O3=0.1400% may be stale
+[17:23:17.120] Fill #20: O3=0.2400% (13.0% of C_in) range=0.2400% window=20/30 stale=1.02s
+[17:23:17.123] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_20.csv (35 samples)
+[17:23:42.217] Fill #30: O3=0.4600% (25.0% of C_in) range=0.4600% window=30/30 stale=2.12s
+[17:23:42.219] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_30.csv (45 samples)
+[17:23:54.755] WARN stale telemetry in fill: last_update 8.7s ago (>8.0s) — O3=0.5100% may be stale
+[17:23:57.270] WARN stale telemetry in fill: last_update 11.2s ago (>8.0s) — O3=0.5100% may be stale
+[17:23:59.775] WARN stale telemetry in fill: last_update 13.7s ago (>8.0s) — O3=0.5100% may be stale
+[17:24:02.289] WARN stale telemetry in fill: last_update 16.2s ago (>8.0s) — O3=0.5100% may be stale
+[17:24:04.797] WARN stale telemetry in fill: last_update 18.7s ago (>8.0s) — O3=0.5100% may be stale
+[17:24:07.304] Fill #40: O3=0.6900% (37.5% of C_in) range=0.6700% window=30/30 stale=1.35s
+[17:24:07.307] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_40.csv (55 samples)
+[17:24:32.398] Fill #50: O3=0.8500% (46.2% of C_in) range=0.5900% window=30/30 stale=2.44s
+[17:24:32.401] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_50.csv (65 samples)
+[17:24:57.462] Fill #60: O3=0.9700% (52.7% of C_in) range=0.5000% window=30/30 stale=1.5s
+[17:24:57.465] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_60.csv (75 samples)
+[17:25:22.561] Fill #70: O3=1.0700% (58.1% of C_in) range=0.3700% window=30/30 stale=2.6s
+[17:25:22.564] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_70.csv (85 samples)
+[17:25:47.634] Fill #80: O3=1.1600% (63.0% of C_in) range=0.3100% window=30/30 stale=1.68s
+[17:25:47.637] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_80.csv (95 samples)
+[17:26:12.735] Fill #90: O3=1.2400% (67.4% of C_in) range=0.2600% window=30/30 stale=0.78s
+[17:26:12.738] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_90.csv (105 samples)
+[17:26:37.807] Fill #100: O3=1.2900% (70.1% of C_in) range=0.2000% window=30/30 stale=1.85s
+[17:26:37.820] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_100.csv (115 samples)
+[17:27:02.897] Fill #110: O3=1.3400% (72.8% of C_in) range=0.1700% window=30/30 stale=0.94s
+[17:27:02.901] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_110.csv (125 samples)
+[17:27:27.995] Fill #120: O3=1.3700% (74.4% of C_in) range=0.1300% window=30/30 stale=2.04s
+[17:27:27.998] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_120.csv (135 samples)
+[17:27:53.078] Fill #130: O3=1.1700% (63.6% of C_in) range=0.2000% window=30/30 stale=1.12s
+[17:27:53.081] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_130.csv (145 samples)
+[17:28:18.152] Fill #140: O3=1.0000% (54.3% of C_in) range=0.3700% window=30/30 stale=2.18s
+[17:28:18.156] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_140.csv (155 samples)
+[17:28:43.218] Fill #150: O3=0.8800% (47.8% of C_in) range=0.4900% window=30/30 stale=1.25s
+[17:28:43.222] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_150.csv (165 samples)
+[17:29:08.302] Fill #160: O3=0.7700% (41.8% of C_in) range=0.3800% window=30/30 stale=2.33s
+[17:29:08.306] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_160.csv (175 samples)
+[17:29:33.395] Fill #170: O3=0.6600% (35.9% of C_in) range=0.3100% window=30/30 stale=1.43s
+[17:29:33.399] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_fill_170.csv (185 samples)
+[17:29:45.938] ERROR (RuntimeError): CSTR sequence aborted or disconnected during fill (fill_active=False connected=True)
+Traceback (most recent call last):
+  File "C:\Users\ldhar\Documents\Shroom-E_Co\BlockSI\Interfaces\PC\blocksi_dashboard.py", line 1850, in _start_fill_evac
+    raise RuntimeError(
+    ...<2 lines>...
+    )
+RuntimeError: CSTR sequence aborted or disconnected during fill (fill_active=False connected=True)
+
+[17:29:45.939] STATE@error: connected=True O3=0.6300% pwr_tgt=0% pwr_act=0.2% last_update=17:29:43 esp_ts=593477 relay(o3=False o2=False air=False)
+[17:29:45.943] Checkpoint saved: 2026-03-10_172132_CSTR_checkpoint_error.csv (190 samples)

@@ -1,0 +1,118 @@
+[18:03:19.214] CSTR calibration starting: flow=4.0 LPM, target C_in=1.436 %vol (no air comp)
+[18:03:19.215] STATE@start: connected=True O3=0.0000% pwr_tgt=0% pwr_act=0.6% last_update=18:03:18 esp_ts=1979868 relay(o3=False o2=False air=False)
+[18:03:19.216] Phase 1: relay setup
+[18:03:19.216] cmd_set_power(0%) — single attempt, timeout=25.0s
+[18:03:19.672] cmd_set_power(0%) -> RSP OK (pwr_act=0.6%)
+[18:03:19.673] cmd_set_relay(ozone_gen,True) attempt 1/3
+[18:03:19.701] cmd_set_relay(ozone_gen,True) -> OK
+[18:03:19.702] cmd_set_relay(o2_conc,True) attempt 1/3
+[18:03:19.762] cmd_set_relay(o2_conc,True) -> OK
+[18:03:19.764] Relay setup complete — waiting 3 s for stabilization
+[18:03:22.767] STATE@post_relay_setup: connected=True O3=0.0000% pwr_tgt=0% pwr_act=0.7% last_update=18:03:22 esp_ts=1983868 relay(o3=True o2=True air=False)
+[18:03:22.768] Phase 2: baseline — 15 samples at 0% power
+[18:03:25.275] Baseline 1/15: O3=0.0000% esp_ts=1985868 stale=1.26s
+[18:03:27.787] Baseline 2/15: O3=0.0000% esp_ts=1987868 stale=1.77s
+[18:03:30.296] Baseline 3/15: O3=0.0000% esp_ts=1989868 stale=2.28s
+[18:03:32.798] Baseline 4/15: O3=0.0000% esp_ts=1993868 stale=0.78s
+[18:03:35.307] Baseline 5/15: O3=0.0000% esp_ts=1995868 stale=1.29s
+[18:03:37.811] Baseline 6/15: O3=0.0000% esp_ts=1997868 stale=1.79s
+[18:03:40.322] Baseline 7/15: O3=0.0000% esp_ts=1999868 stale=2.3s
+[18:03:42.838] Baseline 8/15: O3=0.0000% esp_ts=2003868 stale=0.82s
+[18:03:45.341] Baseline 9/15: O3=0.0000% esp_ts=2005868 stale=1.32s
+[18:03:47.846] Baseline 10/15: O3=0.0000% esp_ts=2007868 stale=1.83s
+[18:03:50.351] Baseline 11/15: O3=0.0000% esp_ts=2009868 stale=2.33s
+[18:03:52.862] Baseline 12/15: O3=0.0000% esp_ts=2013868 stale=0.84s
+[18:03:55.374] Baseline 13/15: O3=0.0000% esp_ts=2015868 stale=1.36s
+[18:03:57.876] Baseline 14/15: O3=0.0000% esp_ts=2017868 stale=1.86s
+[18:04:00.385] Baseline 15/15: O3=0.0000% esp_ts=2019868 stale=2.37s
+[18:04:00.386] STATE@baseline_complete: connected=True O3=0.0000% pwr_tgt=0% pwr_act=0.7% last_update=18:03:58 esp_ts=2019868 relay(o3=True o2=True air=False)
+[18:04:00.388] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_baseline.csv (15 samples)
+[18:04:00.389] Phase 3: fill — ramping to 100%, C_in=1.436% vol
+[18:04:00.389] cmd_set_power(100%) — single attempt, timeout=25.0s
+[18:04:09.026] cmd_set_power(100%) -> RSP OK (pwr_act=98.3%)
+[18:04:09.027] STATE@fill_power_set: connected=True O3=0.0000% pwr_tgt=100% pwr_act=98.3% last_update=18:04:08 esp_ts=2029868 relay(o3=True o2=True air=False)
+[18:04:34.111] Fill #10: O3=0.0300% (2.1% of C_in) range=0.0300% window=10/30 stale=2.09s
+[18:04:34.114] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_fill_10.csv (25 samples)
+[18:04:59.215] Fill #20: O3=0.1400% (9.7% of C_in) range=0.1400% window=20/30 stale=1.2s
+[18:04:59.218] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_fill_20.csv (35 samples)
+[18:05:24.302] Fill #30: O3=0.1200% (8.4% of C_in) range=0.1400% window=30/30 stale=2.28s
+[18:05:24.305] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_fill_30.csv (45 samples)
+[18:05:49.402] Fill #40: O3=0.1000% (7.0% of C_in) range=0.0600% window=30/30 stale=1.38s
+[18:05:49.416] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_fill_40.csv (55 samples)
+[18:05:54.431] Fill #42: O3=0.1000% (7.0% of C_in) range=0.0400% window=30/30 stale=2.41s
+[18:05:54.432] Fill steady-state reached: O3=0.1000%, range=0.0400% over 30 samples
+[18:05:54.433] STATE@fill_complete: connected=True O3=0.1000% pwr_tgt=0% pwr_act=0.2% last_update=18:05:52 esp_ts=2133867 relay(o3=False o2=False air=False)
+[18:05:54.434] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_fill_final_42.csv (57 samples)
+[18:05:54.435] Phase 5: evacuation — setting power to 0%
+[18:05:54.436] cmd_set_power(0%) — single attempt, timeout=25.0s
+[18:05:54.757] cmd_set_power(0%) -> RSP OK (pwr_act=0.0%)
+[18:05:54.758] STATE@evac_power_set: connected=True O3=0.1000% pwr_tgt=0% pwr_act=0.0% last_update=18:05:54 esp_ts=2135868 relay(o3=False o2=False air=False)
+[18:05:54.759] Evac start O3=0.1000%, threshold=0.01%
+[18:06:19.829] Evac #10: O3=0.0900% steady=0/5 stale=1.81s
+[18:06:19.832] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_10.csv (67 samples)
+[18:06:44.920] Evac #20: O3=0.0800% steady=0/5 stale=0.9s
+[18:06:44.932] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_20.csv (77 samples)
+[18:07:10.016] Evac #30: O3=0.0700% steady=0/5 stale=2.0s
+[18:07:10.019] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_30.csv (87 samples)
+[18:07:35.088] Evac #40: O3=0.0600% steady=0/5 stale=1.07s
+[18:07:35.092] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_40.csv (97 samples)
+[18:08:00.160] Evac #50: O3=0.0500% steady=0/5 stale=2.14s
+[18:08:00.163] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_50.csv (107 samples)
+[18:08:25.222] Evac #60: O3=0.0500% steady=0/5 stale=1.19s
+[18:08:25.225] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_60.csv (117 samples)
+[18:08:50.320] Evac #70: O3=0.0500% steady=0/5 stale=2.29s
+[18:08:50.323] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_70.csv (127 samples)
+[18:09:15.412] Evac #80: O3=0.0500% steady=0/5 stale=1.38s
+[18:09:15.416] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_80.csv (137 samples)
+[18:09:40.496] Evac #90: O3=0.0500% steady=0/5 stale=2.47s
+[18:09:40.499] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_90.csv (147 samples)
+[18:10:05.561] Evac #100: O3=0.0500% steady=0/5 stale=1.53s
+[18:10:05.576] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_100.csv (157 samples)
+[18:10:30.640] Evac #110: O3=0.0500% steady=0/5 stale=0.61s
+[18:10:30.643] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_110.csv (167 samples)
+[18:10:55.741] Evac #120: O3=0.0500% steady=0/5 stale=1.71s
+[18:10:55.745] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_120.csv (177 samples)
+[18:11:20.791] Evac #130: O3=0.0400% steady=0/5 stale=0.76s
+[18:11:20.794] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_130.csv (187 samples)
+[18:11:45.851] Evac #140: O3=0.0400% steady=0/5 stale=1.82s
+[18:11:45.855] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_140.csv (197 samples)
+[18:12:10.926] Evac #150: O3=0.0400% steady=0/5 stale=0.9s
+[18:12:10.929] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_150.csv (207 samples)
+[18:12:36.012] Evac #160: O3=0.0400% steady=0/5 stale=1.98s
+[18:12:36.016] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_160.csv (217 samples)
+[18:13:01.098] Evac #170: O3=0.0400% steady=0/5 stale=1.07s
+[18:13:01.101] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_170.csv (227 samples)
+[18:13:26.177] Evac #180: O3=0.0400% steady=0/5 stale=2.15s
+[18:13:26.183] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_180.csv (237 samples)
+[18:13:51.273] Evac #190: O3=0.0400% steady=0/5 stale=1.24s
+[18:13:51.277] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_190.csv (247 samples)
+[18:14:16.377] Evac #200: O3=0.0400% steady=0/5 stale=2.35s
+[18:14:16.381] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_200.csv (257 samples)
+[18:14:41.465] Evac #210: O3=0.0400% steady=0/5 stale=1.44s
+[18:14:41.479] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_210.csv (267 samples)
+[18:15:06.551] Evac #220: O3=0.0400% steady=0/5 stale=2.52s
+[18:15:06.555] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_220.csv (277 samples)
+[18:15:31.642] Evac #230: O3=0.0400% steady=0/5 stale=1.61s
+[18:15:31.657] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_230.csv (287 samples)
+[18:15:56.733] Evac #240: O3=0.0400% steady=0/5 stale=0.7s
+[18:15:56.737] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_240.csv (297 samples)
+[18:16:21.817] Evac #250: O3=0.0400% steady=0/5 stale=1.79s
+[18:16:21.822] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_250.csv (307 samples)
+[18:16:46.886] Evac #260: O3=0.0400% steady=0/5 stale=0.86s
+[18:16:46.891] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_260.csv (317 samples)
+[18:17:11.952] Evac #270: O3=0.0400% steady=0/5 stale=1.92s
+[18:17:11.956] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_270.csv (327 samples)
+[18:17:37.010] Evac #280: O3=0.0400% steady=0/5 stale=0.97s
+[18:17:37.014] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_280.csv (337 samples)
+[18:18:02.132] Evac #290: O3=0.0300% steady=0/5 stale=2.09s
+[18:18:02.136] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_290.csv (347 samples)
+[18:18:27.204] Evac #300: O3=0.0300% steady=0/5 stale=1.17s
+[18:18:27.210] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_300.csv (357 samples)
+[18:18:52.280] Evac #310: O3=0.0300% steady=0/5 stale=2.24s
+[18:18:52.285] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_310.csv (367 samples)
+[18:19:17.342] Evac #320: O3=0.0300% steady=0/5 stale=1.3s
+[18:19:17.347] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_320.csv (377 samples)
+[18:19:42.461] Evac #330: O3=0.0300% steady=0/5 stale=2.42s
+[18:19:42.477] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_330.csv (387 samples)
+[18:20:07.557] Evac #340: O3=0.0300% steady=0/5 stale=1.52s
+[18:20:07.562] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_340.csv (397 samples)

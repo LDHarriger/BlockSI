@@ -1,0 +1,48 @@
+[16:41:42.565] CSTR calibration starting: flow=4.0 LPM, target C_in=1.840 %vol (no air comp)
+[16:41:42.567] STATE@start: connected=True O3=0.0000% pwr_tgt=0% pwr_act=0.2% last_update=16:41:42 esp_ts=93088 relay(o3=False o2=False air=False)
+[16:41:42.567] Phase 1: relay setup
+[16:41:42.568] cmd_set_power(0%) attempt 1/3
+[16:41:42.933] cmd_set_power(0%) -> OK
+[16:41:42.934] cmd_set_relay(ozone_gen,True) attempt 1/3
+[16:41:43.018] cmd_set_relay(ozone_gen,True) -> OK
+[16:41:43.020] cmd_set_relay(o2_conc,True) attempt 1/3
+[16:41:43.130] cmd_set_relay(o2_conc,True) -> OK
+[16:41:43.142] Relay setup complete — waiting 3 s for stabilization
+[16:41:46.150] STATE@post_relay_setup: connected=True O3=0.0000% pwr_tgt=0% pwr_act=0.1% last_update=16:41:44 esp_ts=95088 relay(o3=True o2=True air=False)
+[16:41:46.152] Phase 2: baseline — 15 samples at 0% power
+[16:41:48.658] Baseline 1/15: O3=0.0000% esp_ts=99088 stale=0.36s
+[16:41:51.172] Baseline 2/15: O3=0.0000% esp_ts=101088 stale=0.88s
+[16:41:53.675] Baseline 3/15: O3=0.0000% esp_ts=103088 stale=1.38s
+[16:41:56.192] Baseline 4/15: O3=0.0000% esp_ts=105088 stale=1.89s
+[16:41:58.708] Baseline 5/15: O3=0.0000% esp_ts=109088 stale=0.41s
+[16:42:01.211] Baseline 6/15: O3=0.0000% esp_ts=111088 stale=0.91s
+[16:42:03.723] Baseline 7/15: O3=0.0000% esp_ts=113088 stale=1.43s
+[16:42:06.228] Baseline 8/15: O3=0.0000% esp_ts=115088 stale=1.93s
+[16:42:08.744] Baseline 9/15: O3=0.0000% esp_ts=119088 stale=0.45s
+[16:42:11.246] Baseline 10/15: O3=0.0000% esp_ts=121088 stale=0.95s
+[16:42:13.759] Baseline 11/15: O3=0.0000% esp_ts=121088 stale=3.46s
+[16:42:16.273] Baseline 12/15: O3=0.0000% esp_ts=125088 stale=1.98s
+[16:42:18.787] Baseline 13/15: O3=0.0000% esp_ts=129088 stale=0.49s
+[16:42:21.295] Baseline 14/15: O3=0.0000% esp_ts=131088 stale=1.0s
+[16:42:23.806] Baseline 15/15: O3=0.0000% esp_ts=133088 stale=1.51s
+[16:42:23.807] STATE@baseline_complete: connected=True O3=0.0000% pwr_tgt=0% pwr_act=0.0% last_update=16:42:22 esp_ts=133088 relay(o3=True o2=True air=False)
+[16:42:23.809] Checkpoint saved: 2026-03-10_164142_CSTR_checkpoint_baseline.csv (15 samples)
+[16:42:23.810] Phase 3: fill — ramping to 100%, C_in=1.840% vol
+[16:42:23.810] cmd_set_power(100%) attempt 1/3
+[16:42:25.822] cmd_set_power(100%) attempt 1 FAILED (connected=True, pwr_act=0.0%)
+[16:42:27.326] cmd_set_power(100%) attempt 2/3
+[16:42:29.338] cmd_set_power(100%) attempt 2 FAILED (connected=True, pwr_act=15.2%)
+[16:42:30.851] cmd_set_power(100%) attempt 3/3
+[16:42:31.006] cmd_set_power(100%) attempt 3 FAILED (connected=True, pwr_act=60.9%)
+[16:42:31.008] ERROR (RuntimeError): Failed to set power to 100% after 3 attempts
+Traceback (most recent call last):
+  File "C:\Users\ldhar\Documents\Shroom-E_Co\BlockSI\Interfaces\PC\blocksi_dashboard.py", line 1806, in _start_fill_evac
+    await _cstr_set_power(100)
+  File "C:\Users\ldhar\Documents\Shroom-E_Co\BlockSI\Interfaces\PC\blocksi_dashboard.py", line 1613, in _cstr_set_power
+    raise RuntimeError(
+        f"Failed to set power to {pct}% after {CSTR_CMD_RETRIES} attempts"
+    )
+RuntimeError: Failed to set power to 100% after 3 attempts
+
+[16:42:31.008] STATE@error: connected=True O3=0.0500% pwr_tgt=0% pwr_act=60.9% last_update=16:42:30 esp_ts=141088 relay(o3=True o2=True air=False)
+[16:42:31.011] Checkpoint saved: 2026-03-10_164142_CSTR_checkpoint_error.csv (15 samples)

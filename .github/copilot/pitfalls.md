@@ -202,6 +202,9 @@ Power-O3 curve never move — stuck at (0, 0) after page load.
 - `power_plot.run_method('react', fd['data'], fd['layout'])` was tried and
   **FAILS** — raises `"Method 'react' not found"`. NiceGUI's Vue component does
   not expose a `react` method directly. Do not attempt this.
+- `power_plot.run_method('restyle', ...)` is similarly **unverified** — NiceGUI's
+  plotly Vue component does not document a 'restyle' method. Do not attempt this.
+  Use `ui.run_javascript()` to call `Plotly.restyle()` directly on the DOM element.
 
 ### Fix (already in place — two-tier approach)
 **Full redraws** (LPM change, model reload, model fit): use `_update_power_curve()`

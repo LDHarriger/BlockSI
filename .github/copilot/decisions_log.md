@@ -5,6 +5,20 @@
 
 ---
 
+### 2026-03-10: Reject cherry-pick 435b8e2 — power curve regression
+
+**Context**: Claude Code commit `435b8e2` re-implemented the power curve two-tier update strategy, but:
+1. `_update_power_curve()` was changed to use `power_plot.run_method('react', ...)` — confirmed broken, raises `"Method 'react' not found"` (see 2026-03-09 "Revert Plotly react" entry).
+2. `_update_power_markers()` uses `power_plot.run_method('restyle', ...)` — unverified; NiceGUI's plotly Vue component does not document a 'restyle' method.
+3. Our Session 13 `_restyle_markers()` using `ui.run_javascript() → Plotly.restyle()` is already confirmed working and already in `main`.
+4. The commit would also revert the CI band opacity from 0.25 back to 0.15.
+
+**Decision**: Do not merge this commit. Our existing implementation is correct and verified. The pitfalls.md note has been extended to explicitly warn against `run_method('restyle')` as well as `run_method('react')`.
+
+**Status**: `[DECIDED]`
+
+---
+
 ### 2026-03-10: CSTR model with first-order O3 decay — supersedes fill/evac model
 
 **Context**: The original CSTR model (`Models/Fill/`) assumed C_in as a fixed asymptote and fitted τ and t_d for fill and evac separately. This ignored O3 decay in the vessel, which suppresses the steady-state concentration (C_ss < C_in). At low flow rates (e.g. 0.25 LPM), the observed plateau was 30-40% below C_in — the old model could not explain this. Additionally, the old fill termination criterion ("5 samples ≥ 95% of C_in") would never trigger if decay suppresses C_ss below that threshold.

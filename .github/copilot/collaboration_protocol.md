@@ -9,9 +9,9 @@ BlockSI development uses **two AI coding agents** working in parallel:
 1. **VS Code Copilot Agent** — runs locally, pushes directly to `main` branch
 2. **Claude Code Agent** — runs on cloud, pushes to `claude/*` feature branches
 
-**Workflow**: Claude Code pushes to feature branches, then the project manager
-merges those branches into `main`. VS Code Copilot pulls from `main` to sync.
-See `claude_code_agent.md` for the cloud agent's specific coordination rules.
+**Workflow**: Claude Code pushes to `claude/*` feature branches. VS Code Copilot
+fetches, merges, and pushes those branches into `main` on your behalf. See
+`claude_code_agent.md` for the cloud agent's specific coordination rules.
 
 **The collaboration docs remain active**: They serve as persistent memory
 across context windows (summaries), architectural reference (interface contract),
@@ -22,8 +22,8 @@ agents are active.
 
 | Agent | Platform | Branch | Merge Authority |
 |-------|----------|--------|------------------|
-| **VS Code Copilot** | Local VS Code | `main` | Self (direct push) |
-| **Claude Code** | Cloud | `claude/*` | Human (PR merge) |
+| **VS Code Copilot** | Local VS Code | `main` | Self — direct push + merges `claude/*` |
+| **Claude Code** | Cloud | `claude/*` | VS Code Copilot (merges on user request) |
 
 See `claude_code_agent.md` for the cloud agent's detailed coordination rules.
 
@@ -45,6 +45,7 @@ for continuity — they cover their respective domains.
 | `dashboard_agent_summary.md` | Dashboard agent's current state and pending work | Either agent |
 | `esp32_agent_summary.md` | ESP32 agent's current state and pending work | Either agent |
 | `decisions_log.md` | Architectural decisions with date + rationale | Either agent |
+| `pitfalls.md` | Recurring bugs and NiceGUI/asyncio gotchas | Either agent |
 
 ## Status Taxonomy
 
@@ -99,13 +100,14 @@ When an architectural decision is made during a chat:
 
 ## New Chat Startup Procedure
 
-When starting a new agent chat session:
-1. Ask the agent to read `copilot-instructions.md` (project-level context).
-2. Ask it to read `collaboration_protocol.md` (this file).
-3. Ask it to read `interface_contract.md` (shared protocol definitions).
-4. Ask it to read its own summary (e.g., `dashboard_agent_summary.md`).
-5. Optionally, ask it to read the other agent's summary if cross-domain
-   awareness is needed.
+When starting a new agent session:
+1. Read `copilot-instructions.md` — project overview, architecture, conventions
+2. Read `collaboration_protocol.md` (this file) — understand the branch model
+3. Read `interface_contract.md` — shared protocol definitions
+4. Read `dashboard_agent_summary.md` — current PC/dashboard state
+5. Read `esp32_agent_summary.md` — current ESP32 state
+6. Read `decisions_log.md` (recent entries) — architectural context
+7. Skim `pitfalls.md` — known recurring bugs and framework gotchas to avoid
 
 ## End-of-Session Procedure (MANDATORY)
 

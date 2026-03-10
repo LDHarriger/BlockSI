@@ -15,10 +15,19 @@ from .power_o3_model import (
 )
 
 from .fill_model import (
-    FillModel,
-    fit_fill_model,
+    # Primary names (CSTR with decay)
+    CSTRModel,
+    fit_cstr_model,
     fit_fill_curve,
     fit_evac_curve,
+    load_cstr_csv,
+    load_cstr_model,
+    load_cstr_model_from_dir,
+    save_cstr_model,
+    list_cstr_models,
+    # Backward-compatible aliases
+    FillModel,
+    fit_fill_model,
     load_fill_csv,
     load_fill_model,
     load_fill_model_for_condition,
@@ -42,11 +51,19 @@ __all__ = [
     "predict_o3",
     "predict_power",
     "generate_curve",
-    # Fill / Evacuation CSTR model
-    "FillModel",
-    "fit_fill_model",
+    # CSTR model (with decay)
+    "CSTRModel",
+    "fit_cstr_model",
     "fit_fill_curve",
     "fit_evac_curve",
+    "load_cstr_csv",
+    "load_cstr_model",
+    "load_cstr_model_from_dir",
+    "save_cstr_model",
+    "list_cstr_models",
+    # Backward-compatible aliases
+    "FillModel",
+    "fit_fill_model",
     "load_fill_csv",
     "load_fill_model",
     "load_fill_model_for_condition",

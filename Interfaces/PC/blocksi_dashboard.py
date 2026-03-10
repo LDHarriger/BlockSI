@@ -50,12 +50,13 @@ from analysis import (
     predict_power as _model_predict_power,
     generate_curve as _model_generate_curve,
     aggregate_calibration_data,
-    # Fill/Evac CSTR model
-    FillModel,
-    fit_fill_model,
-    load_fill_model_for_condition,
-    save_fill_model as save_fill_model_json,
-    list_fill_models as list_saved_fill_models,
+    # CSTR model (with decay)
+    CSTRModel,
+    FillModel,  # backward-compatible alias
+    fit_cstr_model,
+    load_cstr_model_from_dir,
+    save_cstr_model as save_cstr_model_json,
+    list_cstr_models as list_saved_cstr_models,
 )
 
 # =============================================================================
@@ -69,13 +70,12 @@ DATA_DIR = os.path.join(BASE_DIR, "Data")
 TELEMETRY_DIR = os.path.join(DATA_DIR, "Telemetry")
 CALIBRATION_DIR = os.path.join(DATA_DIR, "Calibration")
 VALIDATION_DIR = os.path.join(DATA_DIR, "Validation")
-FILL_DIR = os.path.join(DATA_DIR, "Fill")
-EVAC_DIR = os.path.join(DATA_DIR, "Evac")
+CSTR_DATA_DIR = os.path.join(DATA_DIR, "CSTR")
 MODEL_DIR = os.path.join(BASE_DIR, "Models", "O3Power")
-FILL_MODEL_DIR = os.path.join(BASE_DIR, "Models", "Fill")
+CSTR_MODEL_DIR = os.path.join(BASE_DIR, "Models", "CSTR")
 
 for _d in (DATA_DIR, TELEMETRY_DIR, CALIBRATION_DIR, VALIDATION_DIR,
-           FILL_DIR, EVAC_DIR, MODEL_DIR, FILL_MODEL_DIR):
+           CSTR_DATA_DIR, MODEL_DIR, CSTR_MODEL_DIR):
     os.makedirs(_d, exist_ok=True)
 
 # Power model coefficients  (legacy fallback — O3_max = A/F + B)
@@ -254,20 +254,16 @@ class SystemState:
         # Active model (loaded from Models/O3Power/)
         self.active_model: Optional[PowerO3Model] = None
         self.model_status: str = "No model"  # "Fitted", "Fallback", "No model"
-        # Fill/Evac CSTR model (loaded from Models/Fill/)
-        self.active_fill_model: Optional[FillModel] = None
-        self.fill_model_status: str = "No model"
+        # CSTR model (loaded from Models/CSTR/)
+        self.active_cstr_model: Optional[CSTRModel] = None
+        self.cstr_model_status: str = "No model"
         # Fill/Evac sequence state
         self.fill_active: bool = False
         self.fill_phase: str = ""        # "baseline", "fill", "transition", "evac", ""
-        self.fill_samples: list[dict] = []
-        self.evac_samples: list[dict] = []
-        self.fill_csv_path: str = ""
-        self.evac_csv_path: str = ""
+        self.cstr_samples: list[dict] = []   # all phases in one list
+        self.cstr_csv_path: str = ""
         self.fill_target_o3: float = 0.0   # validated max O3 at 100% power
         self.fill_lpm: float = DEFAULT_FLOW_LPM
-        self.fill_air_comp_fill: bool = False
-        self.fill_air_comp_evac: bool = True
 
     def load_model_for_current_condition(self) -> None:
         """Try to load a fitted model matching current flow/O2%."""
@@ -287,24 +283,25 @@ class SystemState:
             self.active_model = None
             self.model_status = "Fallback (piecewise)"
 
-    def load_fill_model_for_current_condition(self) -> None:
-        """Try to load a CSTR fill model matching current flow/O2%."""
-        o2 = compute_effective_o2_pct(self.flow_lpm, self.relay_air_comp)
-        model = load_fill_model_for_condition(FILL_MODEL_DIR, self.flow_lpm, o2)
+    def load_cstr_model(self) -> None:
+        """Try to load the universal CSTR model."""
+        model = load_cstr_model_from_dir(CSTR_MODEL_DIR)
         if model is not None and model.is_valid:
-            self.active_fill_model = model
-            self.fill_model_status = (
-                f"V={model.system_volume_L:.1f}L "
+            self.active_cstr_model = model
+            self.cstr_model_status = (
+                f"V={model.system_volume_L:.1f}L, "
+                f"k_d={model.decay_rate_per_s:.5f}/s "
                 f"(R²={model.r_squared_fill:.3f}/{model.r_squared_evac:.3f})"
             )
             log(
-                f"Fill model loaded: {model.flow_lpm} LPM / {model.o2_pct}% O2 "
-                f"V={model.system_volume_L:.2f}L",
+                f"CSTR model loaded: V={model.system_volume_L:.2f}L, "
+                f"k_d={model.decay_rate_per_s:.6f}/s, "
+                f"cal@{model.calibration_flow_lpm}LPM",
                 "info",
             )
         else:
-            self.active_fill_model = None
-            self.fill_model_status = "No model"
+            self.active_cstr_model = None
+            self.cstr_model_status = "No model"
 
     def update_derived(self) -> None:
         self.target_o3_pct = round(
@@ -1232,7 +1229,7 @@ async def cmd_sequence_start(seq_type: str, **kwargs) -> bool:
         return await _start_calibration(**kwargs)
     elif seq_type == "validate":
         return await _start_validation(**kwargs)
-    elif seq_type == "fill_evac":
+    elif seq_type == "cstr_cal":
         # PC-driven — launch as background task so UI remains responsive
         asyncio.create_task(_start_fill_evac(**kwargs))
         return True
@@ -1465,29 +1462,28 @@ VAL_TRANSIENT_SKIP = 7
 VAL_MIN_STABLE = 3          # Minimum stable samples required for valid statistics
 
 # Constants for fill/evac steady-state detection
-FILL_STEADY_COUNT = 5       # Consecutive samples ≥ threshold to declare steady-state
-FILL_STEADY_FRAC = 0.95     # Fraction of target O3 considered "filled"
+FILL_STEADY_COUNT = 30      # Consecutive samples within range to declare steady-state
+FILL_STEADY_RANGE = 0.05    # Max range (%vol) across steady window to declare stable
 EVAC_THRESHOLD_PCT = 0.01   # O3 %vol below which vessel is considered evacuated
 EVAC_STEADY_COUNT = 5       # Consecutive samples below threshold to declare evacuated
 FILL_BASELINE_SAMPLES = 15  # Number of baseline samples at 0% power
 FILL_SAMPLE_INTERVAL = 2.5  # Approximate seconds between DATA samples
 
 
-def _make_fill_csv_path(lpm: float, air_comp: bool, phase: str) -> str:
-    """Generate fill or evac CSV filename.
+def _make_cstr_csv_path(lpm: float) -> str:
+    """Generate CSTR calibration CSV filename.
 
-    Format: ``{YYYY-MM-DD}_{HHMMSS}_{Phase}_{LPM}Lpm[_air].csv``
+    Format: ``{YYYY-MM-DD}_{HHMMSS}_CSTR_{LPM}Lpm.csv``
+    Saved to ``Data/CSTR/``.
     """
     now = datetime.now()
     lpm_s = f"{lpm:.0f}" if lpm == int(lpm) else f"{lpm:.1f}"
-    air_tag = "_air" if air_comp else ""
-    base_dir = FILL_DIR if phase == "Fill" else EVAC_DIR
-    fname = f"{now:%Y-%m-%d_%H%M%S}_{phase}_{lpm_s}Lpm{air_tag}.csv"
-    return os.path.join(base_dir, fname)
+    fname = f"{now:%Y-%m-%d_%H%M%S}_CSTR_{lpm_s}Lpm.csv"
+    return os.path.join(CSTR_DATA_DIR, fname)
 
 
-def _write_fill_csv(path: str, samples: list[dict]) -> None:
-    """Write fill/evac samples to CSV."""
+def _write_cstr_csv(path: str, samples: list[dict]) -> None:
+    """Write combined CSTR calibration samples (baseline+fill+evac) to CSV."""
     if not samples:
         return
     header = "timestamp,esp_ts_ms,elapsed_s,vessel_o3_pct,cell_temp_c,vessel_temp_c,power_pct,phase\n"
@@ -1512,14 +1508,18 @@ async def _start_fill_evac(**kwargs) -> bool:
     entirely by the PC.  The PC sends power_set/relay_set commands and monitors
     incoming DATA telemetry for steady-state detection.
 
+    Calibration is performed WITHOUT air compressor for maximum k_d
+    sensitivity.  The fitted parameters (V, k_d, V_dead) generalise to
+    any flow rate and air compressor configuration.
+
     Phases:
       1. Pre-checks: validated model must exist, connection active
-      2. Relay setup: O3 gen ON, O2 conc ON (if flow>0), air comp per toggle
+      2. Relay setup: O3 gen ON, O2 conc ON (if flow>0), air comp OFF
       3. Baseline: 15 samples at 0% power — establishes zero reference
-      4. Fill: 100% power, monitor until 5 consecutive samples ≥ 95% of target
-      5. Transition: save fill CSV, start evac CSV
+      4. Fill: 100% power, monitor until 30 consecutive samples stable
+      5. Transition: prepare evac
       6. Evac: 0% power, monitor until 5 consecutive samples < 0.01% vol
-      7. Cleanup: save evac CSV, safe standby, offer model fitting
+      7. Cleanup: save combined CSV, safe standby, offer model fitting
     """
     if not S.connected:
         _notify("Not connected to ESP32", "negative")
@@ -1530,8 +1530,6 @@ async def _start_fill_evac(**kwargs) -> bool:
         return False
 
     flow = kwargs.get("flow", DEFAULT_FLOW_LPM)
-    air_comp_fill = kwargs.get("air_comp_fill", False)
-    air_comp_evac = kwargs.get("air_comp_evac", True)
 
     # Determine target O3 at 100% power from the validated model
     target_o3 = predict_o3_from_power(100, flow)
@@ -1545,23 +1543,19 @@ async def _start_fill_evac(**kwargs) -> bool:
     # -- Initialize state --------------------------------------------------
     S.fill_active = True
     S.fill_phase = "setup"
-    S.fill_samples = []
-    S.evac_samples = []
-    S.fill_csv_path = ""
-    S.evac_csv_path = ""
+    S.cstr_samples = []
+    S.cstr_csv_path = ""
     S.fill_target_o3 = target_o3
     S.fill_lpm = flow
-    S.fill_air_comp_fill = air_comp_fill
-    S.fill_air_comp_evac = air_comp_evac
     S.sequence_active = True
-    S.seq_type = "fill_evac"
+    S.seq_type = "cstr_cal"
     S.seq_phase = "setup"
     S.seq_progress = 0.0
     S.seq_start_time = time.time()
 
     log(
-        f"Fill/Evac starting: flow={flow} LPM, target={target_o3:.3f} %vol, "
-        f"air_fill={air_comp_fill}, air_evac={air_comp_evac}",
+        f"CSTR calibration starting: flow={flow} LPM, "
+        f"target C_in={target_o3:.3f} %vol (no air comp)",
         "seq",
     )
 
@@ -1569,7 +1563,7 @@ async def _start_fill_evac(**kwargs) -> bool:
         # -- Phase 1: Relay setup ------------------------------------------
         S.fill_phase = "relay_setup"
         S.seq_phase = "relay_setup"
-        log("Setting up relays for fill phase", "seq")
+        log("Setting up relays for CSTR calibration", "seq")
 
         # Power to 0% first (safe starting point)
         if not await cmd_set_power(0):
@@ -1581,9 +1575,9 @@ async def _start_fill_evac(**kwargs) -> bool:
         # Enable O2 concentrator if flow > 0
         if flow > 0 and not S.relay_o2_conc:
             await cmd_set_relay("o2_conc", True)
-        # Set air compressor for fill phase
-        if air_comp_fill != S.relay_air_comp:
-            await cmd_set_relay("air_comp", air_comp_fill)
+        # Air compressor OFF for calibration (best k_d sensitivity)
+        if S.relay_air_comp:
+            await cmd_set_relay("air_comp", False)
 
         # Allow relays to stabilize
         await asyncio.sleep(3.0)
@@ -1593,27 +1587,14 @@ async def _start_fill_evac(**kwargs) -> bool:
         S.seq_phase = "baseline"
         log(f"Recording {FILL_BASELINE_SAMPLES} baseline samples at 0% power", "seq")
 
-        baseline_start_len = len(data_buf)
         baseline_collected = 0
 
         while baseline_collected < FILL_BASELINE_SAMPLES:
             if not S.fill_active or not S.connected:
-                raise RuntimeError("Fill sequence aborted or disconnected")
+                raise RuntimeError("CSTR sequence aborted or disconnected")
 
             await asyncio.sleep(FILL_SAMPLE_INTERVAL)
-            # Collect any new samples that arrived
-            current_len = len(data_buf)
-            if current_len > baseline_start_len:
-                for i in range(max(0, current_len - (current_len - baseline_start_len)), current_len):
-                    if baseline_collected >= FILL_BASELINE_SAMPLES:
-                        break
-                    sample = data_buf[i - (len(data_buf) - current_len)]  # This indexing is wrong, let me fix.
-                    pass
-                # Simpler approach: just count new DATA arrivals via telemetry
-                pass
 
-            # Actually, let's use a simpler approach: snapshot the current
-            # vessel_o3_pct each time we poll, since apply_telemetry updates it.
             sample = {
                 "timestamp": datetime.now(),
                 "esp_ts_ms": int(time.time() * 1000),
@@ -1623,7 +1604,7 @@ async def _start_fill_evac(**kwargs) -> bool:
                 "power_pct": S.power_target_pct,
                 "phase": "baseline",
             }
-            S.fill_samples.append(sample)
+            S.cstr_samples.append(sample)
             baseline_collected += 1
             S.seq_progress = (baseline_collected / FILL_BASELINE_SAMPLES) * 10  # 0-10%
             log(
@@ -1637,19 +1618,19 @@ async def _start_fill_evac(**kwargs) -> bool:
         # -- Phase 3: Fill (100% power, wait for steady-state) -------------
         S.fill_phase = "fill"
         S.seq_phase = "fill"
-        log(f"Starting fill: setting power to 100%, target={target_o3:.3f}% vol", "seq")
+        log(f"Starting fill: setting power to 100%, C_in={target_o3:.3f}% vol", "seq")
         _notify("Fill phase — ramping to 100% power", "info")
 
         if not await cmd_set_power(100):
             raise RuntimeError("Failed to set power to 100%")
 
-        steady_count = 0
-        threshold = target_o3 * FILL_STEADY_FRAC
         fill_sample_idx = 0
+        # Ring buffer of recent O3 readings for range-based steady-state check
+        recent_o3: list[float] = []
 
         while True:
             if not S.fill_active or not S.connected:
-                raise RuntimeError("Fill sequence aborted or disconnected")
+                raise RuntimeError("CSTR sequence aborted or disconnected")
 
             await asyncio.sleep(FILL_SAMPLE_INTERVAL)
 
@@ -1662,59 +1643,52 @@ async def _start_fill_evac(**kwargs) -> bool:
                 "power_pct": S.power_target_pct,
                 "phase": "fill",
             }
-            S.fill_samples.append(sample)
+            S.cstr_samples.append(sample)
             fill_sample_idx += 1
 
-            # Estimate progress: use exponential approach model
-            # At 3τ ≈ 95% fill.  Rough τ ≈ V_est / (flow/60).
-            # For progress bar: map O3 level to % of target
+            # Track recent readings for stability check
+            recent_o3.append(S.vessel_o3_pct)
+            if len(recent_o3) > FILL_STEADY_COUNT:
+                recent_o3.pop(0)
+
+            # Progress bar: map O3 level to % of target
             fill_frac = min(1.0, S.vessel_o3_pct / target_o3) if target_o3 > 0 else 0
             S.seq_progress = 10 + fill_frac * 40  # 10-50% of total
 
-            # Check for steady-state
-            if S.vessel_o3_pct >= threshold:
-                steady_count += 1
-            else:
-                steady_count = 0
+            # Check for steady-state: range of last N samples < threshold
+            is_stable = (
+                len(recent_o3) >= FILL_STEADY_COUNT
+                and (max(recent_o3) - min(recent_o3)) < FILL_STEADY_RANGE
+            )
 
-            if fill_sample_idx % 10 == 0 or steady_count > 0:
+            if fill_sample_idx % 10 == 0 or is_stable:
+                rng = (max(recent_o3) - min(recent_o3)) if len(recent_o3) >= 2 else 999
                 log(
                     f"Fill sample {fill_sample_idx}: O3={S.vessel_o3_pct:.4f}% "
-                    f"({fill_frac*100:.1f}% of target), "
-                    f"steady={steady_count}/{FILL_STEADY_COUNT}",
+                    f"({fill_frac*100:.1f}% of C_in), "
+                    f"range={rng:.4f} ({len(recent_o3)}/{FILL_STEADY_COUNT})",
                     "seq",
                 )
 
-            if steady_count >= FILL_STEADY_COUNT:
+            if is_stable:
+                rng = max(recent_o3) - min(recent_o3)
                 log(
-                    f"Fill steady-state reached: {S.vessel_o3_pct:.4f}% >= "
-                    f"{threshold:.4f}% for {FILL_STEADY_COUNT} consecutive samples",
+                    f"Fill steady-state reached: O3={S.vessel_o3_pct:.4f}%, "
+                    f"range={rng:.4f}% over {FILL_STEADY_COUNT} samples",
                     "seq",
                 )
                 break
 
-        # -- Phase 4: Transition (save fill, prepare evac) ------------------
+        # -- Phase 4: Transition (prepare evac) ----------------------------
         S.fill_phase = "transition"
         S.seq_phase = "transition"
         S.seq_progress = 50.0
 
-        # Save fill CSV
-        air_for_filename = air_comp_fill
-        fill_path = _make_fill_csv_path(flow, air_for_filename, "Fill")
-        S.fill_csv_path = fill_path
-        _write_fill_csv(fill_path, S.fill_samples)
-        log(f"Fill CSV saved: {os.path.basename(fill_path)}", "seq")
         _notify(
-            f"Fill complete — {len(S.fill_samples)} samples, "
+            f"Fill complete — {fill_sample_idx} samples, "
             f"O3={S.vessel_o3_pct:.3f}%",
             "positive",
         )
-
-        # Switch air compressor for evac phase if different
-        if air_comp_evac != air_comp_fill:
-            log(f"Switching air comp for evac: {air_comp_fill} -> {air_comp_evac}", "seq")
-            await cmd_set_relay("air_comp", air_comp_evac)
-            await asyncio.sleep(2.0)  # let flow stabilize
 
         # -- Phase 5: Evacuation (0% power, wait for O3 to clear) ----------
         S.fill_phase = "evac"
@@ -1725,14 +1699,13 @@ async def _start_fill_evac(**kwargs) -> bool:
         if not await cmd_set_power(0):
             raise RuntimeError("Failed to set power to 0% for evacuation")
 
-        # Record the starting O3 for evac (should be near target)
         evac_start_o3 = S.vessel_o3_pct
         steady_count = 0
         evac_sample_idx = 0
 
         while True:
             if not S.fill_active or not S.connected:
-                raise RuntimeError("Evac sequence aborted or disconnected")
+                raise RuntimeError("CSTR sequence aborted or disconnected")
 
             await asyncio.sleep(FILL_SAMPLE_INTERVAL)
 
@@ -1745,7 +1718,7 @@ async def _start_fill_evac(**kwargs) -> bool:
                 "power_pct": S.power_target_pct,
                 "phase": "evac",
             }
-            S.evac_samples.append(sample)
+            S.cstr_samples.append(sample)
             evac_sample_idx += 1
 
             # Progress: map O3 decay to 50-90%
@@ -1776,16 +1749,15 @@ async def _start_fill_evac(**kwargs) -> bool:
                 )
                 break
 
-        # -- Phase 6: Save evac CSV and cleanup ----------------------------
+        # -- Phase 6: Save combined CSV and cleanup ------------------------
         S.fill_phase = "saving"
         S.seq_phase = "saving"
         S.seq_progress = 90.0
 
-        air_for_evac_filename = air_comp_evac
-        evac_path = _make_fill_csv_path(flow, air_for_evac_filename, "Evac")
-        S.evac_csv_path = evac_path
-        _write_fill_csv(evac_path, S.evac_samples)
-        log(f"Evac CSV saved: {os.path.basename(evac_path)}", "seq")
+        csv_path = _make_cstr_csv_path(flow)
+        S.cstr_csv_path = csv_path
+        _write_cstr_csv(csv_path, S.cstr_samples)
+        log(f"CSTR CSV saved: {os.path.basename(csv_path)}", "seq")
 
         # Cleanup — safe standby
         await _safe_standby()
@@ -1795,23 +1767,22 @@ async def _start_fill_evac(**kwargs) -> bool:
         S.fill_active = False
         S.sequence_active = False
 
+        n_fill = sum(1 for s in S.cstr_samples if s.get("phase") == "fill")
+        n_evac = sum(1 for s in S.cstr_samples if s.get("phase") == "evac")
         _notify(
-            f"Fill/Evac complete — Fill: {len(S.fill_samples)} samples, "
-            f"Evac: {len(S.evac_samples)} samples",
+            f"CSTR calibration complete — {n_fill} fill + {n_evac} evac samples",
             "positive",
         )
         log(
-            f"Fill/Evac sequence complete: "
-            f"fill={len(S.fill_samples)}, evac={len(S.evac_samples)}, "
-            f"fill_csv={os.path.basename(fill_path)}, "
-            f"evac_csv={os.path.basename(evac_path)}",
+            f"CSTR calibration complete: {len(S.cstr_samples)} total samples, "
+            f"csv={os.path.basename(csv_path)}",
             "seq",
         )
         return True
 
     except RuntimeError as exc:
-        log(f"Fill/Evac error: {exc}", "error")
-        _notify(f"Fill/Evac failed: {exc}", "negative")
+        log(f"CSTR calibration error: {exc}", "error")
+        _notify(f"CSTR calibration failed: {exc}", "negative")
         await _safe_standby()
         S.fill_phase = "error"
         S.seq_phase = "error"
@@ -1820,8 +1791,8 @@ async def _start_fill_evac(**kwargs) -> bool:
         return False
 
     except Exception as exc:
-        log(f"Fill/Evac unexpected error: {exc}", "error")
-        _notify(f"Fill/Evac error: {exc}", "negative")
+        log(f"CSTR calibration unexpected error: {exc}", "error")
+        _notify(f"CSTR calibration error: {exc}", "negative")
         await _safe_standby()
         S.fill_phase = "error"
         S.seq_phase = "error"
@@ -1830,43 +1801,44 @@ async def _start_fill_evac(**kwargs) -> bool:
         return False
 
 
-async def _fit_and_save_fill_model() -> Optional[FillModel]:
-    """Fit CSTR model from the most recent fill/evac CSVs and save."""
-    if not S.fill_csv_path or not S.evac_csv_path:
-        _notify("No fill/evac CSV files to fit", "negative")
+async def _fit_and_save_cstr_model() -> Optional[CSTRModel]:
+    """Fit CSTR model from the most recent calibration CSV and save."""
+    if not S.cstr_csv_path:
+        _notify("No CSTR calibration CSV to fit", "negative")
         return None
 
-    if not os.path.exists(S.fill_csv_path) or not os.path.exists(S.evac_csv_path):
-        _notify("Fill/evac CSV files not found", "negative")
+    if not os.path.exists(S.cstr_csv_path):
+        _notify("CSTR calibration CSV not found", "negative")
         return None
 
     try:
-        o2 = compute_effective_o2_pct(S.fill_lpm, S.fill_air_comp_fill)
-        model = fit_fill_model(
-            fill_csv_path=S.fill_csv_path,
-            evac_csv_path=S.evac_csv_path,
+        # C_in from power model at 100% power, same flow used in calibration
+        c_in = predict_o3_from_power(100, S.fill_lpm)
+        model = fit_cstr_model(
+            csv_path=S.cstr_csv_path,
             flow_lpm=S.fill_lpm,
-            o2_pct=o2,
+            c_in_pct=c_in,
         )
-        path = save_fill_model_json(model, FILL_MODEL_DIR)
+        path = save_cstr_model_json(model, CSTR_MODEL_DIR)
         log(
-            f"Fill model fitted: V={model.system_volume_L:.2f}L, "
-            f"τ_fill={model.tau_fill_s:.1f}s, τ_evac={model.tau_evac_s:.1f}s "
+            f"CSTR model fitted: V={model.system_volume_L:.2f}L, "
+            f"k_d={model.decay_rate_per_s:.6f}/s, "
+            f"C_ss={model.c_ss_fitted_pct:.3f}% (C_in={c_in:.3f}%), "
             f"R²={model.r_squared_fill:.4f}/{model.r_squared_evac:.4f} "
             f"-> {os.path.basename(path)}",
             "seq",
         )
         _notify(
-            f"Fill model: V={model.system_volume_L:.1f}L, "
+            f"CSTR model: V={model.system_volume_L:.1f}L, "
+            f"k_d={model.decay_rate_per_s:.5f}/s, "
             f"R²={model.r_squared_fill:.3f}/{model.r_squared_evac:.3f}",
             "positive",
         )
-        # Reload active fill model
-        S.load_fill_model_for_current_condition()
+        S.load_cstr_model()
         return model
     except Exception as exc:
-        log(f"Fill model fitting failed: {exc}", "error")
-        _notify(f"Fill model fitting failed: {exc}", "negative")
+        log(f"CSTR model fitting failed: {exc}", "error")
+        _notify(f"CSTR model fitting failed: {exc}", "negative")
         return None
 
 
@@ -2694,26 +2666,22 @@ async def index():
 
                 # ---- Fill / Evacuation Calibration section ---------------
                 with ui.expansion(
-                    "Fill / Evac Calibration", icon="air"
+                    "CSTR Calibration", icon="air"
                 ).classes("w-full q-mb-sm"):
                     ui.markdown(
                         "Fill the vessel at 100% power until steady-state, "
                         "then evacuate at 0% power until O3 clears. "
-                        "Records fill and evac curves for CSTR model fitting "
-                        "(system volume estimation)."
+                        "Fits a decay-aware CSTR model to extract system volume, "
+                        "O3 decay rate, and dead volume. Air compressor is OFF "
+                        "during calibration for best decay sensitivity. "
+                        "Parameters generalise to any flow rate and air config."
                     ).classes("text-caption text-grey q-mb-sm")
 
                     with ui.row().classes("q-gutter-sm items-end q-mb-sm"):
                         fill_lpm_input = ui.number(
                             label="O2 LPM", value=DEFAULT_FLOW_LPM,
-                            min=0.5, max=15, step=0.5, format="%.1f",
+                            min=0.5, max=5, step=0.5, format="%.1f",
                         ).classes("w-24")
-                        fill_air_fill_sw = ui.switch(
-                            "Air ON (fill)", value=False,
-                        ).classes("q-ml-sm")
-                        fill_air_evac_sw = ui.switch(
-                            "Air ON (evac)", value=True,
-                        ).classes("q-ml-sm")
 
                     # Target O3 readout (from validated model at 100% power)
                     fill_target_lbl = ui.label("").classes(
@@ -2725,12 +2693,13 @@ async def index():
                         tgt = predict_o3_from_power(100, lpm)
                         if tgt > 0.01:
                             fill_target_lbl.text = (
-                                f"Target O3 at 100% power: {tgt:.3f} %vol "
-                                f"(steady-state threshold: {tgt * FILL_STEADY_FRAC:.3f}%)"
+                                f"C_in at 100% power: {tgt:.3f} %vol "
+                                f"(steady-state: range < {FILL_STEADY_RANGE}% "
+                                f"over {FILL_STEADY_COUNT} samples)"
                             )
                         else:
                             fill_target_lbl.text = (
-                                "⚠ No power model — fit a model first"
+                                "No power model — fit a model first"
                             )
 
                     _update_fill_target_label()
@@ -2739,17 +2708,13 @@ async def index():
                     with ui.row().classes("q-gutter-sm items-center q-mb-sm"):
                         async def _start_fill_seq():
                             lpm = float(fill_lpm_input.value or DEFAULT_FLOW_LPM)
-                            af = fill_air_fill_sw.value
-                            ae = fill_air_evac_sw.value
                             await cmd_sequence_start(
-                                "fill_evac",
+                                "cstr_cal",
                                 flow=lpm,
-                                air_comp_fill=af,
-                                air_comp_evac=ae,
                             )
 
                         fill_start_btn = ui.button(
-                            "Start Fill/Evac", icon="play_arrow",
+                            "Start CSTR Calibration", icon="play_arrow",
                             on_click=_start_fill_seq, color="teal",
                         )
 
@@ -2770,38 +2735,36 @@ async def index():
                         "text-caption text-grey"
                     )
 
-                    # Fill model status
+                    # CSTR model status
                     with ui.row().classes("items-center q-gutter-xs q-mt-sm"):
-                        fill_model_icon = ui.icon("info").classes("text-orange")
-                        fill_model_lbl = ui.label(
-                            S.fill_model_status
+                        cstr_model_icon = ui.icon("info").classes("text-orange")
+                        cstr_model_lbl = ui.label(
+                            S.cstr_model_status
                         ).classes("text-caption")
 
-                    def _update_fill_model_status() -> None:
-                        if S.active_fill_model and S.active_fill_model.is_valid:
-                            fill_model_icon.name = "check_circle"
-                            fill_model_icon.classes("text-green", remove="text-orange")
-                            fill_model_lbl.text = (
-                                f"Active: {S.active_fill_model.flow_lpm} LPM / "
-                                f"{S.active_fill_model.o2_pct}% O2 — "
-                                f"{S.fill_model_status}"
+                    def _update_cstr_model_status() -> None:
+                        if S.active_cstr_model and S.active_cstr_model.is_valid:
+                            cstr_model_icon.name = "check_circle"
+                            cstr_model_icon.classes("text-green", remove="text-orange")
+                            cstr_model_lbl.text = (
+                                f"Active: {S.cstr_model_status}"
                             )
                         else:
-                            fill_model_icon.name = "info"
-                            fill_model_icon.classes("text-orange", remove="text-green")
-                            fill_model_lbl.text = S.fill_model_status
+                            cstr_model_icon.name = "info"
+                            cstr_model_icon.classes("text-orange", remove="text-green")
+                            cstr_model_lbl.text = S.cstr_model_status
 
-                    _update_fill_model_status()
+                    _update_cstr_model_status()
 
-                    # Fit model button (enabled after fill/evac completes)
-                    async def _fit_fill_model_click():
-                        model = await _fit_and_save_fill_model()
+                    # Fit model button (enabled after CSTR calibration completes)
+                    async def _fit_cstr_model_click():
+                        model = await _fit_and_save_cstr_model()
                         if model:
-                            _update_fill_model_status()
+                            _update_cstr_model_status()
 
                     fill_fit_btn = ui.button(
                         "Fit CSTR Model", icon="show_chart",
-                        on_click=_fit_fill_model_click, color="purple",
+                        on_click=_fit_cstr_model_click, color="purple",
                     ).props("flat")
 
                     # Fill/Evac live chart
@@ -3049,7 +3012,7 @@ async def index():
             type_names = {
                 "calibrate": "CALIBRATE",
                 "validate": "VALIDATE",
-                "fill_evac": "FILL/EVAC",
+                "cstr_cal": "CSTR CAL",
             }
             display_name = type_names.get(S.seq_type, S.seq_type.upper())
 
@@ -3070,9 +3033,9 @@ async def index():
                 "target": f"Target hold ({S.seq_power:.0f}%)",
                 "cooldown": "Cooldown (0%)",
                 "fill": f"Filling @ 100% — O3={S.vessel_o3_pct:.3f}%",
-                "transition": "Saving fill, switching to evac...",
+                "transition": "Transitioning to evac...",
                 "evac": f"Evacuating @ 0% — O3={S.vessel_o3_pct:.4f}%",
-                "setup": "Initializing fill/evac...",
+                "setup": "Initializing CSTR calibration...",
                 "saving": "Saving file...",
                 "complete": "Complete!",
                 "error": "Error — stopped",
@@ -3090,18 +3053,14 @@ async def index():
                 seq_phase_lbl.text = "~3s warm-up"
             elif phase in ("saving", "complete"):
                 seq_name_lbl.text = f"{display_name} — {phase_desc}"
-                if S.seq_type == "fill_evac":
-                    seq_phase_lbl.text = (
-                        f"Fill: {len(S.fill_samples)}, "
-                        f"Evac: {len(S.evac_samples)}"
-                    )
+                if S.seq_type == "cstr_cal":
+                    seq_phase_lbl.text = f"{len(S.cstr_samples)} samples"
                 else:
                     seq_phase_lbl.text = f"{len(S.cal_samples)} samples"
             else:
-                if S.seq_type == "fill_evac":
+                if S.seq_type == "cstr_cal":
                     seq_name_lbl.text = f"{display_name} — {phase_desc}"
-                    all_fill = len(S.fill_samples) + len(S.evac_samples)
-                    seq_phase_lbl.text = f"{all_fill} samples"
+                    seq_phase_lbl.text = f"{len(S.cstr_samples)} samples"
                 else:
                     seq_name_lbl.text = (
                         f"{display_name} — Step {S.seq_step_idx}/{S.seq_step_total}"
@@ -3304,22 +3263,23 @@ async def index():
         if S.fill_active or S.fill_phase in ("complete", "error"):
             # Update progress bar and phase label
             fill_progress.value = S.seq_progress / 100
+            n_fill = sum(1 for s in S.cstr_samples if s.get("phase") == "fill")
+            n_evac = sum(1 for s in S.cstr_samples if s.get("phase") == "evac")
             _FILL_PHASE_DESCS = {
                 "setup": "Initializing...",
                 "relay_setup": "Enabling relays",
-                "baseline": f"Baseline (0% power) — {len(S.fill_samples)} samples",
+                "baseline": f"Baseline (0% power) — {len(S.cstr_samples)} samples",
                 "fill": (
                     f"Filling @ 100% — O3={S.vessel_o3_pct:.3f}% "
-                    f"/ {S.fill_target_o3:.3f}%"
+                    f"/ C_in={S.fill_target_o3:.3f}%"
                 ),
-                "transition": "Saving fill data, switching to evac...",
+                "transition": "Transitioning to evac...",
                 "evac": (
                     f"Evacuating @ 0% — O3={S.vessel_o3_pct:.4f}%"
                 ),
-                "saving": "Saving evac data...",
+                "saving": "Saving data...",
                 "complete": (
-                    f"Complete — Fill: {len(S.fill_samples)}, "
-                    f"Evac: {len(S.evac_samples)} samples"
+                    f"Complete — {n_fill} fill + {n_evac} evac samples"
                 ),
                 "error": "Error — sequence stopped",
             }
@@ -3327,11 +3287,10 @@ async def index():
                 S.fill_phase, S.fill_phase.replace("_", " ").title()
             )
 
-            # Update live chart with fill + evac samples
-            all_samples = S.fill_samples + S.evac_samples
-            if all_samples:
-                x_labels = list(range(len(all_samples)))
-                y_data = [s.get("vessel_o3_pct", 0) for s in all_samples]
+            # Update live chart with all CSTR samples
+            if S.cstr_samples:
+                x_labels = list(range(len(S.cstr_samples)))
+                y_data = [s.get("vessel_o3_pct", 0) for s in S.cstr_samples]
                 fill_chart.options["xAxis"]["data"] = x_labels
                 fill_chart.options["series"][0]["data"] = y_data
                 fill_chart.update()
@@ -3366,8 +3325,7 @@ async def index():
             "val_passed": S.val_result.get("passed", None),
             "fill_active": S.fill_active,
             "fill_phase": S.fill_phase,
-            "fill_samples": len(S.fill_samples),
-            "evac_samples": len(S.evac_samples),
+            "cstr_samples": len(S.cstr_samples),
             "fill_target_o3": round(S.fill_target_o3, 4),
             "data_buf": len(data_buf),
             "last_update": str(S.last_update) if S.last_update else None,
@@ -3395,7 +3353,7 @@ async def _startup() -> None:
     args, _ = parser.parse_known_args()
     # Load fitted model for current operating condition
     S.load_model_for_current_condition()
-    S.load_fill_model_for_current_condition()
+    S.load_cstr_model()
     tcp = TCPServer(args.port)
     await tcp.start()
 

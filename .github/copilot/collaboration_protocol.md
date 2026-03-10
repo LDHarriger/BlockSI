@@ -1,32 +1,32 @@
 # BlockSI Multi-Agent Collaboration Protocol
 
-> Last updated: 2026-03-04
+> Last updated: 2026-03-10
 
 ## Overview
 
-BlockSI development previously used **domain-separated AI coding agents**
-(one for ESP32, one for the PC dashboard).  As of 2026-03-04, this has been
-**changed to a single-agent model** — one GitHub Copilot agent handles both
-the ESP32 firmware and the PC dashboard within the same chat session.
+BlockSI development uses **two AI coding agents** working in parallel:
 
-**Rationale**: When a feature spans the ESP32↔PC boundary (e.g. adding a new
-calibration phase, changing a command argument format), the dual-agent model
-required writing the interface contract, waiting for the other agent to read
-it, and coordinating through documentation handoffs.  This introduced lag,
-context drift, and subtle regressions.  A single agent with full-stack context
-builds both sides of a feature simultaneously, keeping the interface contract
-always in sync.
+1. **VS Code Copilot Agent** — runs locally, works on `main` branch, handles
+   interactive development (UI debugging, live hardware testing, iterative fixes)
+2. **Claude Code Agent** — runs on cloud, works on **feature branches**, handles
+   analytical tasks (model refactoring, algorithm design, documentation review)
+
+The VS Code agent (or human) merges feature branches into `main` after review.
+See `claude_code_agent.md` for the cloud agent's specific coordination rules.
 
 **The collaboration docs remain active**: They serve as persistent memory
 across context windows (summaries), architectural reference (interface contract),
 and decision history (decisions log) — all valuable regardless of how many
 agents are active.
 
-## Active Agent
+## Active Agents
 
-| Agent | Domain | Owns |
-|-------|--------|------|
-| **BlockSI Agent** | Full-stack | All firmware `.c/.h` files, `Interfaces/PC/blocksi_dashboard.py`, collaboration docs |
+| Agent | Platform | Branch | Domain |
+|-------|----------|--------|--------|
+| **VS Code Copilot** | Local VS Code | `main` | Full-stack, hardware debugging, UI fixes |
+| **Claude Code** | Cloud | Feature branches | Models, algorithms, analysis, docs |
+
+See `claude_code_agent.md` for the cloud agent's detailed coordination rules.
 
 > **Previous model** (before 2026-03-04): Two domain-separated agents —
 > "Dashboard Agent" (Interfaces/PC/) and "ESP32 Agent" (Interfaces/ControlSystem/).
@@ -41,9 +41,10 @@ for continuity — they cover their respective domains.
 | File | Purpose | Written by |
 |------|---------|------------|
 | `collaboration_protocol.md` | This file -- rules and conventions | Human |
+| `claude_code_agent.md` | Coordination rules for the cloud agent | VS Code Agent / Human |
 | `interface_contract.md` | LAN protocol, DATA format, shared constants | Either agent (must coordinate) |
-| `dashboard_agent_summary.md` | Dashboard agent's current state and pending work | Dashboard Agent |
-| `esp32_agent_summary.md` | ESP32 agent's current state and pending work | ESP32 Agent |
+| `dashboard_agent_summary.md` | Dashboard agent's current state and pending work | Either agent |
+| `esp32_agent_summary.md` | ESP32 agent's current state and pending work | Either agent |
 | `decisions_log.md` | Architectural decisions with date + rationale | Either agent |
 
 ## Status Taxonomy

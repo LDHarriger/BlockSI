@@ -554,11 +554,16 @@ Air Compressor (~21% O2) ──┘                                         │
 
 ---
 
-## Fill / Evacuation Calibration  `[IMPLEMENTED]`
+## CSTR Calibration (with O3 Decay)  `[IMPLEMENTED]`
 
-PC-driven sequence for determining system gas volume via CSTR model fitting.
-Unlike calibration/validation (ESP32-driven), the PC orchestrates this
-directly using `power_set` and `relay_set` commands, monitoring DATA telemetry.
+PC-driven sequence for determining system gas volume, O3 decay rate, and dead
+volume via decay-aware CSTR model fitting.  Unlike calibration/validation
+(ESP32-driven), the PC orchestrates this directly using `power_set` and
+`relay_set` commands, monitoring DATA telemetry.
+
+Calibration is performed **without air compressor** for maximum k_d sensitivity.
+The fitted parameters (V, k_d, V_dead) generalise to any flow rate and air
+compressor configuration.
 
 ### Protocol
 
@@ -568,31 +573,45 @@ PC                                  ESP32
 cmd_set_power(0)                 →  RSP,OK,power_set,...
 cmd_set_relay("ozone_gen", 1)    →  RSP,OK,relay_set,...
 cmd_set_relay("o2_conc", 1)      →  RSP,OK,relay_set,...
-cmd_set_relay("air_comp", 0|1)   →  RSP,OK,relay_set,...
+cmd_set_relay("air_comp", 0)     →  RSP,OK,relay_set,...  (always OFF for cal)
   (15 baseline samples at 0%)
 cmd_set_power(100)               →  RSP,OK,power_set,...
-  (monitor DATA until 5 consecutive samples ≥ 95% of target O3)
-  → Save fill CSV
-  (optional: toggle air_comp for evac)
+  (monitor DATA until 30 consecutive samples with range < 0.05 %vol)
 cmd_set_power(0)                 →  RSP,OK,power_set,...
   (monitor DATA until 5 consecutive samples < 0.01% vol)
-  → Save evac CSV
+  → Save combined CSV (baseline+fill+evac with phase column)
   → Safe standby (power=0, all relays off)
 ```
 
-### CSTR Model
+### CSTR Model (with first-order decay)
 
-- **Fill**: `C_out(t) = C_in × (1 - exp(-(t - t_d)/τ))`
-- **Evac**: `C_out(t) = C_ss × exp(-(t - t_d)/τ)`
-- `τ` = time constant (seconds), `t_d` = transport delay
-- `V_system = mean(τ_fill, τ_evac) × F` where F = flow in L/s
-- Fitted via `scipy.optimize.curve_fit`, stored in `Models/Fill/` as JSON
+```
+dC/dt = (C_in - C) / τ  -  k_d · C
+
+Fill:  C(t) = C_ss · (1 - exp(-(t - t_d) / τ_eff))
+Evac:  C(t) = C_ss · exp(-(t - t_d) / τ_drain)
+
+where:
+  C_ss     = C_in / (1 + k_d · τ)        — decay-suppressed plateau
+  τ_eff    = τ / (1 + k_d · τ)           — effective fill time constant
+  τ_drain  = τ_evac / (1 + k_d · τ_evac) — evac time constant
+```
+
+**Fundamental parameters** (flow-rate independent, from one calibration):
+- `V` — system gas volume (L)
+- `k_d` — first-order O3 decay rate (s⁻¹)
+- `V_dead` — plumbing dead volume (L)
+
+**Derived per-condition**:
+- `τ = V / Q`, `t_d = V_dead / Q`, `C_ss = C_in / (1 + k_d · V/Q)`
+- Air comp during evac: `Q_evac = Q_O2 + 10`, `τ_evac = V / Q_evac`
+
+Fitted via `scipy.optimize.curve_fit`, stored in `Models/CSTR/cstr_model.json`.
 
 ### File Naming
 
-- Fill: `Data/Fill/{YYYY-MM-DD}_{HHMMSS}_Fill_{LPM}Lpm[_air].csv`
-- Evac: `Data/Evac/{YYYY-MM-DD}_{HHMMSS}_Evac_{LPM}Lpm[_air].csv`
-- Model: `Models/Fill/fill_evac_{LPM}lpm_{O2}o2.json`
+- Data: `Data/CSTR/{YYYY-MM-DD}_{HHMMSS}_CSTR_{LPM}Lpm.csv` (single file, `phase` column)
+- Model: `Models/CSTR/cstr_model.json` (universal — one file for all conditions)
 
 ---
 

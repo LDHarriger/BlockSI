@@ -52,6 +52,7 @@ The summaries and interface contract are the shared source of truth.
 | `dashboard_agent_summary.md` | Dashboard/PC state and pending work | Either agent |
 | `esp32_agent_summary.md` | ESP32 firmware state and pending work | Either agent |
 | `decisions_log.md` | Architectural decisions with date + rationale | Either agent |
+| `pitfalls.md` | Recurring bugs and NiceGUI/asyncio gotchas | Either agent |
 
 ## Status Taxonomy
 
@@ -102,6 +103,7 @@ When starting a new agent session:
 3. Read `dashboard_agent_summary.md` — current PC/dashboard state
 4. Read `esp32_agent_summary.md` — current ESP32 state
 5. Read `decisions_log.md` (recent entries) — architectural context
+6. Skim `pitfalls.md` — known recurring bugs and framework gotchas to avoid
 
 ## End-of-Session Procedure (MANDATORY)
 

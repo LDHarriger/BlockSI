@@ -1534,6 +1534,7 @@ CSTR_CHECKPOINT_INTERVAL = 10  # Write intermediate CSV every N samples during f
 # commands to the ESP32 while it is still executing the first one.
 CSTR_POWER_SET_TIMEOUT = 25.0   # Seconds to wait for power_set RSP before fallback
 CSTR_POWER_TOLERANCE = 5.0      # % — fallback: accept if actual power within this of target
+FILL_POWER_MIN_PCT = 80.0       # Minimum pwr_act at fill steady-state; lower means power was cut mid-fill
 
 
 def _make_cstr_csv_path(lpm: float) -> str:
@@ -1597,7 +1598,8 @@ def _cstr_flog_state(label: str) -> None:
         f"pwr_act={S.power_actual_pct:.1f}% "
         f"last_update={S.last_update.strftime('%H:%M:%S') if S.last_update else 'None'} "
         f"esp_ts={S.last_esp_ts_ms} "
-        f"relay(o3={S.relay_o3_gen} o2={S.relay_o2_conc} air={S.relay_air_comp})"
+        f"relay(o3={S.relay_o3_gen} o2={S.relay_o2_conc} air={S.relay_air_comp}) "
+        f"seq_cleanup_pending={S.seq_cleanup_pending}"
     )
 
 
@@ -1722,6 +1724,11 @@ async def _start_fill_evac(**kwargs) -> bool:
     S.seq_phase = "setup"
     S.seq_progress = 0.0
     S.seq_start_time = time.time()
+    # Cancel any deferred cleanup pending from a prior ESP32-driven sequence
+    # (calibrate/validate).  If seq_cleanup_pending is True when the first
+    # _tick fires, _sequence_cleanup() → _safe_standby() would cut power and
+    # turn off all relays mid-fill — the root cause of the spurious power-cut bug.
+    S.seq_cleanup_pending = False
 
     # Open persistent debug log for this run
     now_tag = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -1893,6 +1900,14 @@ async def _start_fill_evac(**kwargs) -> bool:
                     f"Fill steady-state reached: O3={sample['vessel_o3_pct']:.4f}%, "
                     f"range={rng:.4f}% over {FILL_STEADY_COUNT} samples"
                 )
+                # Power sanity check: steady-state at 0% power means the fill ran with
+                # no ozone input — data is invalid and continuing to evac would be wrong.
+                if S.power_actual_pct < FILL_POWER_MIN_PCT:
+                    raise RuntimeError(
+                        f"Fill steady-state declared but pwr_act={S.power_actual_pct:.1f}% "
+                        f"is below minimum {FILL_POWER_MIN_PCT}% — power was cut during fill; "
+                        f"data is invalid. Check for a deferred cleanup race or manual abort."
+                    )
                 break
 
             # Hard limit: avoid infinite loop if steady-state never arrives
@@ -3257,7 +3272,7 @@ async def index():
             _notify(_msg, _lvl)
 
         # -- deferred sequence cleanup (set by COMPLETE/ABORTED handler) ---
-        if S.seq_cleanup_pending and S.connected:
+        if S.seq_cleanup_pending and S.connected and not S.fill_active:
             S.seq_cleanup_pending = False
             log("Running deferred sequence cleanup from _tick", "seq")
             await _sequence_cleanup("deferred")

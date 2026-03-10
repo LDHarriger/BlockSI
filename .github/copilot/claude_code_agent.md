@@ -38,7 +38,8 @@ manually re-merged by the VS Code agent.
 ## Branching & Commit Protocol
 
 **You are constrained to push to feature branches** (environment restriction).
-The project manager will review and merge your branches into `main`.
+The VS Code Copilot agent will fetch, review, and merge your branches into `main`
+when prompted by the user.
 
 **Branch naming**: Use `claude/<descriptive-name>` (e.g., `claude/review-project-docs-DvDeR`).
 
@@ -56,8 +57,8 @@ git rebase origin/main    # Incorporate any commits made to main since you start
 git push origin claude/<feature-name>
 ```
 
-**After push**: Notify the project manager that your branch is ready for review.
-They will handle the merge into `main`.
+**After push**: Notify the user that your branch is ready. The VS Code Copilot
+agent will handle fetching, reviewing, and merging into `main`.
 
 **Conflict resolution:** When rebasing onto `main`, preserve ALL existing code from
 the VS Code agent. Add your changes on top, don't replace. When in doubt, keep both.

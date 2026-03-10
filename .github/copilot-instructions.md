@@ -8,14 +8,12 @@ BlockSI is an ozone sterilization monitoring and control system for Shroom-E Co.
 - **Data** (`Data/`): CSV telemetry and sequence logs, organised by type:
   - `Data/Telemetry/` — Per-connection stream CSVs
   - `Data/Calibration/` — Power-O3 characterisation CSVs
-  - `Data/Validation/` — Validation run CSVs
-  - `Data/Fill/` — Fill calibration CSVs (CSTR fill curves)
-  - `Data/Evac/` — Evacuation calibration CSVs (CSTR evac curves)
-  - `Data/Decay/`, `Data/Sterilization/` — Future sequence types
+  - `Data/Validation/` — Validation run CSVs (filename suffix `_PASS` or `_FAIL`)
+  - `Data/CSTR/` — Combined fill+evac calibration CSVs (single CSV per run, `phase` column)
+  - `Data/Sterilization/` — Future sequence type
 - **Models** (`Models/`): Fitted prediction models (git-tracked):
   - `Models/O3Power/` — Power→O3 sigmoid models (JSON)
-  - `Models/Fill/` — Fill/Evac CSTR models (JSON, system volume estimation)
-  - `Models/Decay/` — Future model families
+  - `Models/CSTR/` — Decay-aware CSTR model (`cstr_model.json`, flow-rate independent)
 
 ## Collaboration Protocol
 
@@ -105,10 +103,10 @@ idf.py menuconfig               # WiFi, Golioth PSK, pins
 The dashboard has been fully migrated from Streamlit to NiceGUI.
 See `.github/copilot/dashboard_agent_summary.md` for current state.
 
-- **File**: `Interfaces/PC/blocksi_dashboard.py` (~3190 lines, NiceGUI)
+- **File**: `Interfaces/PC/blocksi_dashboard.py` (~3450 lines, NiceGUI)
 - **Reference**: `blocksi_dashboard_v9.py` (Streamlit, kept for reference only)
 - **Run**: `.venv\Scripts\python.exe Interfaces\PC\blocksi_dashboard.py`
-- **Dependencies**: nicegui, numpy, pandas, plotly (in `.venv`)
+- **Dependencies**: nicegui, numpy, pandas, plotly, scipy (in `.venv`)
 
 ### Key constants:
 ```python

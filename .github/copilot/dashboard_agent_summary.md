@@ -19,12 +19,13 @@ ESP32 and dashboard.
 | Run command | `.venv\Scripts\python.exe Interfaces\PC\blocksi_dashboard.py [--port 5000]` |
 | UI port | http://localhost:8080 |
 
-## Single-Agent Model (as of 2026-03-04)  `[DECIDED]`
+## Agent Model (as of 2026-03-10)  `[DECIDED]`
 
-Development has moved from domain-separated agents to a **single agent** handling both
-ESP32 firmware and PC dashboard.  See `decisions_log.md` entry 2026-03-04 and
-`collaboration_protocol.md` for rationale.  This summary and `esp32_agent_summary.md`
-are still maintained as startup documents for new chat sessions.
+Development uses **two AI agents**: VS Code Copilot (local, pushes to `main`) and
+Claude Code (cloud, pushes to `claude/*` branches merged by Copilot). Either agent
+may work in any area of the codebase. See `collaboration_protocol.md` for the full
+branch workflow. Both this summary and `esp32_agent_summary.md` are startup docs for
+new sessions.
 
 ## Architecture: "ESP32 = Arms, PC = Brains"  `[IMPLEMENTED]`
 

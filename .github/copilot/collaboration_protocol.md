@@ -6,11 +6,11 @@
 
 BlockSI development uses **two AI coding agents** working in parallel:
 
-1. **VS Code Copilot Agent** — runs locally, works on `main` branch
-2. **Claude Code Agent** — runs on cloud, also works on `main` branch
+1. **VS Code Copilot Agent** — runs locally, pushes directly to `main` branch
+2. **Claude Code Agent** — runs on cloud, pushes to `claude/*` feature branches
 
-Both agents push directly to `main`. Each agent must `git pull --rebase origin main`
-before starting work and again before pushing.
+**Workflow**: Claude Code pushes to feature branches, then the project manager
+merges those branches into `main`. VS Code Copilot pulls from `main` to sync.
 See `claude_code_agent.md` for the cloud agent's specific coordination rules.
 
 **The collaboration docs remain active**: They serve as persistent memory
@@ -20,10 +20,10 @@ agents are active.
 
 ## Active Agents
 
-| Agent | Platform | Branch |
-|-------|----------|--------|
-| **VS Code Copilot** | Local VS Code | `main` |
-| **Claude Code** | Cloud | `main` (rebase-before-push) |
+| Agent | Platform | Branch | Merge Authority |
+|-------|----------|--------|------------------|
+| **VS Code Copilot** | Local VS Code | `main` | Self (direct push) |
+| **Claude Code** | Cloud | `claude/*` | Human (PR merge) |
 
 See `claude_code_agent.md` for the cloud agent's detailed coordination rules.
 
@@ -117,33 +117,40 @@ Rewrite your summary file with current state, including any work done in
 this session.  Add/update the "Recent Changes" section.
 
 ### 2. Commit and push all changes
-Run the following git commands:
 
+**For VS Code Copilot Agent (direct to main):**
 ```powershell
 cd c:\Users\ldhar\Documents\Shroom-E_Co\BlockSI
 git status --short                    # Review changes
 git add -A                            # Stage all changes
-git commit -m "<Agent>: <summary>"    # Commit with agent prefix
-git push                              # Push to remote
+git commit -m "<scope>: <summary>"    # Commit with scope prefix
+git push                              # Push to main
+```
+
+**For Claude Code Agent (feature branches):**
+```bash
+git status --short                    # Review changes
+git add -A                            # Stage all changes
+git commit -m "<scope>: <summary>"    # Commit with scope prefix
+git push origin claude/<branch-name>  # Push to your feature branch
+# Then notify the project manager that your branch is ready for review
 ```
 
 **Commit message conventions:**
-- Prefix with agent domain: `ESP32:`, `Dashboard:`, or `docs:`
+- Prefix with scope: `ESP32:`, `Dashboard:`, `analysis:`, or `docs:`
 - If changes span multiple concerns, split into multiple commits:
   1. `chore:` — gitignore, build config, tooling
   2. `ESP32:` or `Dashboard:` — domain-specific code changes
   3. `docs:` — collaboration docs, interface contract, decisions log
-- If committing another agent's uncommitted work (e.g., found in working
-  tree), note it: `"Dashboard: ... (committed by ESP32 agent on behalf of Dashboard session)"`
 
 **Before staging, verify:**
 - No build artifacts (`build/`, `__pycache__/`, `*.pyc`) are staged
 - No credentials (`sdkconfig` with WiFi/PSK) are staged
 - `.gitignore` covers all generated/sensitive files
 
-**If push fails** (e.g., remote has diverged):
+**If push fails** (VS Code Copilot only — remote has diverged):
 ```powershell
-git pull --rebase       # Rebase local commits on top of remote
+git pull --rebase       # Rebase local commits on top of remote main
 git push                # Try again
 ```
 If there are merge conflicts, resolve them and inform the user.

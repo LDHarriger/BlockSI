@@ -7,28 +7,22 @@
 
 This project has **two active AI agents** working simultaneously:
 
-1. **VS Code Copilot Agent** — runs locally in VS Code, works on `main` branch
-2. **Claude Code Agent (you)** — runs on cloud, also works on `main` branch
+1. **VS Code Copilot Agent** — runs locally in VS Code, pushes directly to `main`
+2. **Claude Code Agent (you)** — runs on cloud, pushes to `claude/*` feature branches
 
-**Both agents push to the same GitHub repo.** Merge conflicts are inevitable
-if you aren't careful.
+**Workflow**: You push to feature branches. The project manager reviews and merges
+your branches into `main`. The VS Code agent pulls from `main` to sync with your work.
+
+Merge conflicts can occur if `main` has advanced since your branch was created.
 
 ## CRITICAL: Do Not Revert Existing Changes
 
-**Before making any edits, read the current state of files on `main`.**
-If `main` has received commits since you last pulled, your local copy may be stale.
-
-**Before pushing, always:**
-```bash
-git fetch origin
-git rebase origin/main    # Rebase onto latest main
-# Resolve any conflicts, preserving BOTH your changes AND main's changes
-git push origin main
-```
-
 **The #1 rule: Never silently delete or overwrite code you didn't write.**
-If `main` has changes you don't recognise, they were made by the other agent
-and must be preserved. When in doubt, keep both.
+
+When rebasing your feature branch onto `main`, you may encounter conflicts.
+If `main` has changes you don't recognise, they were made by the VS Code agent
+and **must be preserved**. During conflict resolution, keep both sets of changes.
+When in doubt, keep both.
 
 ### What Went Wrong (2026-03-10)
 
@@ -43,30 +37,30 @@ manually re-merged by the VS Code agent.
 
 ## Branching & Commit Protocol
 
-**Push directly to `main`.** Feature branches create extra manual merge work
-for the other agent (cherry-picks, conflict resolution) — they add friction
-without benefit when both agents work sequentially rather than in parallel.
+**You are constrained to push to feature branches** (environment restriction).
+The project manager will review and merge your branches into `main`.
+
+**Branch naming**: Use `claude/<descriptive-name>` (e.g., `claude/review-project-docs-DvDeR`).
 
 **Before starting any session:**
 ```bash
 git fetch origin
-git rebase origin/main    # Pull latest changes from the other agent
+git checkout -b claude/<feature-name> origin/main  # Create branch from latest main
 ```
 
 **Before pushing:**
 ```bash
 git fetch origin
-git rebase origin/main    # Incorporate any commits made since you started
+git rebase origin/main    # Incorporate any commits made to main since you started
 # Resolve any conflicts, preserving BOTH your changes AND main's changes
-git push origin main
+git push origin claude/<feature-name>
 ```
 
-**When to use a feature branch instead:** If your task is experimental and
-may be abandoned, or if the human explicitly requests a PR for review before
-merging, use a branch. Otherwise default to `main`.
+**After push**: Notify the project manager that your branch is ready for review.
+They will handle the merge into `main`.
 
-**Conflict resolution:** When rebasing, preserve ALL existing code from other
-agents. Add your changes on top, don't replace. When in doubt, keep both.
+**Conflict resolution:** When rebasing onto `main`, preserve ALL existing code from
+the VS Code agent. Add your changes on top, don't replace. When in doubt, keep both.
 
 ## Documentation Updates
 

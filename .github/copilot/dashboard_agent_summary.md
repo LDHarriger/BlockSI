@@ -1,6 +1,6 @@
 # Dashboard Agent Summary
 
-> Last updated: 2026-03-09 (Session 12 — Power curve live update, validation UX, CI confidence band)
+> Last updated: 2026-03-09 (Session 13 — Backfill fix, chart restyle, compact sidebar, CI band visibility)
 
 ## Current State
 
@@ -10,7 +10,7 @@ The K constant has been reconciled to 20°C reference across ESP32 and dashboard
 
 | Property | Value |
 |----------|-------|
-| File | `Interfaces/PC/blocksi_dashboard.py` (~3190 lines) |
+| File | `Interfaces/PC/blocksi_dashboard.py` (~3350 lines) |
 | Framework | NiceGUI 3.8.0 (Quasar UI components, WebSocket push) |
 | Python | 3.14 in `.venv` |
 | Dependencies | nicegui, numpy, pandas, plotly, scipy |
@@ -143,7 +143,7 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 - Connection badge (green steady / red blink)
 - Relay toggle buttons (Air / O2 / O3) — locked during sequences
 - O2 LPM input — locked during sequences
-- 5 sensor cards: Flow LPM, Vessel O3, Room O3, Vessel Temp, Cell Temp
+- 5 sensor readings: Flow LPM, Vessel O3, Room O3, Vessel Temp, Cell Temp — single compact card with dense rows
 
 ### Sequence Banner (top of page, hidden when no sequence)
 - Amber bar with phase-aware text:
@@ -171,10 +171,28 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 ### Settings Tab
 - Notification level selector
 
-## What Changed This Session (Session 12)
+## What Changed This Session (Session 13)
+
+### Backfill-Active Stuck Fix (ROOT CAUSE for frozen sidebar + stuck green dot)  `[IMPLEMENTED]`
+- **Root cause**: `S.backfill_active` could get stuck `True` if TCP dropped during backfill or ESP32 reconnected without cached data (skipping `BACKFILL_START`/`BACKFILL_END` entirely). When stuck, `_dispatch()` routed all DATA to `data_buf` (ECharts worked) but skipped `apply_telemetry()` — leaving `S.vessel_o3_pct`, `S.power_actual_pct`, etc. at zero → sidebar cards frozen, green dot at origin.
+- **Fixes**: (1) Reset `backfill_active/expected/received` in `_on_connect()` after `S.connected = True`; (2) Reset in disconnect `finally` block; (3) Added `backfill_start_time` field + 30s safety timeout in `_tick_inner()` that force-clears the flag with a warning log.
+
+### Power-O3 Chart: Static Curve + Dynamic Markers  `[IMPLEMENTED]`
+- `_make_power_fig()` restructured to ALWAYS create exactly 4 traces in fixed order: [0] model curve, [1] CI band (invisible placeholder if no CI data), [2] target ring, [3] actual dot. Previously, CI band was conditionally added, making trace indices variable.
+- New `_restyle_markers()` function uses `ui.run_javascript()` → `Plotly.restyle()` to update only traces 2 (ring) and 3 (dot) with current S values. Avoids full figure rebuild on every 1s tick.
+- `_tick_inner()` now calls `_restyle_markers()` instead of `_update_power_curve()`. Full rebuild (`_update_power_curve()`) still called by LPM changes, model re-fit, and model load.
+
+### CI Band Opacity Increase  `[IMPLEMENTED]`
+- `fillcolor` changed from `rgba(65,105,225,0.15)` to `rgba(65,105,225,0.25)` for better visibility. The ±1σ band is narrow (~0.005-0.009 %vol) and was barely visible at 15% opacity.
+
+### Compact Sidebar Cards  `[IMPLEMENTED]`
+- Replaced 5 individual `ui.card` elements (each with `text-h5` value labels requiring scrolling) with a single compact card using dense rows and `text-subtitle1 text-weight-medium` sizing.
+- All 5 readings now visible without scrolling in the 240px sidebar.
+
+## What Changed in Session 12
 
 ### Power Curve Live Update Fix  `[IMPLEMENTED]`
-- `_update_power_curve()`: replaced `power_plot.figure = fig; power_plot.update()` with `power_plot.run_method('react', fd['data'], fd['layout'])` — NiceGUI's element-diff mechanism does not reliably push Plotly trace-data changes; calling Plotly.js `react` directly fixes the green dot (actual O3) and black ring (target power) never updating.
+- `_update_power_curve()`: uses `power_plot.figure = fig; power_plot.update()` — NiceGUI's `Element.update()` enqueues in outbox → websocket → client-side `update()` → `Plotly.react()`. Previously attempted `run_method('react')` which failed ("Method not found" — NiceGUI Vue component doesn't expose it). Reverted to the proper API.
 
 ### Validation Baseline: Advisory Warning, Not Hard Gate  `[IMPLEMENTED]`
 - `_analyze_validation()`: `baseline_ok` removed from `result["passed"]` — baseline is informational only.

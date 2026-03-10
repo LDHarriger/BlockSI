@@ -246,6 +246,7 @@ class SystemState:
         self.backfill_active: bool = False
         self.backfill_expected: int = 0
         self.backfill_received: int = 0
+        self.backfill_start_time: float = 0.0
         # Derived (kept in sync by update_derived)
         self.target_o3_pct: float = 0.0
         self.target_mg_per_s: float = 0.0
@@ -588,7 +589,7 @@ def _analyze_validation(samples: list[dict], power_pct: float,
     if baseline:
         bl_mean = float(np.mean([s["o3_pct"] for s in baseline]))
         result["baseline_mean"] = bl_mean
-        result["baseline_ok"] = bl_mean < 0.02
+        result["baseline_ok"] = bl_mean <= 0.02
     else:
         result["baseline_mean"] = 0.0
         result["baseline_ok"] = True
@@ -728,6 +729,9 @@ class TCPServer:
         self._reader = reader
         self._writer = writer
         S.connected = True
+        S.backfill_active = False
+        S.backfill_expected = 0
+        S.backfill_received = 0
 
         # Start a new CSV file for this connection session
         csv_logger.reset(datetime.now())
@@ -762,6 +766,9 @@ class TCPServer:
                 log("ESP32 disconnected", "warn")
                 await self._close_client()
                 # Abort sequence observer state on disconnect
+                S.backfill_active = False
+                S.backfill_expected = 0
+                S.backfill_received = 0
                 if S.sequence_active:
                     S.sequence_active = False
                     S.seq_confirmed = False
@@ -808,6 +815,7 @@ class TCPServer:
         parts = line.split(",")
         n = int(parts[1]) if len(parts) >= 2 else 0
         S.backfill_active = True
+        S.backfill_start_time = time.time()
         S.backfill_expected = n
         S.backfill_received = 0
         log(f"Backfill started — expecting {n} cached DATA lines", "info")
@@ -870,6 +878,14 @@ class TCPServer:
             log(f"Unmatched RSP (no waiter for '{rsp_cmd}'): {line[:60]}", "warn")
 
     # -- STATE push (on connect/reconnect) --------------------------------
+    # IMPORTANT: PC is sole authority for power_target_pct — never
+    # overwrite it from ESP32.  The STATE "power" field is the ADC-read
+    # motor position (o3_power_get()), NOT the commanded target.  Writing
+    # it to power_target_pct causes the tick's slider sync to schedule an
+    # async _on_power_slide callback (NiceGUI schedules async handlers
+    # via background_tasks.create, so they run AFTER _updating is cleared),
+    # which sends cmd_set_power(0) and drives the motor back to zero.
+    # See also: decisions_log.md 2026-03-09 "Motor-to-0 root cause".
     def _handle_state(self, line: str) -> None:
         for part in line.split(","):
             if "=" not in part:
@@ -884,8 +900,8 @@ class TCPServer:
                 elif k == "air_comp":
                     S.relay_air_comp = v.strip() == "1"
                 elif k == "power":
-                    S.power_target_pct = int(float(v))
-                    S.update_derived()
+                    # Informational only — do NOT set power_target_pct
+                    S.power_actual_pct = float(v)
                 elif k == "flow":
                     S.flow_lpm = float(v)
             except (ValueError, IndexError):
@@ -1878,6 +1894,12 @@ async def index():
             return
         _updating = True
         pct = int(e.value)
+        # Guard: NiceGUI schedules async handlers as background tasks,
+        # so this can fire AFTER _updating is cleared by the tick.
+        # Skip if value already matches target (tick-echo scenario).
+        if pct == S.power_target_pct:
+            _updating = False
+            return
         await cmd_set_power(pct)
         if inp_pwr is not None:
             inp_pwr.value = pct
@@ -1891,6 +1913,9 @@ async def index():
             return
         _updating = True
         pct = int(e.value)
+        if pct == S.power_target_pct:
+            _updating = False
+            return
         await cmd_set_power(pct)
         if slider is not None:
             slider.value = pct
@@ -2014,17 +2039,21 @@ async def index():
             S.power_target_pct, target_o3,
             S.power_actual_pct, S.vessel_o3_pct,
         )
-        fd = fig.to_dict()
-        power_plot.run_method('react', fd['data'], fd['layout'])
+        power_plot.figure = fig
+        power_plot.update()
 
     def _make_power_fig(pwr, o3, tgt_pct, tgt_o3, act_pct, act_o3):
+        """Build Plotly figure with FIXED 4-trace order:
+        [0] model curve, [1] CI band (or invisible placeholder),
+        [2] target ring, [3] actual dot."""
         fig = go.Figure()
+        # Trace 0 — model curve
         fig.add_trace(go.Scatter(
             x=pwr, y=o3, mode="lines",
             line=dict(color="royalblue", width=2),
             showlegend=False, name="Model",
         ))
-        # ±1σ confidence band (if model has Jacobian-propagated CI)
+        # Trace 1 — ±1σ confidence band (or invisible placeholder)
         mdl = S.active_model
         if mdl and mdl.ci_sigma and mdl.ci_power:
             ci_pwr = np.array(mdl.ci_power)
@@ -2034,17 +2063,24 @@ async def index():
                 x=list(ci_pwr) + list(ci_pwr[::-1]),
                 y=list(ci_o3 + ci_s) + list((ci_o3 - ci_s)[::-1]),
                 fill="toself",
-                fillcolor="rgba(65,105,225,0.15)",
+                fillcolor="rgba(65,105,225,0.25)",
                 line=dict(width=0),
                 showlegend=False, name="±1σ",
                 hoverinfo="skip",
             ))
+        else:
+            fig.add_trace(go.Scatter(
+                x=[], y=[], mode="lines",
+                showlegend=False, visible=False,
+            ))
+        # Trace 2 — target ring
         fig.add_trace(go.Scatter(
             x=[tgt_pct], y=[tgt_o3], mode="markers",
             marker=dict(color="rgba(0,0,0,0)", size=18,
                         line=dict(color="black", width=3)),
             showlegend=False, name="Target",
         ))
+        # Trace 3 — actual dot
         fig.add_trace(go.Scatter(
             x=[act_pct], y=[act_o3], mode="markers",
             marker=dict(color="limegreen", size=14),
@@ -2058,6 +2094,21 @@ async def index():
             yaxis=dict(range=[0, y_max]),
         )
         return fig
+
+    def _restyle_markers() -> None:
+        """Lightweight update of ONLY the target ring (trace 2) and actual
+        dot (trace 3) via Plotly.restyle — avoids full figure rebuild."""
+        target_o3 = predict_o3_from_power(S.power_target_pct, S.flow_lpm)
+        js = (
+            f"const el = getElement({power_plot.id});"
+            f"if(el && el.$refs.qRef){{"
+            f"Plotly.restyle(el.$refs.qRef,"
+            f"{{x:[[{S.power_target_pct}]],y:[[{target_o3:.6f}]]}},[2]);"
+            f"Plotly.restyle(el.$refs.qRef,"
+            f"{{x:[[{S.power_actual_pct}]],y:[[{S.vessel_o3_pct:.6f}]]}},[3]);"
+            f"}}"
+        )
+        ui.run_javascript(js)
 
     # =====================================================================
     # BUILD THE PAGE
@@ -2131,28 +2182,33 @@ async def index():
 
         ui.separator().classes("q-my-sm")
 
-        # Sensor cards
+        # Sensor readings — compact single card
         ui.label("Readings").classes("text-subtitle2")
-        with ui.card().classes("sensor-card sensor-card-flow q-mb-xs").props("flat bordered"):
-            ui.label("O2 Flow").classes("text-caption text-grey")
-            card_flow_val = ui.label(f"{S.flow_lpm:.1f}").classes("text-h5 text-purple")
-            ui.label("LPM").classes("text-caption text-grey")
-        with ui.card().classes("sensor-card sensor-card-o3 q-mb-xs").props("flat bordered"):
-            ui.label("Vessel O3").classes("text-caption text-grey")
-            card_o3_val = ui.label(f"{S.vessel_o3_pct:.3f}").classes("text-h5 text-blue")
-            ui.label("%vol").classes("text-caption text-grey")
-        with ui.card().classes("sensor-card sensor-card-room q-mb-xs").props("flat bordered"):
-            ui.label("Room O3").classes("text-caption text-grey")
-            card_room_val = ui.label(f"{S.room_o3_ppm:.3f}").classes("text-h5 text-green")
-            ui.label("ppm").classes("text-caption text-grey")
-        with ui.card().classes("sensor-card sensor-card-temp q-mb-xs").props("flat bordered"):
-            ui.label("Vessel Temp").classes("text-caption text-grey")
-            card_vtemp_val = ui.label("N/A").classes("text-h5 text-orange")
-            ui.label("\u00b0C").classes("text-caption text-grey")
-        with ui.card().classes("sensor-card sensor-card-temp q-mb-xs").props("flat bordered"):
-            ui.label("Cell Temp").classes("text-caption text-grey")
-            card_ctemp_val = ui.label(f"{S.cell_temp_c:.1f}").classes("text-h5 text-orange")
-            ui.label("\u00b0C").classes("text-caption text-grey")
+        with ui.card().classes("w-full q-pa-sm").props("flat bordered"):
+            with ui.row().classes("w-full items-center justify-between no-wrap"):
+                ui.label("O2 Flow").classes("text-caption text-grey")
+                card_flow_val = ui.label(f"{S.flow_lpm:.1f}").classes("text-subtitle1 text-weight-medium text-purple")
+                ui.label("LPM").classes("text-caption text-grey")
+            ui.separator().classes("q-my-xs")
+            with ui.row().classes("w-full items-center justify-between no-wrap"):
+                ui.label("Vessel O3").classes("text-caption text-grey")
+                card_o3_val = ui.label(f"{S.vessel_o3_pct:.3f}").classes("text-subtitle1 text-weight-medium text-blue")
+                ui.label("%vol").classes("text-caption text-grey")
+            ui.separator().classes("q-my-xs")
+            with ui.row().classes("w-full items-center justify-between no-wrap"):
+                ui.label("Room O3").classes("text-caption text-grey")
+                card_room_val = ui.label(f"{S.room_o3_ppm:.3f}").classes("text-subtitle1 text-weight-medium text-green")
+                ui.label("ppm").classes("text-caption text-grey")
+            ui.separator().classes("q-my-xs")
+            with ui.row().classes("w-full items-center justify-between no-wrap"):
+                ui.label("Vessel Temp").classes("text-caption text-grey")
+                card_vtemp_val = ui.label("N/A").classes("text-subtitle1 text-weight-medium text-orange")
+                ui.label("\u00b0C").classes("text-caption text-grey")
+            ui.separator().classes("q-my-xs")
+            with ui.row().classes("w-full items-center justify-between no-wrap"):
+                ui.label("Cell Temp").classes("text-caption text-grey")
+                card_ctemp_val = ui.label(f"{S.cell_temp_c:.1f}").classes("text-subtitle1 text-weight-medium text-orange")
+                ui.label("\u00b0C").classes("text-caption text-grey")
 
     # -- HEADER -----------------------------------------------------------
     with ui.header().classes("bg-primary items-center q-px-md"):
@@ -2940,6 +2996,13 @@ async def index():
             log("Running deferred sequence cleanup from _tick", "seq")
             await _sequence_cleanup("deferred")
 
+        # -- backfill safety timeout (30 s) --------------------------------
+        if S.backfill_active and time.time() - S.backfill_start_time > 30:
+            log("Backfill timeout (30s) — forcing backfill_active=False", "warn")
+            S.backfill_active = False
+            S.backfill_expected = 0
+            S.backfill_received = 0
+
         # -- sync relays every ~10 s (SKIP during active sequences) --------
         if S.connected and not S.sequence_active and time.time() - _relay_ts > 10:
             await cmd_sync_relays()
@@ -3080,8 +3143,8 @@ async def index():
         elif not S.pending_prompt_id:
             _last_prompt_id = ""
 
-        # -- power curve ---------------------------------------------------
-        _update_power_curve()
+        # -- power curve markers ----------------------------------------
+        _restyle_markers()
 
         # -- telemetry ECharts ---------------------------------------------
         if data_buf:

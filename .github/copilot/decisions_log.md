@@ -5,6 +5,36 @@
 
 ---
 
+### 2026-03-09: Backfill-active stuck — reset on connect/disconnect + safety timeout
+
+**Context**: `S.backfill_active` could get stuck `True` permanently, causing `_dispatch()` to skip `apply_telemetry()` for ALL subsequent DATA messages. Two scenarios: (1) TCP drops mid-backfill — `BACKFILL_END` never arrives; (2) ESP32 reconnects with empty data cache — skips `BACKFILL_START`/`BACKFILL_END` entirely, but the flag from the previous connection persists. Symptoms: sidebar cards frozen at zero, green dot stuck at origin, while ECharts continued working (they read from `data_buf`, not from `S` state).
+
+**Decision**:
+1. Reset `S.backfill_active = False` (+ `expected`/`received`) in `_on_connect()` immediately after `S.connected = True` — ensures a clean slate for every new connection.
+2. Reset same fields in the disconnect `finally` block — clears stale state from interrupted connections.
+3. Added `S.backfill_start_time: float` field, set in `_handle_backfill_start()`. `_tick_inner()` checks: if `backfill_active` and elapsed > 30s, force-clears the flag with a warning log — safety net for any future edge cases.
+
+**Rationale**: The backfill state is per-connection and must not survive across connections. The 30s timeout provides defense-in-depth — backfill typically completes in seconds (limited by `DATA_CACHE_SIZE` of ~100 samples × ~2.5s transmission rate).
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-03-09: Power-O3 chart — static curve with dynamic marker restyle
+
+**Context**: `_update_power_curve()` rebuilt the entire Plotly figure (curve, CI band, ring, dot) on every 1s tick, even though only the markers (ring = target, dot = actual) change with incoming telemetry. The model curve and CI band only change on LPM adjustment or model re-fit. Additionally, the CI band was conditionally added (only when model has CI data), making trace indices variable — trace 2 could be the ring or the CI band depending on model state.
+
+**Decision**:
+1. `_make_power_fig()` now ALWAYS creates exactly 4 traces in fixed order: [0] model curve, [1] CI band (invisible placeholder `Scatter(x=[], y=[], visible=False)` if no CI data), [2] target ring, [3] actual dot.
+2. New `_restyle_markers()` function uses `ui.run_javascript()` → `Plotly.restyle(gd, {x:[[val]], y:[[val]]}, [traceIdx])` to update only traces 2 and 3. Accesses DOM via `getElement(power_plot.id).$refs.qRef`.
+3. `_tick_inner()` calls `_restyle_markers()` instead of `_update_power_curve()`. Full rebuild retained for LPM changes, model re-fit, and model load.
+
+**Rationale**: `Plotly.restyle()` is O(1) in trace count — it patches specific trace data without re-rendering the entire chart. The fixed trace indices eliminate the conditional-CI-band index ambiguity. This reduces per-tick work from full figure serialization + websocket push to a single `run_javascript()` call with two restyle operations.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
 ### 2026-03-09: Plotly `react` for live power curve updates
 
 **Context**: The green dot (actual O3 vs actual power) and black ring (target power prediction) on the Power-O3 curve never moved from (0, 0) after page load. `_update_power_curve()` rebuilt a full `go.Figure` and pushed it via `power_plot.figure = fig; power_plot.update()`. NiceGUI's element-diff mechanism compares the Python-side figure dict and sends only diffs — but figure replacement does not reliably push trace-data changes through this path.
@@ -17,6 +47,39 @@ power_plot.run_method('react', fd['data'], fd['layout'])
 `run_method('react', ...)` calls Plotly.js's `Plotly.react()` directly on the DOM element, bypassing NiceGUI's diff and guaranteeing a full re-render on every call.
 
 **Rationale**: `Plotly.react()` is designed for efficient full-data updates and is the documented way to update Plotly charts from JavaScript. The Python figure dict is serialized directly — no element diff, no stale state. This also makes sequence live-tracking (green dot moving during validation) work correctly at no additional cost.
+
+**Status**: `[SUPERSEDED by 2026-03-09 "Revert Plotly react" below]`
+
+---
+
+### 2026-03-09: Revert Plotly `react` — use `figure`/`update()` API
+
+**Context**: The previous decision introduced `power_plot.run_method('react', fd['data'], fd['layout'])` which caused `"Method 'react' not found"` errors. NiceGUI's `ui.plotly` Vue component does NOT expose a `react` method — instead, its internal JS `update()` method calls `Plotly.react(this.$el, this.options, ...)`. The `run_method()` API invokes Vue component methods, not arbitrary Plotly.js functions.
+
+**Decision**: Revert to `power_plot.figure = fig; power_plot.update()`. NiceGUI's `Element.update()` enqueues in the client outbox → websocket → client-side JS `update()` → `Plotly.react()` — so the full re-render still happens, just through the proper channel.
+
+**Rationale**: Confirmed from NiceGUI 3.8.0 source: `plotly.py` defines `update()` which sets `_props['options']` then calls `super().update()`. The client-side `plotly.js` defines `update()` which calls `Plotly.react(this.$el, this.options, options.config)`. The figure assignment + `update()` is the documented API.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
+### 2026-03-09: Motor-to-0 root cause — PC sole authority for power target
+
+**Context**: After manually setting power via the dashboard slider, the motor potentiometer would return to 0%. Three separate root causes were identified across multiple debugging sessions:
+
+1. **Root cause 1 (fixed commit ec0d884)**: `seq_executor.c` called `o3_power_set()` directly instead of `blocksi_state_set_power()`, so the state validator's `target_pct` was stale and the validator "corrected" the motor back to the old target.
+
+2. **Root cause 2 (this fix)**: `_handle_state()` overwrote `S.power_target_pct` from the ESP32's STATE push. The STATE `power` field contains `o3_power_get()` — the ADC-read motor position, NOT the commanded target. On TCP connect/reconnect, the motor reads 0% → STATE sends `power=0` → `S.power_target_pct = 0` → tick syncs slider to 0 → callback sends `cmd_set_power(0)`.
+
+3. **Root cause 3 (this fix)**: NiceGUI's `handle_event()` schedules async handlers via `background_tasks.create()` (asyncio.create_task), so they run in a FUTURE event loop iteration. The `_updating` boolean guard is set True before `slider.value = X` and cleared immediately after — but the async `_on_power_slide()` callback runs AFTER the guard is cleared. The guard cannot protect against this timing.
+
+**Decision**:
+1. `_handle_state()`: Store STATE `power` as `S.power_actual_pct` (informational) instead of `S.power_target_pct`. Remove `S.update_derived()` call (derived values depend on target, not actual).
+2. `_on_power_slide()` and `_on_power_input()`: Add redundancy check `if pct == S.power_target_pct: return` after extracting the value. This prevents sending a `cmd_set_power(X)` when X already equals the target — catching any tick-echo scenario regardless of guard timing.
+3. Document the PC-sole-authority principle with a comment block above `_handle_state()`.
+
+**Rationale**: The PC is sole authority for `power_target_pct` (documented at dashboard line 11 and line 383). The ESP32's STATE message is a "current status report", not a "command echo". Any code path that modifies `power_target_pct` without the user's intent, combined with the tick's slider sync, creates a `cmd_set_power(wrong_value)` vector.
 
 **Status**: `[IMPLEMENTED]`
 

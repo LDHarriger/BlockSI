@@ -1,78 +1,79 @@
 # BlockSI Multi-Agent Collaboration Protocol
 
-> Last updated: 2026-03-04
+> Last updated: 2026-03-10
 
 ## Overview
 
-BlockSI development previously used **domain-separated AI coding agents**
-(one for ESP32, one for the PC dashboard).  As of 2026-03-04, this has been
-**changed to a single-agent model** — one GitHub Copilot agent handles both
-the ESP32 firmware and the PC dashboard within the same chat session.
+BlockSI is developed by **two concurrent AI agents** plus the human developer:
 
-**Rationale**: When a feature spans the ESP32↔PC boundary (e.g. adding a new
-calibration phase, changing a command argument format), the dual-agent model
-required writing the interface contract, waiting for the other agent to read
-it, and coordinating through documentation handoffs.  This introduced lag,
-context drift, and subtle regressions.  A single agent with full-stack context
-builds both sides of a feature simultaneously, keeping the interface contract
-always in sync.
+| Agent | Environment | Branch | Push target |
+|-------|-------------|--------|-------------|
+| **Copilot** (VS Code) | Local Windows machine | `main` | pushes directly to `main` |
+| **Claude Code** (web) | Remote Linux container | `claude/<id>` | pushes to feature branch only |
 
-**The collaboration docs remain active**: They serve as persistent memory
-across context windows (summaries), architectural reference (interface contract),
-and decision history (decisions log) — all valuable regardless of how many
-agents are active.
+The human developer is the **integration point**: after Claude Code pushes a feature branch, the developer merges it into `main` locally before Copilot can see the changes.
 
-## Active Agent
+**The collaboration docs are the coordination mechanism.** Both agents must read `.github/copilot/` at session start to stay in sync regardless of branch differences.
 
-| Agent | Domain | Owns |
-|-------|--------|------|
-| **BlockSI Agent** | Full-stack | All firmware `.c/.h` files, `Interfaces/PC/blocksi_dashboard.py`, collaboration docs |
+## Branch Workflow
 
-> **Previous model** (before 2026-03-04): Two domain-separated agents —
-> "Dashboard Agent" (Interfaces/PC/) and "ESP32 Agent" (Interfaces/ControlSystem/).
-> See decisions_log.md entry 2026-03-04 for rationale.
+### Copilot (VS Code)
+- Works directly on `main`
+- Commits and pushes to `main` per the end-of-session procedure below
+- Always `git pull` before starting a session to pick up Claude Code's merged work
 
-Either session may **read and write** any file in the repo.  Both summaries
-(`dashboard_agent_summary.md` and `esp32_agent_summary.md`) are still maintained
-for continuity — they cover their respective domains.
+### Claude Code (web)
+- Constrained by task runner to push to a `claude/<session-id>` branch (e.g. `claude/review-project-docs-DvDeR`)
+- **Never** pushes to `main` directly
+- After Claude Code pushes, the human merges the branch into `main`:
+
+```powershell
+git fetch origin
+git merge origin/claude/<branch-name>   # or via GitHub PR
+git push origin main
+```
+
+### After Merging Claude Code's Work
+1. Human merges the `claude/` branch into `main` and pushes
+2. Human tells Copilot: *"Pull main — Claude Code merged new changes."*
+3. Copilot runs `git pull` and reads the updated collaboration docs
+
+## Active Agents
+
+Both agents are **full-stack** — either may modify any file in the repo.
+The summaries and interface contract are the shared source of truth.
 
 ## Collaboration Documents (`.github/copilot/`)
 
 | File | Purpose | Written by |
 |------|---------|------------|
-| `collaboration_protocol.md` | This file -- rules and conventions | Human |
+| `collaboration_protocol.md` | This file — rules and conventions | Human + agents |
 | `interface_contract.md` | LAN protocol, DATA format, shared constants | Either agent (must coordinate) |
-| `dashboard_agent_summary.md` | Dashboard agent's current state and pending work | Dashboard Agent |
-| `esp32_agent_summary.md` | ESP32 agent's current state and pending work | ESP32 Agent |
+| `dashboard_agent_summary.md` | Dashboard/PC state and pending work | Either agent |
+| `esp32_agent_summary.md` | ESP32 firmware state and pending work | Either agent |
 | `decisions_log.md` | Architectural decisions with date + rationale | Either agent |
 
 ## Status Taxonomy
 
 Every item in summaries and the decisions log MUST use one of these tags:
 
-- **`[IMPLEMENTED]`** -- Done, in code, tested or verified working
-- **`[DECIDED]`** -- Agreed upon but not yet built
-- **`[PROPOSED]`** -- Open idea, not committed -- requires discussion before building
+- **`[IMPLEMENTED]`** — Done, in code, tested or verified working
+- **`[DECIDED]`** — Agreed upon but not yet built
+- **`[PROPOSED]`** — Open idea, not committed — requires discussion before building
 
 ## Summary Update Convention
 
-1. Every agent appends `> Last updated: YYYY-MM-DD HH:MM` at the top of
-   its summary after substantive implementation work.
-2. When the user tells an agent "update your summary" (or the agent
-   recognises the context window is getting large), the agent **rewrites**
-   its summary with current-state information and discards session-specific
-   history.
-3. Summaries should be concise enough that another agent can read them in
-   under 2 minutes of context.
+1. Every agent appends `> Last updated: YYYY-MM-DD` at the top of its summary after substantive implementation work.
+2. When the user says "update your summary", the agent **rewrites** it with current-state information, discarding session-specific history.
+3. Summaries should be concise enough that another agent can read them in under 2 minutes of context.
 
 ## Interface Change Rule (CRITICAL)
 
-If either agent changes anything that crosses the ESP32 <-> PC boundary:
+If either agent changes anything that crosses the ESP32 ↔ PC boundary:
 
 1. **Update `interface_contract.md` FIRST** with the new/changed definition.
-2. Tag the change as `[IMPLEMENTED]` or `[DECIDED]` as appropriate.
-3. Note the change in the agent's own summary under a "Recent Changes" section.
-4. The other agent will pick up the change when it next reads `interface_contract.md`.
+2. Tag the change as `[IMPLEMENTED]` or `[DECIDED]`.
+3. Note the change in the relevant agent summary under a "Recent Changes" section.
 
 Changes that require this:
 - Adding, removing, or modifying a LAN command
@@ -83,70 +84,48 @@ Changes that require this:
 
 ## Context Window Management
 
-- The AI agents **cannot** see their own context window utilisation.
-- The human should prompt "update your summary" when the context window
-  approaches ~85% (visible in the VS Code Copilot UI).
-- When prompted, the agent rewrites its summary with all current-state info,
-  ensuring a new chat starting from that summary has full continuity.
+- The human should prompt "update your summary" when the VS Code Copilot context window approaches ~85%.
+- Claude Code sessions start fresh each time — the summaries are its only persistent memory.
 
 ## Decision Logging
 
-When an architectural decision is made during a chat:
+When an architectural decision is made:
 1. The agent appends it to `decisions_log.md` immediately.
-2. Format: `### YYYY-MM-DD: <title>` followed by Context, Decision, Rationale.
-3. Decisions are **immutable** once logged -- they can be superseded by a
-   new decision entry but never silently edited.
+2. Format: `### YYYY-MM-DD: <title>` followed by Context, Decision, Rationale, Status tag.
+3. Decisions are **immutable** once logged — supersede with a new entry, never silently edit.
 
 ## New Chat Startup Procedure
 
-When starting a new agent chat session:
-1. Ask the agent to read `copilot-instructions.md` (project-level context).
-2. Ask it to read `collaboration_protocol.md` (this file).
-3. Ask it to read `interface_contract.md` (shared protocol definitions).
-4. Ask it to read its own summary (e.g., `dashboard_agent_summary.md`).
-5. Optionally, ask it to read the other agent's summary if cross-domain
-   awareness is needed.
+When starting a new agent session:
+1. Read `collaboration_protocol.md` (this file) — understand the branch model
+2. Read `interface_contract.md` — shared protocol definitions
+3. Read `dashboard_agent_summary.md` — current PC/dashboard state
+4. Read `esp32_agent_summary.md` — current ESP32 state
+5. Read `decisions_log.md` (recent entries) — architectural context
 
 ## End-of-Session Procedure (MANDATORY)
 
-Every agent MUST perform these steps at the end of a development session,
-or when prompted by the user:
-
-### 1. Update your agent summary
-Rewrite your summary file with current state, including any work done in
-this session.  Add/update the "Recent Changes" section.
-
-### 2. Commit and push all changes
-Run the following git commands:
+### Copilot (VS Code) — pushes to `main`
 
 ```powershell
 cd c:\Users\ldhar\Documents\Shroom-E_Co\BlockSI
-git status --short                    # Review changes
-git add -A                            # Stage all changes
-git commit -m "<Agent>: <summary>"    # Commit with agent prefix
-git push                              # Push to remote
+git status --short
+git add -A
+git commit -m "Dashboard: <summary>"   # or ESP32:, docs:
+git push
 ```
 
-**Commit message conventions:**
-- Prefix with agent domain: `ESP32:`, `Dashboard:`, or `docs:`
-- If changes span multiple concerns, split into multiple commits:
-  1. `chore:` — gitignore, build config, tooling
-  2. `ESP32:` or `Dashboard:` — domain-specific code changes
-  3. `docs:` — collaboration docs, interface contract, decisions log
-- If committing another agent's uncommitted work (e.g., found in working
-  tree), note it: `"Dashboard: ... (committed by ESP32 agent on behalf of Dashboard session)"`
+### Claude Code (web) — pushes to `claude/` branch
+
+Claude Code commits and pushes to its assigned feature branch. The human then merges into `main` (see Branch Workflow above).
+
+**Commit message conventions (both agents):**
+- `ESP32:` — firmware changes
+- `Dashboard:` — PC dashboard changes
+- `docs:` — collaboration docs only
+- Split commits if changes span multiple concerns
 
 **Before staging, verify:**
-- No build artifacts (`build/`, `__pycache__/`, `*.pyc`) are staged
-- No credentials (`sdkconfig` with WiFi/PSK) are staged
+- No build artifacts (`build/`, `__pycache__/`, `*.pyc`)
+- No credentials (`sdkconfig` with WiFi/PSK)
 - `.gitignore` covers all generated/sensitive files
-
-**If push fails** (e.g., remote has diverged):
-```powershell
-git pull --rebase       # Rebase local commits on top of remote
-git push                # Try again
-```
-If there are merge conflicts, resolve them and inform the user.
-
-### 3. Confirm to the user
-Report: number of commits, what was pushed, and any issues encountered.

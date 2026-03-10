@@ -5,6 +5,24 @@
 
 ---
 
+### 2026-03-10: CSTR model with first-order O3 decay — supersedes fill/evac model
+
+**Context**: The original CSTR model (`Models/Fill/`) assumed C_in as a fixed asymptote and fitted τ and t_d for fill and evac separately. This ignored O3 decay in the vessel, which suppresses the steady-state concentration (C_ss < C_in). At low flow rates (e.g. 0.25 LPM), the observed plateau was 30-40% below C_in — the old model could not explain this. Additionally, the old fill termination criterion ("5 samples ≥ 95% of C_in") would never trigger if decay suppresses C_ss below that threshold.
+
+**Decision**:
+1. **Decay-aware CSTR model**: Fit C_ss, τ_eff, t_d as free parameters. Back-calculate k_d (decay rate), V (volume), V_dead (dead volume) using C_in from the power model. Evac fit provides k_d cross-check.
+2. **Universal model**: V, k_d, V_dead are flow-rate independent. One calibration run (without air compressor for best k_d sensitivity) produces `Models/CSTR/cstr_model.json` that generalises to any flow/air-comp configuration.
+3. **Directory restructure**: `Models/Fill/` → `Models/CSTR/`, `Models/Decay/` removed (absorbed into CSTR model). `Data/Fill/` + `Data/Evac/` → `Data/CSTR/` (single CSV with `phase` column).
+4. **Fill termination**: Changed from "5 consecutive samples ≥ 95% of C_in" to "30 consecutive samples with range < 0.05 %vol" — correctly detects any asymptote regardless of decay.
+5. **File naming**: Single `cstr_model.json` (no per-LPM files needed). Data CSV: `{date}_CSTR_{LPM}Lpm.csv`.
+6. **O2 LPM max**: Corrected UI max from 15 to 5 LPM (O2 concentrator limit). Air compressor adds 10 LPM ambient air, not O2.
+
+**Rationale**: The fundamental parameters (V, k_d, V_dead) are properties of the physical vessel, not the flow configuration. A single calibration run characterises the system. k_d at typical operating flow (4 LPM) produces only ~4% C_ss suppression (marginally detectable), but the model is correct regardless and the k_d estimate improves at lower flow rates.
+
+**Status**: `[IMPLEMENTED]`
+
+---
+
 ### 2026-03-09: Plotly `react` for live power curve updates
 
 **Context**: The green dot (actual O3 vs actual power) and black ring (target power prediction) on the Power-O3 curve never moved from (0, 0) after page load. `_update_power_curve()` rebuilt a full `go.Figure` and pushed it via `power_plot.figure = fig; power_plot.update()`. NiceGUI's element-diff mechanism compares the Python-side figure dict and sends only diffs — but figure replacement does not reliably push trace-data changes through this path.

@@ -1,12 +1,14 @@
 # Dashboard Agent Summary
 
-> Last updated: 2026-03-09 (Session 12 — Power curve live update, validation UX, CI confidence band)
+> Last updated: 2026-03-10 (Session 13 — Decay-aware CSTR model, directory restructure)
 
 ## Current State
 
-The PC dashboard now includes **fill/evacuation calibration** for CSTR system volume
-estimation, alongside the existing power-O3 calibration and validation sequences.
-The K constant has been reconciled to 20°C reference across ESP32 and dashboard.
+The PC dashboard now includes **decay-aware CSTR calibration** for system volume,
+O3 decay rate, and dead volume estimation.  The CSTR model uses fundamental
+parameters (V, k_d, V_dead) that generalise across flow rates and air compressor
+configurations.  The K constant has been reconciled to 20°C reference across
+ESP32 and dashboard.
 
 | Property | Value |
 |----------|-------|
@@ -171,7 +173,35 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 ### Settings Tab
 - Notification level selector
 
-## What Changed This Session (Session 12)
+## What Changed This Session (Session 13)
+
+### Decay-Aware CSTR Model  `[IMPLEMENTED]`
+- `fill_model.py`: Complete rewrite — `CSTRModel` dataclass replaces `FillModel`, fits `(C_ss, τ_eff, t_d)` as free parameters with C_in from power model, back-calculates `V`, `k_d`, `V_dead`
+- `fit_fill_curve()`: Now returns `(c_ss, tau_eff, t_delay, r_squared, rmse)` — C_ss is a free parameter, not fixed to C_in
+- `fit_cstr_model()`: Takes single combined CSV (with `phase` column), splits into fill/evac, fits both, cross-checks k_d from evac
+- Evac fit provides `k_d_evac = 1/τ_drain - Q/V` as cross-check against fill-derived k_d
+
+### Directory Restructure  `[IMPLEMENTED]`
+- `Models/Fill/` → `Models/CSTR/` (single `cstr_model.json`, no per-LPM files)
+- `Models/Decay/` removed (absorbed into CSTR model)
+- `Data/Fill/` + `Data/Evac/` → `Data/CSTR/` (single CSV with `phase` column)
+
+### Fill Termination Criterion  `[IMPLEMENTED]`
+- Old: 5 consecutive samples ≥ 95% of C_in (broken when decay suppresses C_ss below threshold)
+- New: 30 consecutive samples with `max - min < 0.05 %vol` (correctly detects any asymptote)
+
+### UI Updates  `[IMPLEMENTED]`
+- "Fill / Evac Calibration" → "CSTR Calibration" expansion
+- Removed air comp toggles from UI (calibration always without air comp for best k_d sensitivity)
+- O2 LPM max corrected from 15 to 5 (O2 concentrator limit)
+- Model status shows V, k_d, R² instead of LPM/O2% condition key
+
+### Sequence Changes  `[IMPLEMENTED]`
+- `_start_fill_evac()`: Air comp always OFF during calibration, single `cstr_samples` list, writes combined CSV
+- `_fit_and_save_cstr_model()`: Uses `fit_cstr_model()` with single CSV path
+- `SystemState`: `active_cstr_model`, `cstr_model_status`, `cstr_samples`, `cstr_csv_path` replace old fill/evac-split fields
+
+## What Changed in Session 12
 
 ### Power Curve Live Update Fix  `[IMPLEMENTED]`
 - `_update_power_curve()`: replaced `power_plot.figure = fig; power_plot.update()` with `power_plot.run_method('react', fd['data'], fd['layout'])` — NiceGUI's element-diff mechanism does not reliably push Plotly trace-data changes; calling Plotly.js `react` directly fixes the green dot (actual O3) and black ring (target power) never updating.
@@ -240,7 +270,7 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 ## Pending Work
 
 - `[IMPLEMENTED]` **Power→O3 model fitting**: 4-parameter sigmoid model, fitted per (LPM, O2%) condition, stored in `Models/O3Power/` as JSON. Analysis module at `Interfaces/PC/analysis/`.
-- `[IMPLEMENTED]` **Fill/Evac CSTR calibration**: PC-driven fill/evacuation sequence for system volume estimation. CSTR model fitting, stored in `Models/Fill/` as JSON. Analysis module at `Interfaces/PC/analysis/fill_model.py`.
+- `[IMPLEMENTED]` **Decay-aware CSTR calibration**: PC-driven fill/evacuation sequence with first-order O3 decay model. Fits V (volume), k_d (decay rate), V_dead (dead volume) — parameters generalise across flow rates. Stored in `Models/CSTR/cstr_model.json`. Analysis module at `Interfaces/PC/analysis/fill_model.py`.
 - `[PROPOSED]` **Historical data viewer**: Load and plot old CSV files from `Data/Telemetry/`.
 - `[PROPOSED]` **Sterilization batch**: Three-phase batch (Fill→Hold→Evac) with real-time dosimetry. Documented in interface_contract.md, implementation deferred.
 - `[PROPOSED]` **Validation certificate**: Generate JSON certificate with 24h validity on pass.
@@ -254,21 +284,18 @@ Data/
   Telemetry/       — Per-connection stream CSVs
   Calibration/     — Power-O3 calibration CSVs
   Validation/      — Validation run CSVs
-  Fill/            — Fill calibration CSVs (CSTR fill curves)
-  Evac/            — Evacuation calibration CSVs (CSTR evac curves)
-  Decay/           — Future
+  CSTR/            — CSTR calibration CSVs (combined baseline+fill+evac)
   Sterilization/   — Future
 Models/            — Git-tracked fitted models
-  O3Power/         — Power→O3 sigmoid models (JSON)
-  Fill/            — Fill/Evac CSTR models (JSON)
-  Decay/           — Future
+  O3Power/         — Power→O3 sigmoid models (JSON, per LPM)
+  CSTR/            — Universal CSTR model (single cstr_model.json)
 ```
 
 ### File Naming Convention
 - Calibration: `{YYYY-MM-DD}_{HHMMSS}_PowerO3Cal_{LPM}Lpm_{O2}O2.csv`
 - Telemetry: `{YYYY-MM-DD}_{HHMMSS}_Stream.csv` (per-connection session, not daily)
-- Fill: `{YYYY-MM-DD}_{HHMMSS}_Fill_{LPM}Lpm[_air].csv`
-- Evac: `{YYYY-MM-DD}_{HHMMSS}_Evac_{LPM}Lpm[_air].csv`
+- CSTR: `{YYYY-MM-DD}_{HHMMSS}_CSTR_{LPM}Lpm.csv` (single file with `phase` column)
+- CSTR model: `cstr_model.json` (universal — one file, all conditions)
 - O2% = weighted average: `(F_conc × 95 + F_air × 21) / (F_conc + F_air)`, rounded to int
 
 ### O2% Calculation

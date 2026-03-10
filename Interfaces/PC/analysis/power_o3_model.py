@@ -64,6 +64,12 @@ class PowerO3Model:
     ci_power: list[float] = field(default_factory=list)
     ci_sigma: list[float] = field(default_factory=list)
 
+    # ±1σ empirical measurement spread (rolling-block std-dev of raw O3 data)
+    # Reflects actual O3 variability at each power level, not fit uncertainty.
+    # Computed over ±window_pct overlapping blocks from all calibration samples.
+    spread_power: list[float] = field(default_factory=list)
+    spread_sigma: list[float] = field(default_factory=list)
+
     def predict(self, power_pct: float) -> float:
         """Predict O3 %vol from power %."""
         if power_pct <= 0:
@@ -121,6 +127,50 @@ class PowerO3Model:
 def _sigmoid(P: float | np.ndarray, L: float, k: float, P0: float, b: float):
     """4-parameter sigmoid: O3 = L / (1 + exp(-k*(P - P0))) + b."""
     return L / (1.0 + np.exp(-k * (P - P0))) + b
+
+
+def compute_measurement_spread(
+    raw_df: pd.DataFrame,
+    grid_points: int = 101,
+    window_pct: float = 5.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute empirical \u00b11\u03c3 measurement spread from raw calibration data.
+
+    For each power level in the 0\u2013100 grid, collects all raw O3 readings
+    from samples within \u00b1window_pct of that power level (overlapping blocks).
+    Returns the std-dev, representing real O3 variability at each power level.
+
+    Args:
+        raw_df: DataFrame with ``power_target`` and ``o3_pct`` columns.
+                Should be the full per-sample data (NOT per-step averages) so
+                that all repeated measurements are included.
+        grid_points: Number of evenly-spaced power levels (default: 101).
+        window_pct: Half-width of the sliding window in % power (default: 5.0,
+                    giving 10%-wide overlapping blocks per the user's preference).
+
+    Returns:
+        (power_grid, spread_sigma): arrays of length ``grid_points``.  Points
+        with fewer than 3 samples in their window get sigma=0.0 (insufficient
+        data).
+    """
+    if raw_df.empty or 'power_target' not in raw_df.columns or 'o3_pct' not in raw_df.columns:
+        empty = np.zeros(grid_points)
+        return np.linspace(0, 100, grid_points), empty
+
+    pwr_grid = np.linspace(0, 100, grid_points)
+    spread = np.zeros(grid_points)
+
+    pwr = raw_df['power_target'].values.astype(float)
+    o3 = raw_df['o3_pct'].values.astype(float)
+
+    for i, p in enumerate(pwr_grid):
+        mask = np.abs(pwr - p) <= window_pct
+        samples = o3[mask]
+        if len(samples) >= 3:
+            spread[i] = float(np.std(samples, ddof=1))
+        # else: leave 0.0 (no band rendered at sparse data edges)
+
+    return pwr_grid, spread
 
 
 # =============================================================================
@@ -254,6 +304,24 @@ def fit_sigmoid_model(
     agg = aggregate_calibration_data(filepaths, exclude_files, phases)
     power, o3 = _compute_fit_points(agg)
 
+    # Also load raw per-sample data for empirical spread computation.
+    # aggregate_calibration_data collapses to per-step means; here we need
+    # the individual sample rows before groupby aggregation.
+    _raw_phases = phases if phases is not None else ["sweep_up", "sweep_down"]
+    _exclude_set_raw = set(exclude_files or [])
+    _raw_frames: list[pd.DataFrame] = []
+    for fp in filepaths:
+        if os.path.basename(fp) not in _exclude_set_raw:
+            try:
+                _raw_frames.append(load_calibration_csv(fp))
+            except Exception:
+                pass
+    if _raw_frames:
+        raw_combined = pd.concat(_raw_frames, ignore_index=True)
+        raw_combined = raw_combined[raw_combined['phase'].isin(_raw_phases)]
+    else:
+        raw_combined = pd.DataFrame()
+
     if len(power) < 4:
         raise ValueError(
             f"Need at least 4 data points for sigmoid fit, got {len(power)}"
@@ -310,6 +378,9 @@ def fit_sigmoid_model(
     var_curve = np.einsum('ni,ij,nj->n', J, pcov, J)
     ci_sigma_arr = np.sqrt(np.maximum(var_curve, 0))
 
+    # Empirical measurement spread (rolling-block std-dev)
+    spread_pwr_arr, spread_sigma_arr = compute_measurement_spread(raw_combined)
+
     # Build source file list (only non-excluded)
     exclude_set = set(exclude_files or [])
     used_files = [
@@ -333,6 +404,8 @@ def fit_sigmoid_model(
         fitted_at=datetime.now().isoformat(timespec="seconds"),
         ci_power=pwr_grid.tolist(),
         ci_sigma=ci_sigma_arr.tolist(),
+        spread_power=spread_pwr_arr.tolist(),
+        spread_sigma=spread_sigma_arr.tolist(),
     )
 
 

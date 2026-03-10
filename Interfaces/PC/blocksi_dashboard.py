@@ -1904,16 +1904,22 @@ async def index():
     # -- derived settings sync -------------------------------------------
     def _sync_derived_to_ui() -> None:
         S.update_derived()
+        # Use _props + update() to avoid triggering on_change callbacks.
         if inp_o3 is not None:
-            inp_o3.value = round(S.target_o3_pct, 2)
+            inp_o3._props['model-value'] = round(S.target_o3_pct, 2)
+            inp_o3.update()
         if inp_mg is not None:
-            inp_mg.value = round(S.target_mg_per_s, 2)
+            inp_mg._props['model-value'] = round(S.target_mg_per_s, 2)
+            inp_mg.update()
         if inp_g30 is not None:
-            inp_g30.value = round(S.target_g_30min, 2)
+            inp_g30._props['model-value'] = round(S.target_g_30min, 2)
+            inp_g30.update()
 
     # -- power callbacks --------------------------------------------------
     async def _on_power_slide(e) -> None:
         nonlocal _updating
+        if e.value is None:
+            return
         if _updating or S.sequence_active:
             return
         _updating = True
@@ -1926,13 +1932,16 @@ async def index():
             return
         await cmd_set_power(pct)
         if inp_pwr is not None:
-            inp_pwr.value = pct
+            inp_pwr._props['model-value'] = pct
+            inp_pwr.update()
         _sync_derived_to_ui()
         _update_power_curve()
         _updating = False
 
     async def _on_power_input(e) -> None:
         nonlocal _updating
+        if e.value is None:
+            return
         if _updating or S.sequence_active:
             return
         _updating = True
@@ -1942,31 +1951,40 @@ async def index():
             return
         await cmd_set_power(pct)
         if slider is not None:
-            slider.value = pct
+            slider._props['model-value'] = pct
+            slider.update()
         _sync_derived_to_ui()
         _update_power_curve()
         _updating = False
 
     async def _on_o3_input(e) -> None:
         nonlocal _updating
+        if e.value is None:
+            return
         if _updating:
             return
         _updating = True
         pwr = int(predict_power_from_o3(e.value, S.flow_lpm))
         await cmd_set_power(pwr)
         if slider is not None:
-            slider.value = pwr
+            slider._props['model-value'] = pwr
+            slider.update()
         if inp_pwr is not None:
-            inp_pwr.value = pwr
+            inp_pwr._props['model-value'] = pwr
+            inp_pwr.update()
         S.update_derived()
         if inp_mg is not None:
-            inp_mg.value = round(S.target_mg_per_s, 2)
+            inp_mg._props['model-value'] = round(S.target_mg_per_s, 2)
+            inp_mg.update()
         if inp_g30 is not None:
-            inp_g30.value = round(S.target_g_30min, 2)
+            inp_g30._props['model-value'] = round(S.target_g_30min, 2)
+            inp_g30.update()
         _updating = False
 
     async def _on_mg_input(e) -> None:
         nonlocal _updating
+        if e.value is None:
+            return
         if _updating:
             return
         _updating = True
@@ -1974,18 +1992,24 @@ async def index():
         pwr = int(predict_power_from_o3(o3, S.flow_lpm))
         await cmd_set_power(pwr)
         if slider is not None:
-            slider.value = pwr
+            slider._props['model-value'] = pwr
+            slider.update()
         if inp_pwr is not None:
-            inp_pwr.value = pwr
+            inp_pwr._props['model-value'] = pwr
+            inp_pwr.update()
         S.update_derived()
         if inp_o3 is not None:
-            inp_o3.value = round(S.target_o3_pct, 2)
+            inp_o3._props['model-value'] = round(S.target_o3_pct, 2)
+            inp_o3.update()
         if inp_g30 is not None:
-            inp_g30.value = round(S.target_g_30min, 2)
+            inp_g30._props['model-value'] = round(S.target_g_30min, 2)
+            inp_g30.update()
         _updating = False
 
     async def _on_g30_input(e) -> None:
         nonlocal _updating
+        if e.value is None:
+            return
         if _updating:
             return
         _updating = True
@@ -1994,14 +2018,18 @@ async def index():
         pwr = int(predict_power_from_o3(o3, S.flow_lpm))
         await cmd_set_power(pwr)
         if slider is not None:
-            slider.value = pwr
+            slider._props['model-value'] = pwr
+            slider.update()
         if inp_pwr is not None:
-            inp_pwr.value = pwr
+            inp_pwr._props['model-value'] = pwr
+            inp_pwr.update()
         S.update_derived()
         if inp_o3 is not None:
-            inp_o3.value = round(S.target_o3_pct, 2)
+            inp_o3._props['model-value'] = round(S.target_o3_pct, 2)
+            inp_o3.update()
         if inp_mg is not None:
-            inp_mg.value = round(S.target_mg_per_s, 2)
+            inp_mg._props['model-value'] = round(S.target_mg_per_s, 2)
+            inp_mg.update()
         _updating = False
 
     async def _on_lpm_change(e) -> None:
@@ -2022,9 +2050,11 @@ async def index():
         _updating = True
         await cmd_set_power(pct)
         if slider is not None:
-            slider.value = pct
+            slider._props['model-value'] = pct
+            slider.update()
         if inp_pwr is not None:
-            inp_pwr.value = pct
+            inp_pwr._props['model-value'] = pct
+            inp_pwr.update()
         _sync_derived_to_ui()
         _update_power_curve()
         _updating = False
@@ -2077,19 +2107,19 @@ async def index():
             line=dict(color="royalblue", width=2),
             showlegend=False, name="Model",
         ))
-        # Trace 1 — ±1σ confidence band (or invisible placeholder)
+        # Trace 1 — ±1σ empirical measurement spread (or invisible placeholder)
         mdl = S.active_model
-        if mdl and mdl.ci_sigma and mdl.ci_power:
-            ci_pwr = np.array(mdl.ci_power)
-            ci_o3 = np.array([mdl.predict(p) for p in ci_pwr])
-            ci_s = np.array(mdl.ci_sigma)
+        if mdl and mdl.spread_sigma and mdl.spread_power and any(s > 0 for s in mdl.spread_sigma):
+            sp_pwr = np.array(mdl.spread_power)
+            sp_o3 = np.array([mdl.predict(p) for p in sp_pwr])
+            sp_s = np.array(mdl.spread_sigma)
             fig.add_trace(go.Scatter(
-                x=list(ci_pwr) + list(ci_pwr[::-1]),
-                y=list(ci_o3 + ci_s) + list((ci_o3 - ci_s)[::-1]),
+                x=list(sp_pwr) + list(sp_pwr[::-1]),
+                y=list(sp_o3 + sp_s) + list((sp_o3 - sp_s)[::-1]),
                 fill="toself",
-                fillcolor="rgba(65,105,225,0.25)",
-                line=dict(color="rgba(65,105,225,0.5)", width=1),
-                showlegend=False, name="±1σ",
+                fillcolor="rgba(65,105,225,0.20)",
+                line=dict(color="rgba(65,105,225,0.45)", width=1),
+                showlegend=False, name="±1σ spread",
                 hoverinfo="skip",
             ))
         else:
@@ -3085,14 +3115,17 @@ async def index():
         card_ctemp_val.text = f"{S.cell_temp_c:.1f}"
 
         # -- sync power slider & inputs ------------------------------------
-        if not _updating:
-            _updating = True
-            if slider.value != S.power_target_pct:
-                slider.value = S.power_target_pct
-            if inp_pwr.value != S.power_target_pct:
-                inp_pwr.value = S.power_target_pct
-            _sync_derived_to_ui()
-            _updating = False
+        # Use _props + update() instead of .value = X to avoid triggering
+        # on_change handlers (which NiceGUI schedules as background tasks;
+        # clearing _updating synchronously before the task runs causes the
+        # handler to re-fire cmd_set_power with stale values).
+        if slider._props.get('model-value') != S.power_target_pct:
+            slider._props['model-value'] = S.power_target_pct
+            slider.update()
+        if inp_pwr._props.get('model-value') != S.power_target_pct:
+            inp_pwr._props['model-value'] = S.power_target_pct
+            inp_pwr.update()
+        _sync_derived_to_ui()
 
         # -- sequence banner + control lock --------------------------------
         seq_banner.visible = S.sequence_active
@@ -3191,7 +3224,10 @@ async def index():
             _last_prompt_id = ""
 
         # -- power curve markers ----------------------------------------
-        _restyle_markers()
+        try:
+            _restyle_markers()
+        except RuntimeError:
+            pass  # Page refresh — slot parent deleted, timer fires once more
 
         # -- telemetry ECharts ---------------------------------------------
         if data_buf:

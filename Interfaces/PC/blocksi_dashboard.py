@@ -1225,11 +1225,11 @@ tcp: TCPServer  # assigned in startup
 # =============================================================================
 # Command helpers  (all async; COMMA-separated — never colons)
 # =============================================================================
-async def cmd_set_power(pct: int) -> bool:
+async def cmd_set_power(pct: int, timeout: float = 2.0) -> bool:
     old = S.power_target_pct
     S.power_target_pct = int(pct)
     S.update_derived()
-    resp = await tcp.send_command(f"power_set,{int(pct)}")
+    resp = await tcp.send_command(f"power_set,{int(pct)}", timeout=timeout)
     ok = resp is not None and "OK" in resp
     if not ok:
         # Roll back — ESP32 never ACK'd, keep UI consistent
@@ -1526,9 +1526,14 @@ FILL_SAMPLE_INTERVAL = 2.5  # Approximate seconds between DATA samples
 FILL_MAX_SAMPLES = 600      # Hard limit: abort fill if steady-state not reached in N samples (~25 min)
 EVAC_MAX_SAMPLES = 400      # Hard limit: abort evac if not cleared in N samples (~17 min)
 CSTR_STALE_THRESHOLD = 8.0  # Seconds: warn if telemetry hasn't updated since last sample
-CSTR_CMD_RETRIES = 3        # Retries for critical commands (power_set) before aborting
-CSTR_CMD_RETRY_DELAY = 1.5  # Seconds between command retries
+CSTR_CMD_RETRIES = 3        # Retries for relay_set commands before aborting
+CSTR_CMD_RETRY_DELAY = 1.5  # Seconds between relay command retries
 CSTR_CHECKPOINT_INTERVAL = 10  # Write intermediate CSV every N samples during fill/evac
+# power_set timeout: motor pot physically ramps to target — can take 10-20 s at 100%.
+# Using a single long-timeout attempt avoids sending multiple conflicting CMD,power_set
+# commands to the ESP32 while it is still executing the first one.
+CSTR_POWER_SET_TIMEOUT = 25.0   # Seconds to wait for power_set RSP before fallback
+CSTR_POWER_TOLERANCE = 5.0      # % — fallback: accept if actual power within this of target
 
 
 def _make_cstr_csv_path(lpm: float) -> str:
@@ -1597,21 +1602,51 @@ def _cstr_flog_state(label: str) -> None:
 
 
 async def _cstr_set_power(pct: int) -> None:
-    """Set power with retries; raises RuntimeError if all retries exhausted."""
-    for attempt in range(1, CSTR_CMD_RETRIES + 1):
-        _cstr_flog(f"cmd_set_power({pct}%) attempt {attempt}/{CSTR_CMD_RETRIES}")
-        ok = await cmd_set_power(pct)
-        if ok:
-            _cstr_flog(f"cmd_set_power({pct}%) -> OK")
-            return
+    """Send power_set with a long timeout; raises RuntimeError if unconfirmed.
+
+    The ESP32 motor pot takes up to ~20 s to physically ramp to a new level
+    before it sends RSP,power_set,OK.  Using the default 2 s timeout causes
+    spurious failures even though the command was received and is executing.
+
+    Strategy:
+      1. Single attempt with CSTR_POWER_SET_TIMEOUT (25 s).
+      2. If RSP still doesn't arrive within that window, check telemetry:
+         if pwr_act is within CSTR_POWER_TOLERANCE of the target the ESP32
+         clearly executed the command — accept with a warning rather than
+         aborting the entire calibration run.
+      3. Only raise RuntimeError if both the RSP and telemetry checks fail.
+
+    Never retry: sending multiple CMD,power_set while the motor is still
+    ramping creates conflicting in-flight commands and corrupts the ESP32
+    command queue.
+    """
+    _cstr_flog(
+        f"cmd_set_power({pct}%) — single attempt, timeout={CSTR_POWER_SET_TIMEOUT}s"
+    )
+    ok = await cmd_set_power(pct, timeout=CSTR_POWER_SET_TIMEOUT)
+    if ok:
+        _cstr_flog(f"cmd_set_power({pct}%) -> RSP OK (pwr_act={S.power_actual_pct:.1f}%)")
+        return
+
+    # RSP timed out — check telemetry as fallback
+    _cstr_flog(
+        f"cmd_set_power({pct}%) RSP timeout/failed "
+        f"(connected={S.connected}, pwr_act={S.power_actual_pct:.1f}%)"
+    )
+    if abs(S.power_actual_pct - pct) <= CSTR_POWER_TOLERANCE:
         _cstr_flog(
-            f"cmd_set_power({pct}%) attempt {attempt} FAILED "
-            f"(connected={S.connected}, pwr_act={S.power_actual_pct:.1f}%)"
+            f"WARN cmd_set_power({pct}%) RSP not received but "
+            f"pwr_act={S.power_actual_pct:.1f}% is within {CSTR_POWER_TOLERANCE}% "
+            f"of target — treating as success (telemetry fallback)"
         )
-        if attempt < CSTR_CMD_RETRIES:
-            await asyncio.sleep(CSTR_CMD_RETRY_DELAY)
+        # Force state consistent (cmd_set_power rolled back on failure)
+        S.power_target_pct = int(pct)
+        S.update_derived()
+        return
+
     raise RuntimeError(
-        f"Failed to set power to {pct}% after {CSTR_CMD_RETRIES} attempts"
+        f"Failed to set power to {pct}%: "
+        f"RSP timed out and pwr_act={S.power_actual_pct:.1f}% is not near target"
     )
 
 

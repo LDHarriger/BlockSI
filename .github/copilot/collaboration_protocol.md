@@ -6,12 +6,11 @@
 
 BlockSI development uses **two AI coding agents** working in parallel:
 
-1. **VS Code Copilot Agent** — runs locally, works on `main` branch, handles
-   interactive development (UI debugging, live hardware testing, iterative fixes)
-2. **Claude Code Agent** — runs on cloud, works on **feature branches**, handles
-   analytical tasks (model refactoring, algorithm design, documentation review)
+1. **VS Code Copilot Agent** — runs locally, works on `main` branch
+2. **Claude Code Agent** — runs on cloud, also works on `main` branch
 
-The VS Code agent (or human) merges feature branches into `main` after review.
+Both agents push directly to `main`. Each agent must `git pull --rebase origin main`
+before starting work and again before pushing.
 See `claude_code_agent.md` for the cloud agent's specific coordination rules.
 
 **The collaboration docs remain active**: They serve as persistent memory
@@ -21,10 +20,10 @@ agents are active.
 
 ## Active Agents
 
-| Agent | Platform | Branch | Domain |
-|-------|----------|--------|--------|
-| **VS Code Copilot** | Local VS Code | `main` | Full-stack, hardware debugging, UI fixes |
-| **Claude Code** | Cloud | Feature branches | Models, algorithms, analysis, docs |
+| Agent | Platform | Branch |
+|-------|----------|--------|
+| **VS Code Copilot** | Local VS Code | `main` |
+| **Claude Code** | Cloud | `main` (rebase-before-push) |
 
 See `claude_code_agent.md` for the cloud agent's detailed coordination rules.
 

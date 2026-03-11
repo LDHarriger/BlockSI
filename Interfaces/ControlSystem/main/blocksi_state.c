@@ -7,6 +7,7 @@
 #include "motor_pot.h"
 #include "o3_power_control.h"
 #include "relay_control.h"
+#include "lan_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -237,50 +238,71 @@ void blocksi_state_validate(void)
         return;
     }
     
-    // Check power mismatch
-    float error = state->power.target_pct - state->power.actual_pct;
+    // Read fresh ADC position (not the stale cached value)
+    float fresh_pct = motor_pot_get_position_percent();
+    
+    // Check power mismatch with hysteresis:
+    //   Enter error state when error > POWER_MISMATCH_TOLERANCE (5%)
+    //   Clear error state when error < POWER_MISMATCH_CLEAR (2.5%)
+    float error = state->power.target_pct - fresh_pct;
     if (error < 0) error = -error;
     
-    if (error > POWER_MISMATCH_TOLERANCE) {
+    float threshold = state->power.error_mismatch
+                    ? POWER_MISMATCH_CLEAR
+                    : POWER_MISMATCH_TOLERANCE;
+    
+    if (error > threshold) {
         if (!state->power.error_mismatch) {
             state->power.error_mismatch = true;
             state->power_mismatch_count++;
             ESP_LOGW(TAG, "Power mismatch detected: target=%u%%, actual=%.1f%%, error=%.1f%%",
-                     state->power.target_pct, state->power.actual_pct, error);
+                     state->power.target_pct, fresh_pct, error);
         }
         
-        // Attempt correction if under retry limit
-        if (state->power.retry_count < POWER_MISMATCH_RETRY_MAX) {
-            state->power.retry_count++;
-            uint8_t target = state->power.target_pct;
-            state->power.motor_moving = true;  // Mark as moving before unlock
-            unlock();
-            
-            ESP_LOGI(TAG, "Retrying power command (attempt %u/%u) to %u%%",
-                     state->power.retry_count, POWER_MISMATCH_RETRY_MAX, target);
-            
-            // Retry the movement
-            esp_err_t ret = o3_power_set(target);
-            
-            lock();
-            state->power.motor_moving = false;
-            state->power.last_command_ms = get_uptime_ms();
-            if (ret != ESP_OK) {
-                ESP_LOGW(TAG, "Retry failed: %s", esp_err_to_name(ret));
-            }
-            unlock();
-            return;
-        } else {
-            ESP_LOGE(TAG, "Max retries exceeded, power stuck at %.1f%% (target %u%%)",
-                     state->power.actual_pct, state->power.target_pct);
+        // Always retry — no retry limit.  If something keeps knocking the
+        // motor off position, the validator will keep correcting it.
+        state->power.retry_count++;
+        uint8_t target = state->power.target_pct;
+        uint8_t attempt = state->power.retry_count;
+        state->power.motor_moving = true;
+        unlock();
+        
+        ESP_LOGI(TAG, "Retrying power command (attempt %u) to %u%%",
+                 attempt, target);
+        
+        // Send DIAG to PC so dashboard can log it
+        char diag[128];
+        snprintf(diag, sizeof(diag),
+                 "DIAG,power_mismatch,target=%u,actual=%.1f,retry=%u\n",
+                 target, fresh_pct, attempt);
+        lan_client_send_message(diag);
+        
+        esp_err_t ret = o3_power_set(target);
+        
+        lock();
+        state->power.motor_moving = false;
+        state->power.last_command_ms = get_uptime_ms();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Retry failed: %s", esp_err_to_name(ret));
         }
+        unlock();
+        return;
     } else {
-        // Within tolerance - clear error state
+        // Within tolerance — clear error state
         if (state->power.error_mismatch) {
             ESP_LOGI(TAG, "Power mismatch resolved: actual=%.1f%% (target=%u%%)",
-                     state->power.actual_pct, state->power.target_pct);
+                     fresh_pct, state->power.target_pct);
+            
+            char diag[128];
+            snprintf(diag, sizeof(diag),
+                     "DIAG,power_resolved,target=%u,actual=%.1f\n",
+                     state->power.target_pct, fresh_pct);
+            unlock();
+            lan_client_send_message(diag);
+            lock();
         }
         state->power.error_mismatch = false;
+        state->power.retry_count = 0;
     }
     
     unlock();

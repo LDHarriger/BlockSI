@@ -187,7 +187,7 @@ void blocksi_state_stop_calibration(void);
 // =============================================================================
 
 #define POWER_MISMATCH_TOLERANCE    5.0f    // % tolerance for target vs actual
-#define POWER_MISMATCH_RETRY_MAX    3       // Max retry attempts
+#define POWER_MISMATCH_CLEAR        2.5f    // % hysteresis band to clear error
 #define POWER_SETTLE_TIME_MS        1500    // Wait after movement before validating
 #define STATE_VALIDATE_INTERVAL_MS  1000    // How often to check state
 

@@ -116,3 +116,19 @@
 [18:19:42.477] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_330.csv (387 samples)
 [18:20:07.557] Evac #340: O3=0.0300% steady=0/5 stale=1.52s
 [18:20:07.562] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_340.csv (397 samples)
+[18:20:32.629] Evac #350: O3=0.0300% steady=0/5 stale=2.59s
+[18:20:32.635] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_350.csv (407 samples)
+[18:20:57.726] Evac #360: O3=0.0300% steady=0/5 stale=1.69s
+[18:20:57.731] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_360.csv (417 samples)
+[18:21:22.810] Evac #370: O3=0.0300% steady=0/5 stale=0.77s
+[18:21:22.815] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_370.csv (427 samples)
+[18:21:47.893] Evac #380: O3=0.0300% steady=0/5 stale=1.85s
+[18:21:47.898] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_380.csv (437 samples)
+[18:22:12.984] Evac #390: O3=0.0300% steady=0/5 stale=0.95s
+[18:22:12.989] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_390.csv (447 samples)
+[18:22:38.102] Evac #400: O3=0.0300% steady=0/5 stale=2.06s
+[18:22:38.108] Checkpoint saved: 2026-03-10_180319_CSTR_checkpoint_evac_400.csv (457 samples)
+[18:22:38.109] WARN evac hard limit reached (400 samples). O3=0.0300% still above threshold. Proceeding to save with available data.
+[18:22:38.109] STATE@evac_complete: connected=True O3=0.0300% pwr_tgt=0% pwr_act=0.3% last_update=18:22:36 esp_ts=3137888 relay(o3=False o2=False air=False)
+[18:22:38.113] Final CSV saved: 2026-03-10_182238_CSTR_4Lpm.csv
+[18:22:38.425] CSTR calibration COMPLETE: 457 total samples (15 baseline + 42 fill + 400 evac)

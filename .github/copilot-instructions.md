@@ -91,6 +91,9 @@ All GPIO pins are centralized in `blocksi_pins.h`. **Always check here before ad
 Each peripheral follows: `module_init()` → `module_deinit()` → `module_is_initialized()`
 
 ### Build & Flash
+**DO NOT attempt to build or flash firmware from an AI agent.** The ESP-IDF toolchain requires a specific environment (idf_cmd_init.bat, Python venv, toolchain paths) that cannot be reliably set up from an agent terminal. Instead, describe the changes made and the user will build and flash manually.
+
+Reference commands (for human use only):
 ```powershell
 idf.py build
 idf.py -p COM3 flash monitor    # exit: Ctrl+]
@@ -158,6 +161,7 @@ AIR_COMP_O2_PCT = 21      # Atmospheric O2
 3. **Sequence lockout**: When `sequence_active=True`, power controls must be disabled in the UI
 4. **Venv required**: PC dashboard must run from `.venv\Scripts\python.exe`, not system Python
 5. **NiceGUI Quasar pattern**: Disable controls with `.props("disable")`, re-enable with `.props(remove="disable")`
+6. **Never build/flash firmware from agent**: ESP-IDF toolchain env cannot be set up in agent terminals. Make firmware edits and describe changes — user will build and flash manually.
 
 ## Common Tasks
 

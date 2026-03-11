@@ -856,6 +856,8 @@ class TCPServer:
                 self._handle_state(line)
             elif prefix == "SEQ":
                 await self._handle_seq(line)
+            elif prefix == "DIAG":
+                self._handle_diag(line)
             else:
                 log(f"Unknown line: {line[:80]}", "warn")
         except Exception as exc:
@@ -958,6 +960,21 @@ class TCPServer:
             except (ValueError, IndexError):
                 pass
         log("STATE sync from ESP32", "state")
+
+    # -- DIAG message handler (firmware diagnostics) -----------------------
+    def _handle_diag(self, line: str) -> None:
+        """Handle DIAG,<event>,key=val,... messages from firmware validator."""
+        log(f"DIAG: {line}", "warn")
+        # Show toast so operator sees it immediately
+        _notify(f"FW DIAG: {line}", "warning")
+        # Append to CSTR debug log if a sequence is running
+        if _cstr_debug_file:
+            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            try:
+                with open(_cstr_debug_file, "a") as _f:
+                    _f.write(f"[{ts}] {line}\n")
+            except OSError:
+                pass
 
     # -- SEQ message handler (generic recipe protocol) ---------------------
     async def _handle_seq(self, line: str) -> None:
@@ -1535,6 +1552,8 @@ CSTR_CHECKPOINT_INTERVAL = 10  # Write intermediate CSV every N samples during f
 CSTR_POWER_SET_TIMEOUT = 25.0   # Seconds to wait for power_set RSP before fallback
 CSTR_POWER_TOLERANCE = 5.0      # % — fallback: accept if actual power within this of target
 FILL_POWER_MIN_PCT = 80.0       # Minimum pwr_act at fill steady-state; lower means power was cut mid-fill
+FILL_POWER_GRACE_SAMPLES = 5    # Skip power watchdog for first N fill samples (motor settling)
+FILL_POWER_RESEND_MAX = 3       # Max power re-sends before aborting fill
 
 
 def _make_cstr_csv_path(lpm: float) -> str:
@@ -1553,7 +1572,7 @@ def _write_cstr_csv(path: str, samples: list[dict]) -> None:
     """Write combined CSTR calibration samples (baseline+fill+evac) to CSV."""
     if not samples:
         return
-    header = "timestamp,esp_ts_ms,elapsed_s,vessel_o3_pct,cell_temp_c,vessel_temp_c,power_pct,phase\n"
+    header = "timestamp,esp_ts_ms,elapsed_s,vessel_o3_pct,cell_temp_c,vessel_temp_c,power_pct,power_actual_pct,phase\n"
     with open(path, "w") as f:
         f.write(header)
         t0 = samples[0].get("esp_ts_ms", 0)
@@ -1563,7 +1582,8 @@ def _write_cstr_csv(path: str, samples: list[dict]) -> None:
                 f"{s['timestamp']},{s['esp_ts_ms']},{elapsed:.2f},"
                 f"{s['vessel_o3_pct']},{s['cell_temp_c']},"
                 f"{s.get('vessel_temp_c', -999)},"
-                f"{s.get('power_pct', 0)},{s.get('phase', '')}\n"
+                f"{s.get('power_pct', 0)},{s.get('power_actual_pct', 0.0)},"
+                f"{s.get('phase', '')}\n"
             )
     log(f"Saved {len(samples)} samples -> {os.path.basename(path)}", "seq")
 
@@ -1759,6 +1779,7 @@ async def _start_fill_evac(**kwargs) -> bool:
             "cell_temp_c": S.cell_temp_c,
             "vessel_temp_c": S.vessel_temp_c,
             "power_pct": S.power_target_pct,
+            "power_actual_pct": S.power_actual_pct,
             "phase": phase,
             "_staleness_s": round(staleness, 2),
         }
@@ -1849,6 +1870,7 @@ async def _start_fill_evac(**kwargs) -> bool:
         _cstr_flog_state("fill_power_set")
 
         fill_sample_idx = 0
+        power_resend_count = 0
         # Ring buffer of recent O3 readings for range-based steady-state check
         recent_o3: list[float] = []
 
@@ -1864,6 +1886,32 @@ async def _start_fill_evac(**kwargs) -> bool:
             sample = _snap("fill")
             S.cstr_samples.append(sample)
             fill_sample_idx += 1
+
+            # -- Power watchdog: detect motor pot drift and re-send --------
+            if fill_sample_idx > FILL_POWER_GRACE_SAMPLES:
+                if S.power_actual_pct < FILL_POWER_MIN_PCT:
+                    power_resend_count += 1
+                    if power_resend_count > FILL_POWER_RESEND_MAX:
+                        raise RuntimeError(
+                            f"Power dropped below {FILL_POWER_MIN_PCT}% "
+                            f"{power_resend_count} times during fill — motor pot "
+                            f"cannot hold position. pwr_act={S.power_actual_pct:.1f}%"
+                        )
+                    _cstr_flog(
+                        f"WARN power drift: pwr_act={S.power_actual_pct:.1f}% "
+                        f"< {FILL_POWER_MIN_PCT}% at fill #{fill_sample_idx} — "
+                        f"re-sending power command "
+                        f"(resend {power_resend_count}/{FILL_POWER_RESEND_MAX})"
+                    )
+                    _notify(
+                        f"Power drift detected ({S.power_actual_pct:.0f}%) "
+                        f"— re-sending (#{power_resend_count})",
+                        "warning",
+                    )
+                    await _cstr_set_power(100)
+                    _cstr_flog_state(f"fill_power_resend_{power_resend_count}")
+                    # Reset O3 ring buffer — readings during drift are invalid
+                    recent_o3.clear()
 
             # Track recent readings for stability check
             recent_o3.append(sample["vessel_o3_pct"])
@@ -1888,7 +1936,8 @@ async def _start_fill_evac(**kwargs) -> bool:
                     f"Fill #{fill_sample_idx}: O3={sample['vessel_o3_pct']:.4f}% "
                     f"({fill_frac*100:.1f}% of C_in) range={rng:.4f}% "
                     f"window={len(recent_o3)}/{FILL_STEADY_COUNT} "
-                    f"stale={sample['_staleness_s']}s"
+                    f"stale={sample['_staleness_s']}s "
+                    f"pwr_act={S.power_actual_pct:.1f}%"
                 )
 
             # Intermediate checkpoint every N samples

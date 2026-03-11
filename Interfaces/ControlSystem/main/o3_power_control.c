@@ -8,6 +8,7 @@
 
 #include "o3_power_control.h"
 #include "motor_pot.h"
+#include "blocksi_state.h"
 #include "blocksi_pins.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -197,7 +198,9 @@ void o3_power_emergency_stop(void)
 {
     ESP_LOGW(TAG, "EMERGENCY STOP - Setting power to 0");
     if (s_power.initialized) {
-        motor_pot_set_power(0);
+        // Route through state manager so target_pct stays consistent
+        // and the validator doesn't fight the emergency stop.
+        blocksi_state_set_power(0);
     }
 }
 

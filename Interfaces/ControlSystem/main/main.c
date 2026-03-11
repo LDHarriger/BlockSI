@@ -1125,7 +1125,7 @@ static void on_106h_sample(const m106h_sample_t *sample)
                             (unsigned)sample->second,
                             sensors.room_o3_valid ? sensors.room_o3_ppm : 0.0f,
                             sensors.vessel_temp_valid ? sensors.vessel_temp_c : -999.0f,
-                            (unsigned)o3_power_get(),           // Target power %
+                            (unsigned)blocksi_state_get()->power.target_pct,  // Target power % from state manager
                             pot_state.position_percent,          // Actual power % from ADC
                             wiper_voltage);                      // Wiper voltage (0-3.3V)
 

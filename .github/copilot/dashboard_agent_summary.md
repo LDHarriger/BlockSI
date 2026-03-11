@@ -1,6 +1,6 @@
 # Dashboard Agent Summary
 
-> Last updated: 2026-03-10 (Session 13 + 13b — Backfill fix, chart restyle, compact sidebar, CI band, decay-aware CSTR model, _notify queue fix, validation certificate pre-flight)
+> Last updated: 2026-03-10 (Session 14 — Power watchdog for CSTR fill, motor pot drift detection)
 
 ## Current State
 
@@ -284,6 +284,13 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 - `SystemState.active_model`, `model_status`, `load_model_for_current_condition()`
 - Model Fitting UI in Calibration expansion with per-condition Fit Model buttons
 - Bug fixes: reconnection race, dispatch exception safety, seq_confirmed reset, COMPLETE/ABORTED deadlock, power rollback, time_sync RSP suppression
+
+### What Changed in Session 14
+- **CSTR Power Watchdog**: Fill loop now monitors `power_actual_pct` every sample after a 5-sample grace period. If motor pot drifts below `FILL_POWER_MIN_PCT` (80%), auto-resends `cmd_set_power(100)` up to `FILL_POWER_RESEND_MAX` (3) times. Aborts with RuntimeError if resends exhausted. O3 ring buffer cleared after resend (drift readings invalidate steady-state window).
+- **`power_actual_pct` in CSTR CSV**: `_snap()` now records both `power_pct` (target) and `power_actual_pct` (ESP32 ADC-read position) in every sample. `_write_cstr_csv()` header updated with `power_actual_pct` column for post-mortem visibility.
+- **Fill progress logging**: `pwr_act=` appended to every 10th fill sample log line for monitoring.
+- **Root cause analysis**: Runs 1-3 caused by deferred cleanup race (fixed in commit `a27c224`). Run 4 caused by motor pot physical drift: wiper returned from 90.8% to 0% within ~100s despite dashboard holding target at 100%, relays confirmed ON. This is a hardware/firmware issue — the power watchdog is the dashboard-side mitigation.
+- **New constants**: `FILL_POWER_GRACE_SAMPLES = 5`, `FILL_POWER_RESEND_MAX = 3`
 
 ### What Changed in Session 11
 - **K constant reconciliation**: `O3_MASS_FLOW_K = 0.3327` (20°C, V_m=24.04 L/mol)

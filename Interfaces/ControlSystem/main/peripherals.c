@@ -164,8 +164,10 @@ static void lab_o3_alarm_handler(float level_ppm, float alarm_level)
 {
     if (alarm_level >= LAB_O3_ALARM_CRITICAL) {
         ESP_LOGE(TAG, "!!! CRITICAL: Lab O3 = %.3f ppm - EVACUATE !!!", level_ppm);
-        // Emergency: shut off O3 generator
-        o3_power_emergency_stop();
+        // NOTE: DFRobot sensor is too noisy for automated emergency stop.
+        // Noise transients regularly exceed 1 ppm, causing false kills during
+        // CSTR sequences.  Log-only until sensor is replaced or filtered.
+        // See: .github/copilot/cases/cstr_power_stability.md
     } else if (alarm_level >= LAB_O3_ALARM_DANGER) {
         ESP_LOGW(TAG, "!! DANGER: Lab O3 = %.3f ppm - Increase ventilation !!", level_ppm);
     } else if (alarm_level >= LAB_O3_ALARM_WARNING) {

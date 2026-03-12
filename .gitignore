@@ -22,6 +22,9 @@ Data/
 #   git rm -r --cached Interfaces/Data/CSTR
 #   and restore the Interfaces/Data/ rule to cover CSTR again.
 
+# Archive — legacy/deprecated files kept locally for reference only
+Old/
+
 # IDE
 .vscode/
 *.code-workspace

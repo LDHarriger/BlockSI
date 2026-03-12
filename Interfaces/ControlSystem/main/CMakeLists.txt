@@ -15,7 +15,6 @@ idf_component_register(
         "sensor_aggregator.c"
         "dosimetry.c"
         "blocksi_state.c"           # Unified system state management
-        "power_calibration_v2.c"    # Power calibration sweep (motor pot version)
         "sequence_runner.c"         # Generic autonomous sequence framework
         "seq_executor.c"            # Recipe-based step executor (replaces seq_power_cal/seq_airflow_val)
         "seq_sensor_adapter.c"      # 106-H sample counter for executor

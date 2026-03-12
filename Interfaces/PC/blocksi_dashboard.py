@@ -1534,8 +1534,12 @@ VAL_TRANSIENT_SKIP = 7
 VAL_MIN_STABLE = 3          # Minimum stable samples required for valid statistics
 
 # Constants for fill/evac steady-state detection
-FILL_STEADY_COUNT = 30      # Consecutive samples within range to declare steady-state
-FILL_STEADY_RANGE = 0.05    # Max range (%vol) across steady window to declare stable
+FILL_STEADY_COUNT = 45      # Samples in stability window (~112 s at 2.5 s/sample)
+FILL_STEADY_RANGE = 0.08    # Max range (%vol) across steady window (sanity bound)
+# Slope threshold derived from measured evac asymptotic behaviour (2026-03-10
+# CSTR run).  Evac 45-sample windows show |slope| ≈ 0.0003 at convergence
+# (O3 0.02→0.01%), 6× below the fill's premature-stop slope of 0.00184.
+FILL_STEADY_SLOPE = 0.0003  # Max abs linear slope (%vol/sample) — from evac data
 EVAC_THRESHOLD_PCT = 0.01   # O3 %vol below which vessel is considered evacuated
 EVAC_STEADY_COUNT = 5       # Consecutive samples below threshold to declare evacuated
 FILL_BASELINE_SAMPLES = 15  # Number of baseline samples at 0% power
@@ -1723,11 +1727,29 @@ async def _start_fill_evac(**kwargs) -> bool:
 
     flow = kwargs.get("flow", DEFAULT_FLOW_LPM)
 
-    # Determine target O3 at 100% power from the validated model
-    target_o3 = predict_o3_from_power(100, flow)
+    # Determine target O3 from the most recent 100% validation PASS cert
+    # (measured, held at steady-state, direct-to-sensor — no model needed).
+    # Fall back to sigmoid prediction only if no validation data exists.
+    target_o3 = 0.0
+    val_cert = _find_valid_cert(100, flow, max_age_h=720)  # ~30 days
+    if val_cert:
+        try:
+            vdf = pd.read_csv(val_cert)
+            vdf.columns = [c.strip() for c in vdf.columns]
+            vt = vdf[vdf["phase"] == "target"].iloc[VAL_TRANSIENT_SKIP:]
+            if len(vt) >= VAL_MIN_STABLE:
+                target_o3 = float(vt["o3_pct"].mean())
+                log(f"CSTR fill target from validation: {target_o3:.4f}% "
+                    f"({os.path.basename(val_cert)})", "info")
+        except Exception as exc:
+            log(f"Failed to read validation cert: {exc}", "warning")
+    if target_o3 <= 0.01:
+        target_o3 = predict_o3_from_power(100, flow)
+        log(f"CSTR fill target from sigmoid model: {target_o3:.4f}% "
+            f"(no validation cert found)", "info")
     if target_o3 <= 0.01:
         _notify(
-            "Cannot determine fill target — fit a power model first",
+            "Cannot determine fill target — run a validation first",
             "negative",
         )
         return False
@@ -1863,7 +1885,7 @@ async def _start_fill_evac(**kwargs) -> bool:
         # -- Phase 3: Fill (100% power, wait for steady-state) -------------
         S.fill_phase = "fill"
         S.seq_phase = "fill"
-        _cstr_flog(f"Phase 3: fill — ramping to 100%, C_in={target_o3:.3f}% vol")
+        _cstr_flog(f"Phase 3: fill — ramping to 100%, target={target_o3:.3f}% vol")
         _notify("Fill phase — ramping to 100% power", "info")
 
         await _cstr_set_power(100)
@@ -1924,17 +1946,27 @@ async def _start_fill_evac(**kwargs) -> bool:
             )
             S.seq_progress = 10 + fill_frac * 40  # 10-50% of total
 
-            # Check for steady-state: range of last N samples < threshold
+            # Check for steady-state: slope + range over last N samples.
+            # The 106-H sensor has 0.01% resolution, so range alone can
+            # falsely trigger on a slowly rising signal.  Linear slope
+            # catches monotonic trends that range misses.
+            rng = (max(recent_o3) - min(recent_o3)) if len(recent_o3) >= 2 else 999.0
+            slope = 999.0
+            if len(recent_o3) >= FILL_STEADY_COUNT:
+                x = np.arange(len(recent_o3), dtype=float)
+                y = np.array(recent_o3, dtype=float)
+                slope = float(np.polyfit(x, y, 1)[0])  # %vol per sample
             is_stable = (
                 len(recent_o3) >= FILL_STEADY_COUNT
-                and (max(recent_o3) - min(recent_o3)) < FILL_STEADY_RANGE
+                and rng < FILL_STEADY_RANGE
+                and abs(slope) < FILL_STEADY_SLOPE
             )
-            rng = (max(recent_o3) - min(recent_o3)) if len(recent_o3) >= 2 else 999.0
 
             if fill_sample_idx % 10 == 0 or is_stable:
                 _cstr_flog(
                     f"Fill #{fill_sample_idx}: O3={sample['vessel_o3_pct']:.4f}% "
-                    f"({fill_frac*100:.1f}% of C_in) range={rng:.4f}% "
+                    f"({fill_frac*100:.1f}% of target) range={rng:.4f}% "
+                    f"slope={slope:.6f} "
                     f"window={len(recent_o3)}/{FILL_STEADY_COUNT} "
                     f"stale={sample['_staleness_s']}s "
                     f"pwr_act={S.power_actual_pct:.1f}%"
@@ -1947,7 +1979,8 @@ async def _start_fill_evac(**kwargs) -> bool:
             if is_stable:
                 _cstr_flog(
                     f"Fill steady-state reached: O3={sample['vessel_o3_pct']:.4f}%, "
-                    f"range={rng:.4f}% over {FILL_STEADY_COUNT} samples"
+                    f"range={rng:.4f}%, slope={slope:.6f} "
+                    f"over {FILL_STEADY_COUNT} samples"
                 )
                 # Power sanity check: steady-state at 0% power means the fill ran with
                 # no ozone input — data is invalid and continuing to evac would be wrong.

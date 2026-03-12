@@ -1,8 +1,9 @@
 # Case File: CSTR Power Stability
 
-**Status**: ACTIVE — fixes implemented Session 14, awaiting verification  
+**Status**: RESOLVED — power stability fixed (Session 14), fill stopping criteria  
+improved (Session 15)  
 **Filed**: 2026-03-10  
-**Last updated**: 2026-03-10
+**Last updated**: 2026-03-11
 
 ## Summary
 
@@ -113,6 +114,19 @@ mid-fill while relays stay ON, producing invalid calibration data.
   if drift reappears without DFRobot interference, consider using brake
   for the first 200 ms after positioning.
 
+### Self-calibrating probe evac for stopping criteria  `[PROPOSED]`
+- Add an optional phase at the start of the CSTR sequence: inject a
+  small O3 bolus (e.g. ramp to ~50% power briefly to reach ~0.5% vol
+  in the vessel), then evacuate back to 0% with flow-only.
+- Measure the asymptotic slope as O3 approaches zero during this
+  mini-evac.  Use this measured slope as the fill stopping threshold
+  for the subsequent full fill phase.
+- Advantage: the stopping criterion is self-calibrated to the current
+  hardware configuration (flow rate, plumbing, sensor response) each
+  run — no hardcoded constants needed.
+- Deferred: hardcode from existing evac data first, revisit if
+  hardware or plumbing changes.
+
 ## Test Plan
 
 1. Flash updated firmware (`idf.py build && idf.py -p COM3 flash`)
@@ -134,6 +148,70 @@ mid-fill while relays stay ON, producing invalid calibration data.
 | `o3_power_control.c` | `emergency_stop()` now uses state manager |
 | `blocksi_state.c` / `.h` | Validator rewrite (hysteresis, fresh ADC, no limit) |
 | `main.c` | DATA column 15 fix |
-| `blocksi_dashboard.py` | DIAG handler, fill watchdog, CSV column |
+| `blocksi_dashboard.py` | DIAG handler, fill watchdog, CSV column, stopping criteria |
 | `motor_pot.c` | Motor driver (not modified, audited) |
 | `Data/CSTR/2026-03-10_*` | Debug logs and checkpoint CSVs from 4 runs |
+
+## Session 15: Fill Stopping Criteria Fix
+
+### Problem
+After power stability was confirmed working (Session 14), the first
+successful CSTR run (`2026-03-10_221012_CSTR_4Lpm.csv`) revealed the
+fill phase stops too early.  O3 was still rising at the end of fill,
+and even continued rising after evac began:
+
+- Fill: 186 samples, final O3 = 1.5500%
+- First evac samples: O3 rose to 1.5600% (proving fill stopped prematurely)
+- Rolling avg absolute delta at fill end: 0.00111 (still changing)
+- Progress bar target: 1.8404% (sigmoid model at 100% power) — too high
+
+### Root Cause
+Two issues:
+
+1. **Range-based stopping too lenient for quantized signals**:
+   The 106-H sensor has 0.01% resolution.  A slowly rising signal
+   (e.g., +0.01% every 5-7 samples) can have a 30-sample window range
+   of 0.04% — below the 0.05% threshold — while still clearly trending
+   upward.  Range catches variance but misses monotonic trends.
+
+2. **Wrong fill target value**:
+   `target_o3 = predict_o3_from_power(100, flow)` returns the sigmoid
+   model's inlet concentration (1.8404%), not the vessel steady-state
+   asymptote.  With O3 decay in the vessel, the actual asymptote is
+   `C_ss = C_in / (1 + k_d × τ)` ≈ 1.58% (from CSTR model fit).
+
+### Fixes Applied  `[IMPLEMENTED]`
+
+#### 8. Evac-derived slope-based fill stopping criterion
+- **File**: `blocksi_dashboard.py`
+- **Principle**: The evac's asymptotic behaviour as O3 approaches zero
+  is the same physical process (CSTR washout) as the fill's approach
+  to C_ss, just in reverse.  The evac data from the 2026-03-10 CSTR run
+  directly measures what "converged" looks like in this system.
+- **Evac analysis** (45-sample sliding windows):
+  - O3 0.02→0.01%: |slope| ≈ 0.000325 (barely still decaying)
+  - O3 0.01→0.01%: |slope| = 0.000000 (converged)
+  - Fill at premature stop: slope = 0.00184 — **6× above** convergence
+- **Changes**:
+  - `FILL_STEADY_COUNT` 30 → 45 (longer window catches slow trends)
+  - `FILL_STEADY_RANGE` 0.05 → 0.08 (range is sanity bound only)
+  - `FILL_STEADY_SLOPE = 0.0003` — derived from evac convergence zone
+  - Removed `FILL_MIN_SAMPLES` — redundant; the 45-sample window
+    naturally prevents triggering before ~112 s
+  - Log lines include slope value for post-mortem analysis.
+
+#### 9. Validation-measured max O3 for fill target
+- **File**: `blocksi_dashboard.py`
+- **Change**: `target_o3` now comes from the most recent 100% validation
+  PASS CSV (`_find_valid_cert(100, flow, max_age_h=720)`).  Reads the
+  `target` phase stable tail (skip `VAL_TRANSIENT_SKIP`) and uses
+  `mean(o3_pct)` — a direct-to-sensor measurement held at steady-state.
+- **Fallback**: sigmoid prediction if no validation cert exists.
+- **Rationale**: Avoids circular reasoning (model predicts → model
+  validates → model predicts).  Validation is a measured value.
+
+### Validation
+With the previous run's data (45-sample window ending at sample 186):
+- Fill slope = 0.00184 — 6× above threshold 0.0003 → would NOT have stopped
+- Fill would have continued until true steady-state
+- Validation mean O3 at 100%: 1.9262% (vs old sigmoid prediction 1.8404%)

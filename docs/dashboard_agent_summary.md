@@ -1,6 +1,6 @@
 # Dashboard Agent Summary
 
-> Last updated: 2026-03-10 (Session 14 — Power watchdog for CSTR fill, motor pot drift detection)
+> Last updated: 2026-03-11 (Session 15 — Fill stopping criteria: slope-based detection, CSTR model target)
 
 ## Current State
 
@@ -291,6 +291,11 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 - **Fill progress logging**: `pwr_act=` appended to every 10th fill sample log line for monitoring.
 - **Root cause analysis**: Runs 1-3 caused by deferred cleanup race (fixed in commit `a27c224`). Run 4 caused by motor pot physical drift: wiper returned from 90.8% to 0% within ~100s despite dashboard holding target at 100%, relays confirmed ON. This is a hardware/firmware issue — the power watchdog is the dashboard-side mitigation.
 - **New constants**: `FILL_POWER_GRACE_SAMPLES = 5`, `FILL_POWER_RESEND_MAX = 3`
+
+### What Changed in Session 15
+- **Evac-derived fill stopping**: Replaced range-based steady-state check with slope+range criterion grounded in measured evac asymptotic behaviour. The 2026-03-10 CSTR run's evac data shows |slope| ≈ 0.0003 at convergence (45-sample window, O3 0.02→0.01%). Fill's premature-stop slope was 0.00184 — 6× above threshold. `FILL_STEADY_SLOPE = 0.0003`, `FILL_STEADY_COUNT = 45`, `FILL_STEADY_RANGE = 0.08` (sanity bound). Removed `FILL_MIN_SAMPLES` (redundant — 45-sample window is natural guard).
+- **Validation-measured target O3**: `target_o3` now uses `mean(o3_pct)` from the most recent 100% validation PASS CSV (direct-to-sensor, held at steady-state). Falls back to sigmoid prediction only if no validation cert exists. Avoids circular model reasoning.
+- **Updated constants**: `FILL_STEADY_COUNT` 30→45, `FILL_STEADY_RANGE` 0.05→0.08, `FILL_STEADY_SLOPE = 0.0003` (evac-derived), removed `FILL_MIN_SAMPLES`
 
 ### What Changed in Session 11
 - **K constant reconciliation**: `O3_MASS_FLOW_K = 0.3327` (20°C, V_m=24.04 L/mol)

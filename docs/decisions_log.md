@@ -531,7 +531,7 @@ dashboard) with separate context requirements.  Long chat sessions risk
 context truncation and stale references.
 
 **Decision**: Established a formal collaboration protocol in
-`.github/copilot/` with:
+`docs/` with:
 - Domain-separated agent chats (Dashboard Agent, ESP32 Agent)
 - Agent-written summaries (`dashboard_agent_summary.md`, `esp32_agent_summary.md`)
 - Shared interface contract (`interface_contract.md`)

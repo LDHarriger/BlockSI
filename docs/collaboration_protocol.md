@@ -35,7 +35,7 @@ Either session may **read and write** any file in the repo.  Both summaries
 (`dashboard_agent_summary.md` and `esp32_agent_summary.md`) are still maintained
 for continuity — they cover their respective domains.
 
-## Collaboration Documents (`.github/copilot/`)
+## Collaboration Documents (`docs/`)
 
 | File | Purpose | Written by |
 |------|---------|------------|

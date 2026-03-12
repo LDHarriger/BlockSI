@@ -65,7 +65,7 @@ the VS Code agent. Add your changes on top, don't replace. When in doubt, keep b
 
 ## Documentation Updates
 
-This project uses structured documentation in `.github/copilot/`:
+This project uses structured documentation in `docs/`:
 
 | File | Purpose | Rules |
 |------|---------|-------|
@@ -101,7 +101,7 @@ This project uses structured documentation in `.github/copilot/`:
 
 There is no real-time communication between agents. Coordination happens through:
 - **Git history** — always read recent commits on `main` before starting
-- **Documentation files** — the shared state lives in `.github/copilot/`
+- **Documentation files** — the shared state lives in `docs/`
 - **The human** — the user relays information between agents when needed
 
 ## Commit Message Convention

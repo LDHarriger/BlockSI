@@ -1,7 +1,7 @@
-# MEMORY_CLAUDE.md — Claude Code Agent Working Memory
+# MEMORY_CLAUDE.md — Claude_VSCode Agent Working Memory
 
-> Agent: Claude Code (local VS Code CLI)
-> Last updated: 2026-03-11
+> Agent: Claude_VSCode (Claude Code VS Code extension)
+> Last updated: 2026-03-15
 
 ---
 
@@ -27,27 +27,42 @@
 
 ## Pending (Awaiting User Input)
 
-- **Commit** — infrastructure + cleanup changes ready to stage and commit; user should review and commit when ready
+- **Commit** — context engineering audit changes ready to stage and commit; user should review
 
 ---
 
 <history_archive>
 
+### 2026-03-15: Context Engineering Audit
+
+**Work done:**
+- Reviewed Anthropic docs (prompting best practices, context engineering, memory tool, memory cookbook)
+- Compared current implementation against best practices, identified 8 gaps
+- Created `docs/user/best_practices.md` — condensed resource summary
+- Created `docs/user/managing_agents.md` — human operator guide
+- Created `docs/user/audit_plan.md` → implemented → archived to `docs/archive/`
+- Archived stale docs: `collaboration_protocol.md`, `claude_code_agent.md` → `docs/archive/`
+- Extracted reference material from RULES.md → `docs/reference/hardware.md`, `models.md`, `sequences.md`
+- Rewrote RULES.md: tiered startup, XML behavioral blocks, agent identities, motivation for rules, memory hygiene
+- Trimmed `dashboard_agent_summary.md` (362→~150 lines), archived session history
+- Rewrote `CLAUDE.md` and `.github/copilot-instructions.md` as agent-specific entry points
+
+**Key decisions:**
+- Keep project-level MEMORY files (not Anthropic API memory tool — different purpose)
+- Markdown format with XML-tagged instruction blocks (not pure XML)
+- Agent identities: Claude_VSCode, Copilot_VSCode, Claude_Cloud [FALLBACK], Claude_CLI (defer)
+- XML blocks added: do_not_act_before_instructions, verify_before_finishing, reflect_on_results, subagent_guidance, memory_protocol, memory_security, context_awareness
+- Copilot_VSCode gets additional snippets (parallel_tool_calls, reversibility) not needed in Claude Code
+
 ### 2026-03-11: Infrastructure Setup Session
 
 **Work done:**
-- Read all `docs/` docs and `copilot-instructions.md`
-- Performed full codebase audit (file inventory, legacy file identification)
-- Created `RULES.md` — unified project rules, revised Collaboration section for local-first workflow
-- Created `MEMORY_CLAUDE.md` (this file) and `MEMORY_COPILOT.md`
-- Created `CLAUDE.md` as single pointer to `RULES.md`
-- Updated `.github/copilot-instructions.md` as single pointer to `RULES.md`
-- Created `CLEANUP_PLAN.md` with proposed cleanup actions (awaiting user approval)
+- Created `RULES.md`, `MEMORY_CLAUDE.md`, `MEMORY_COPILOT.md`, `CLAUDE.md`
+- Updated `.github/copilot-instructions.md` as pointer to `RULES.md`
 
-**Key decisions made:**
-- Both local agents (Claude Code + Copilot Chat) push directly to `main`
-- Claude.ai cloud agent documented as legacy/fallback only (push to `claude/*` branches)
-- Locking protocol: `<FILE_LOCK path="..."/>` in memory file, checked before editing shared files
-- Preservation policy: completed tasks go to `<history_archive>`, never deleted
+**Key decisions:**
+- Both local agents push directly to `main`
+- Claude.ai cloud agent = legacy/fallback only
+- Locking protocol: `<FILE_LOCK path="..."/>` in memory file
 
 </history_archive>

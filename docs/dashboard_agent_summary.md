@@ -1,13 +1,13 @@
 # Dashboard Agent Summary
 
-> Last updated: 2026-03-11 (Session 15 — Fill stopping criteria: slope-based detection, CSTR model target)
+> Last updated: 2026-03-15 (trimmed — session history archived to `docs/archive/dashboard_summary_history.md`)
 
 ## Current State
 
-The PC dashboard now includes **decay-aware CSTR calibration** for system volume,
-O3 decay rate, and dead volume estimation.  The CSTR model uses fundamental
+The PC dashboard includes **decay-aware CSTR calibration** for system volume,
+O3 decay rate, and dead volume estimation. The CSTR model uses fundamental
 parameters (V, k_d, V_dead) that generalise across flow rates and air compressor
-configurations.  The K constant has been reconciled to 20°C reference across
+configurations. The K constant has been reconciled to 20°C reference across
 ESP32 and dashboard.
 
 | Property | Value |
@@ -19,35 +19,7 @@ ESP32 and dashboard.
 | Run command | `.venv\Scripts\python.exe Interfaces\PC\blocksi_dashboard.py [--port 5000]` |
 | UI port | http://localhost:8080 |
 
-## Agent Model (as of 2026-03-10)  `[DECIDED]`
-
-Development uses **two AI agents**: VS Code Copilot (local, pushes to `main`) and
-Claude Code (cloud, pushes to `claude/*` branches merged by Copilot). Either agent
-may work in any area of the codebase. See `collaboration_protocol.md` for the full
-branch workflow. Both this summary and `esp32_agent_summary.md` are startup docs for
-new sessions.
-
 ## Architecture: "ESP32 = Arms, PC = Brains"  `[IMPLEMENTED]`
-
-**Calibration** — single-command protocol with optional random phase:
-```
-  PC → CMD,calibrate,flow=4.0,air_comp=0,random=5,22,38,...  (random optional)
-  ESP32 → RSP,OK,calibrate,running,steps=233,flow=4.0
-  ESP32 → SEQ,calibrate,RELAY,...
-  ESP32 → SEQ,calibrate,STARTED,steps=233,flow=4.0
-  ESP32 → SEQ,calibrate,SAMPLE,...  (per 106-H sample ~2.5s)
-  ESP32 → SEQ,calibrate,COMPLETE,...
-```
-
-**Validation** — recipe protocol:
-```
-  PC → CMD,sequence_start,validate,<params>
-  PC → CMD,seq_step,<idx>,<pwr>,<hold>,<phase>  (× N steps)
-  PC → CMD,seq_prompt,<before>,<id>,<text>       (× M prompts)
-  PC → CMD,seq_run
-  ESP32 → SEQ,validate,SAMPLE,...  (per 106-H sample ~2.5s)
-  ESP32 → SEQ,validate,COMPLETE,...
-```
 
 **Key responsibilities**:
 - **Calibration pattern owned by ESP32** — fixed 203-step sweep
@@ -55,25 +27,23 @@ new sessions.
 - **PC does ALL analysis** — statistics, pass/fail, model fitting, CSV saving
 - **ESP32 does NO analysis** — no mean/std, no model queries, no pass/fail
 
+Detailed protocol flows: see `docs/reference/sequences.md`
+
 ## Recipe Generators  `[IMPLEMENTED]`
 
 ### Calibration
-- **Single command**: `CMD,calibrate,flow=<lpm>,air_comp=<0|1>[,random=<p1,...>]` — ESP32 builds steps internally
-- **Random phase**: PC generates `N` stratified levels, arranged ascending then descending (mountain shape, minimises pot travel), 20 samples per level.  Sent as `random=p1,p2,...` in args.
-- **Air compressor**: `air_comp=` applies to ALL phases (baseline, sweeps, random).  O2 concentrator gated by flow>0.
-- **Validation block**: If LPM=0 AND air_comp=0, GUI shows error and blocks start.
-- **Step total**: `203 + 2*N` (N unique levels visited twice)
-- **Dashboard sends**: `cmd_sequence_start("calibrate", flow=lpm, num_random=N, air_comp=bool)`
+- **Single command**: `CMD,calibrate,flow=<lpm>,air_comp=<0|1>[,random=<p1,...>]`
+- **Random phase**: N stratified levels, mountain shape, 20 samples/level
+- **Step total**: `203 + 2*N`
 
 ### Validation (`generate_val_recipe`)
 - 5 steps: baseline, spot_low (~33%), spot_high (~66%), target, cooldown
 - 2 prompts: `check_flow` (before step 0), `check_route` (before step 1)
-- PC-side analysis: `_analyze_validation()` computes mean/std/CV, baseline check, spot correlation, target accuracy, pass/fail
 
 ### Validation Pass/Fail Criteria (PC-computed)
 | Check | Criterion |
 |-------|-----------|
-| Baseline | Advisory only — warning dialog if > 0.01 %vol at start; not a hard gate |
+| Baseline | Advisory only — warning dialog if > 0.01 %vol |
 | Spot correlation | Within 0.15 %vol or 15% relative of model |
 | Target accuracy | Mean within 10% relative of prediction |
 | Target stability | CV < 5% |
@@ -87,18 +57,6 @@ new sessions.
 | `STATE,...` | `_handle_state` | Reconnect sync — relay/power/flow state |
 | `SEQ,...` | `_handle_seq` | Routes by action: STARTED, RELAY, STATUS, STEP, SAMPLE, PROMPT, COMPLETE, ABORTED |
 
-### SEQ action handling:
-| Action | Dashboard response |
-|--------|-------------------|
-| `STARTED` | Enter sequence mode, set step total, notify |
-| `RELAY` | Update relay state (`S.relay_*`), set phase to `relay_setup` |
-| `STATUS` | Handle `relay_stabilizing` → set phase to `stabilizing` |
-| `STEP` | Update phase, power, progress, parse optional `air_comp` field |
-| `SAMPLE` | Append to cal_samples or val_samples (includes `air_comp`) |
-| `PROMPT` | Set pending_prompt_id/text → tick opens modal dialog |
-| `COMPLETE` | Run post-analysis (cal: save CSV, val: compute stats), clear sequence state, **cleanup: power=0, all relays off** |
-| `ABORTED` | Clear sequence state, notify, **cleanup: power=0, all relays off** |
-
 ## SystemState Key Fields  `[IMPLEMENTED]`
 
 ```python
@@ -106,218 +64,55 @@ new sessions.
 sequence_active: bool     # True during any sequence
 seq_type: str             # "calibrate", "validate", etc.
 seq_phase: str            # Current step's phase label
-seq_progress: float       # 0-100 (step_idx / step_total * 100)
-seq_elapsed: float        # Seconds
+seq_progress: float       # 0-100
 seq_power: float          # Power target at current step
 seq_step_idx: int         # Current step index
 seq_step_total: int       # Total steps in recipe
 
-# Prompt (interactive sequences)
-pending_prompt_id: str    # e.g., "check_flow", "check_route"
-pending_prompt_text: str  # ESP32's fallback text
-
 # Calibration observer
 cal_samples: list[dict]   # From SEQ,calibrate,SAMPLE,...
 cal_lpm: float            # Flow from recipe params
-cal_file: str             # Saved filename after COMPLETE
 
 # Validation observer
 val_power: float          # Target power from recipe
 val_lpm: float            # Flow from recipe params
 val_samples: list[dict]   # From SEQ,validate,SAMPLE,...
-val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct, passed, etc.
+val_result: dict          # PC-computed pass/fail results
 ```
 
 ## Command Helpers  `[IMPLEMENTED]`
 
 | Function | Sends | Notes |
 |----------|-------|-------|
-| `cmd_sequence_start(type, **kwargs)` | For calibrate: builds stratified random levels, sends `CMD,calibrate,flow=X,air_comp=Y,random=...`. For validate: full recipe protocol | |
-| `cmd_sequence_abort([reason])` | `CMD,sequence_abort[,reason]` | Primary abort command (no cleanup) |
-| `cmd_sequence_stop()` | abort + `_sequence_cleanup` | Full abort with power=0 + all relays off |
-| `_safe_standby()` | power=0, ozone_gen OFF, o2_conc OFF, air_comp OFF | **Unconditional** — no guards, always executes |
-| `_sequence_cleanup(source)` | Clears seq_confirmed, always calls `_safe_standby()` | Replaces old guarded pattern |
-| `cmd_sequence_confirm()` | `CMD,sequence_confirm` | |
+| `cmd_sequence_start(type, **kwargs)` | Calibrate or validate protocol | |
+| `cmd_sequence_stop()` | abort + `_sequence_cleanup` | Full abort with power=0 + relays off |
+| `_safe_standby()` | power=0, all relays OFF | **Unconditional** — no guards |
 | `cmd_emergency_stop()` | abort + `_safe_standby()` | Always active |
 
 ## UI Layout (4 tabs)  `[IMPLEMENTED]`
 
 ### Sidebar (Left Drawer, 240px)
-- Connection badge (green steady / red blink)
-- Relay toggle buttons (Air / O2 / O3) — locked during sequences
-- O2 LPM input — locked during sequences
-- 5 sensor readings: Flow LPM, Vessel O3, Room O3, Vessel Temp, Cell Temp — single compact card with dense rows
-
-### Sequence Banner (top of page, hidden when no sequence)
-- Amber bar with phase-aware text:
-  - `starting`: "CALIBRATE — Starting..."
-  - `relay_setup`: "CALIBRATE — Enabling relays..."
-  - `stabilizing`: "CALIBRATE — Equipment stabilizing... (~3s warm-up)"
-  - Normal phases: "CALIBRATE — Step 45/203 — Sweep Up"
-- Progress bar, elapsed time, ABORT button
-
-### Prompt Dialog (modal)
-- Maps prompt IDs to rich content: `check_flow`, `check_route`, plus legacy `prompt_vessel`, `prompt_direct`
-- Confirm → `CMD,sequence_confirm`, Abort → `CMD,sequence_abort`
+- Connection badge, relay toggles, O2 LPM input, 5 sensor readings (compact card)
 
 ### Power Tab (3 expansions)
-1. **Power Control**: Slider, presets, curve (Plotly), linked settings, E-STOP
-2. **Calibration**: LPM input | # Rnd Lvls input | Air ON toggle | Start/Stop, 4 phase cards (Baseline, Sweep Up, Sweep Down, Random), progress, ECharts scatter (Sweep Up blue + Sweep Down orange + Random green), file browser, Model Fitting section
-3. **Validation**: Power%/LPM inputs, Validate button, pass/fail result card (green passed / amber marginal / red failed with deviation + CV), ECharts O3 line chart
+1. **Power Control**: Slider, presets, Plotly curve, E-STOP
+2. **Calibration**: LPM/Random/Air inputs, phase cards, ECharts scatter, model fitting
+3. **Validation**: Power%/LPM inputs, pass/fail result card, ECharts O3 chart
 
 ### Telemetry Tab
 - ECharts: O3+Room, Power+Temp (with dataZoom), raw data table, CSV export
 
 ### Debug Tab
-- Manual command input, system state JSON dump, colored log (9 categories)
+- Manual command input, system state JSON dump, colored log
 
 ### Settings Tab
 - Notification level selector
 
-## What Changed This Session (Session 13b)
-
-### `_notify` Background-Task Safety  `[IMPLEMENTED]`
-- Added `_notify_queue: deque[tuple[str, str]]` at module level.
-- `_notify()` now wraps `ui.notify()` in `try/except RuntimeError`; if called from a background `asyncio.create_task` (no NiceGUI slot context), appends to queue instead of crashing.
-- `_tick_inner()` drains `_notify_queue` at the start of every 1s tick cycle, which always has the correct NiceGUI slot context.
-- **Fixes**: `_start_fill_evac` sequence halting immediately after baseline collection (crash on first `_notify()` call inside background task).
-
-### Validation Certificate (PASS/FAIL filename + pre-flight check)  `[IMPLEMENTED]`
-- `_save_val_csv()`: now accepts `passed: bool`; appends `_PASS` or `_FAIL` before `.csv` in filename.  File naming: `{YYYY-MM-DD}_{HHMMSS}_Validation_{pwr}pct_{LPM}Lpm_PASS.csv`.
-- Sequence handler: `_analyze_validation()` now runs **before** `_save_val_csv()` so the result is known when saving.
-- `_find_valid_cert(power_pct, flow_lpm, max_age_h=24) -> str | None`: scans `VALIDATION_DIR` for matching `_PASS.csv` files, parses datetime from filename prefix, returns newest path younger than `max_age_h` hours (or `None`).
-- `_start_fill_seq` (CSTR Calibration "Start" button): calls `_find_valid_cert(100, lpm)` before launching the sequence.  If no cert, shows a `ui.dialog` with explanation + "Run Validation" button (pre-fills val inputs to 100% / selected LPM and calls `cmd_sequence_start("validate", ...)`).
-
-## What Changed This Session (Session 13)
-
-### Backfill-Active Stuck Fix (ROOT CAUSE for frozen sidebar + stuck green dot)  `[IMPLEMENTED]`
-- **Root cause**: `S.backfill_active` could get stuck `True` if TCP dropped during backfill or ESP32 reconnected without cached data (skipping `BACKFILL_START`/`BACKFILL_END` entirely). When stuck, `_dispatch()` routed all DATA to `data_buf` (ECharts worked) but skipped `apply_telemetry()` — leaving `S.vessel_o3_pct`, `S.power_actual_pct`, etc. at zero → sidebar cards frozen, green dot at origin.
-- **Fixes**: (1) Reset `backfill_active/expected/received` in `_on_connect()` after `S.connected = True`; (2) Reset in disconnect `finally` block; (3) Added `backfill_start_time` field + 30s safety timeout in `_tick_inner()` that force-clears the flag with a warning log.
-
-### Power-O3 Chart: Static Curve + Dynamic Markers  `[IMPLEMENTED]`
-- `_make_power_fig()` restructured to ALWAYS create exactly 4 traces in fixed order: [0] model curve, [1] CI band (invisible placeholder if no CI data), [2] target ring, [3] actual dot. Previously, CI band was conditionally added, making trace indices variable.
-- New `_restyle_markers()` function uses `ui.run_javascript()` → `Plotly.restyle()` to update only traces 2 (ring) and 3 (dot) with current S values. Avoids full figure rebuild on every 1s tick.
-- `_tick_inner()` now calls `_restyle_markers()` instead of `_update_power_curve()`. Full rebuild (`_update_power_curve()`) still called by LPM changes, model re-fit, and model load.
-
-### CI Band Opacity Increase  `[IMPLEMENTED]`
-- `fillcolor` changed from `rgba(65,105,225,0.15)` to `rgba(65,105,225,0.25)` for better visibility. The ±1σ band is narrow (~0.005-0.009 %vol) and was barely visible at 15% opacity.
-
-### Compact Sidebar Cards  `[IMPLEMENTED]`
-- Replaced 5 individual `ui.card` elements (each with `text-h5` value labels requiring scrolling) with a single compact card using dense rows and `text-subtitle1 text-weight-medium` sizing.
-- All 5 readings now visible without scrolling in the 240px sidebar.
-
-### Decay-Aware CSTR Model  `[IMPLEMENTED]`
-- `fill_model.py`: Complete rewrite — `CSTRModel` dataclass replaces `FillModel`, fits `(C_ss, τ_eff, t_d)` as free parameters with C_in from power model, back-calculates `V`, `k_d`, `V_dead`
-- `fit_fill_curve()`: Now returns `(c_ss, tau_eff, t_delay, r_squared, rmse)` — C_ss is a free parameter, not fixed to C_in
-- `fit_cstr_model()`: Takes single combined CSV (with `phase` column), splits into fill/evac, fits both, cross-checks k_d from evac
-- Evac fit provides `k_d_evac = 1/τ_drain - Q/V` as cross-check against fill-derived k_d
-
-### Directory Restructure  `[IMPLEMENTED]`
-- `Models/Fill/` → `Models/CSTR/` (single `cstr_model.json`, no per-LPM files)
-- `Models/Decay/` removed (absorbed into CSTR model)
-- `Data/Fill/` + `Data/Evac/` → `Data/CSTR/` (single CSV with `phase` column)
-
-### Fill Termination Criterion  `[IMPLEMENTED]`
-- Old: 5 consecutive samples ≥ 95% of C_in (broken when decay suppresses C_ss below threshold)
-- New: 30 consecutive samples with `max - min < 0.05 %vol` (correctly detects any asymptote)
-
-### UI Updates  `[IMPLEMENTED]`
-- "Fill / Evac Calibration" → "CSTR Calibration" expansion
-- Removed air comp toggles from UI (calibration always without air comp for best k_d sensitivity)
-- O2 LPM max corrected from 15 to 5 (O2 concentrator limit)
-- Model status shows V, k_d, R² instead of LPM/O2% condition key
-
-### Sequence Changes  `[IMPLEMENTED]`
-- `_start_fill_evac()`: Air comp always OFF during calibration, single `cstr_samples` list, writes combined CSV
-- `_fit_and_save_cstr_model()`: Uses `fit_cstr_model()` with single CSV path
-- `SystemState`: `active_cstr_model`, `cstr_model_status`, `cstr_samples`, `cstr_csv_path` replace old fill/evac-split fields
-
-## What Changed in Session 12
-
-### Power Curve Live Update Fix  `[IMPLEMENTED]`
-- `_update_power_curve()`: uses `power_plot.figure = fig; power_plot.update()` — NiceGUI's `Element.update()` enqueues in outbox → websocket → client-side `update()` → `Plotly.react()`. Previously attempted `run_method('react')` which failed ("Method not found" — NiceGUI Vue component doesn't expose it). Reverted to the proper API.
-
-### Validation Baseline: Advisory Warning, Not Hard Gate  `[IMPLEMENTED]`
-- `_analyze_validation()`: `baseline_ok` removed from `result["passed"]` — baseline is informational only.
-- `_start_validation()`: pre-flight check added — if `S.vessel_o3_pct > 0.01` at start, shows a `ui.dialog` with current reading and "Cancel" / "Proceed anyway" buttons; uses `asyncio.Event` to await user choice before continuing. Protects against sensor warm-up drift without hard-failing valid runs.
-
-### ±1σ Confidence Band on Power-O3 Curve  `[IMPLEMENTED]`
-- `PowerO3Model` dataclass: added `ci_power: list[float]` and `ci_sigma: list[float]` fields (`default_factory=list`).
-- `fit_sigmoid_model()`: after fitting, computes `_sigmoid_jacobian()` (partial derivatives w.r.t. L, k, P0, b), then `var_curve = einsum('ni,ij,nj->n', J, pcov, J)` → `ci_sigma = sqrt(max(var_curve, 0))`. Band widens at the steep transition (k, P0 uncertainty dominates) and narrows at the tails — correct treatment for nonlinear least squares.
-- Stored as 101-point grids in the model JSON; old JSONs without these fields default to empty lists on load (backward compatible).
-- `load_model()`: hardened to filter unknown JSON keys against `__dataclass_fields__` — prevents `TypeError` on future schema additions.
-- `_make_power_fig()`: if `S.active_model.ci_sigma` is non-empty, adds a `fill="toself"` Plotly trace at `±1σ` in translucent royal blue (`rgba(65,105,225,0.15)`). Absent on fallback (piecewise) model.
-
-### Validation Result Card Simplified  `[IMPLEMENTED]`
-- `val_result_title.text` changed from `"{status} — {dev:.1f}% deviation ({ns}/{nt} stable samples)"` to `"{status} — {dev:.1f}% deviation"` — the sample count was confusing (it counted only target-phase stable samples out of all-phases total).
-
-## What Changed in Session 10
-
-### Random Phase + Air Toggle  `[IMPLEMENTED]`
-- `_start_calibration()`: generates stratified random levels (N windows, one uniform sample each), arranged ascending+descending.  Builds `random=p1,p2,...` arg.
-- GUI adds `cal_rnd_input` (# Rnd Lvls, 0-50, default 15) and `cal_air_toggle` (Air ON switch) adjacent to `cal_lpm_input`
-- Both new inputs added to sequence lockable list
-- `O2 LPM` min lowered to 0.0 (air-only calibration support)
-- Flow validation: LPM=0 + air_comp=0 → negative notification, start blocked
-- `cal_step_cards` extended with `"random"` entry; ECharts scatter extended with green "Random" series
-- `S.seq_step_total` set to `203 + 2*N` dynamically
-- Phase descriptions updated for `"random"` and `"relay_setup"` (now just "Enabling relays")
-
-### Safe Standby  `[IMPLEMENTED]`
-- Added `async def _safe_standby()`: unconditionally sets power=0, all relays off.  No `seq_confirmed` guard.
-- `_sequence_cleanup()` rewritten to always call `_safe_standby()`.  The old `if not S.seq_confirmed and source != 'stop': return` guard is removed.
-- This fixes the dangerous behavior where calibration could exit with power at 86% and relays on.
-
-### DFRobot I2C Fix (ESP32)  `[IMPLEMENTED]`
-- `blocksi_pins.h`: I2C speed 400kHz → 100kHz
-- `dfrobot_ozone.c`: `sensor_read_reg()` rewritten with separate transactions + 100ms gap, `dfrobot_o3_is_present()` uses write-only probe
-- `peripherals.c`: `.sample_interval_ms = 0` disables driver auto-sample task
-- Room O3 now reads real values instead of -1.000 ppm
-
-### Single-Agent Model  `[DECIDED]`
-- collaboration_protocol.md updated: one agent handles both ESP32 and dashboard
-- Both summaries and interface_contract.md now updated together at end of session
-
-### What Changed in Session 9
-- Sigmoid model fitting system (`Interfaces/PC/analysis/power_o3_model.py`)
-- Dashboard integration: `predict_o3_from_power/predict_power_from_o3/generate_power_curve` dispatch to `S.active_model`
-- `SystemState.active_model`, `model_status`, `load_model_for_current_condition()`
-- Model Fitting UI in Calibration expansion with per-condition Fit Model buttons
-- Bug fixes: reconnection race, dispatch exception safety, seq_confirmed reset, COMPLETE/ABORTED deadlock, power rollback, time_sync RSP suppression
-
-### What Changed in Session 14
-- **CSTR Power Watchdog**: Fill loop now monitors `power_actual_pct` every sample after a 5-sample grace period. If motor pot drifts below `FILL_POWER_MIN_PCT` (80%), auto-resends `cmd_set_power(100)` up to `FILL_POWER_RESEND_MAX` (3) times. Aborts with RuntimeError if resends exhausted. O3 ring buffer cleared after resend (drift readings invalidate steady-state window).
-- **`power_actual_pct` in CSTR CSV**: `_snap()` now records both `power_pct` (target) and `power_actual_pct` (ESP32 ADC-read position) in every sample. `_write_cstr_csv()` header updated with `power_actual_pct` column for post-mortem visibility.
-- **Fill progress logging**: `pwr_act=` appended to every 10th fill sample log line for monitoring.
-- **Root cause analysis**: Runs 1-3 caused by deferred cleanup race (fixed in commit `a27c224`). Run 4 caused by motor pot physical drift: wiper returned from 90.8% to 0% within ~100s despite dashboard holding target at 100%, relays confirmed ON. This is a hardware/firmware issue — the power watchdog is the dashboard-side mitigation.
-- **New constants**: `FILL_POWER_GRACE_SAMPLES = 5`, `FILL_POWER_RESEND_MAX = 3`
-
-### What Changed in Session 15
-- **Evac-derived fill stopping**: Replaced range-based steady-state check with slope+range criterion grounded in measured evac asymptotic behaviour. The 2026-03-10 CSTR run's evac data shows |slope| ≈ 0.0003 at convergence (45-sample window, O3 0.02→0.01%). Fill's premature-stop slope was 0.00184 — 6× above threshold. `FILL_STEADY_SLOPE = 0.0003`, `FILL_STEADY_COUNT = 45`, `FILL_STEADY_RANGE = 0.08` (sanity bound). Removed `FILL_MIN_SAMPLES` (redundant — 45-sample window is natural guard).
-- **Validation-measured target O3**: `target_o3` now uses `mean(o3_pct)` from the most recent 100% validation PASS CSV (direct-to-sensor, held at steady-state). Falls back to sigmoid prediction only if no validation cert exists. Avoids circular model reasoning.
-- **Updated constants**: `FILL_STEADY_COUNT` 30→45, `FILL_STEADY_RANGE` 0.05→0.08, `FILL_STEADY_SLOPE = 0.0003` (evac-derived), removed `FILL_MIN_SAMPLES`
-
-### What Changed in Session 11
-- **K constant reconciliation**: `O3_MASS_FLOW_K = 0.3327` (20°C, V_m=24.04 L/mol)
-- **Fill/Evac analysis module**: `Interfaces/PC/analysis/fill_model.py` — FillModel dataclass, CSTR curves, fitting, JSON persistence
-- **Fill/Evac sequence coroutine**: `_start_fill_evac()` — PC-driven async coroutine with baseline→fill→transition→evac phases
-- **Fill/Evac UI expansion**: In Power tab — O2 LPM input, air comp toggles (fill/evac), progress bar, live chart, fit model button
-- **`_fit_and_save_fill_model()`**: One-click CSTR model fitting from most recent fill/evac CSVs
-- **SystemState fill fields**: `active_fill_model`, `fill_model_status`, `fill_active`, `fill_phase`, `fill_samples`, `evac_samples`, etc.
-- **Fill model auto-load**: `load_fill_model_for_current_condition()` at startup and after fitting
-- **ESP32 dosimetry defaults**: `dosimetry.c` vessel=11.3L, material=7.3L, flow=4.0 LPM
-- **Data directories**: `Data/Fill/`, `Data/Evac/` with .gitkeep
-- **Telemetry improvements** (sub-session): Per-connection stream naming, time-sync safety on disconnect, data cache + backfill protocol
-- **Documentation**: Gas path topology, fill/evac protocol, dosimetry strategy, batch plans in interface_contract.md and decisions_log.md
-
 ## Pending Work
 
-- `[IMPLEMENTED]` **Power→O3 model fitting**: 4-parameter sigmoid model, fitted per (LPM, O2%) condition, stored in `Models/O3Power/` as JSON. Analysis module at `Interfaces/PC/analysis/`.
-- `[IMPLEMENTED]` **Decay-aware CSTR calibration**: PC-driven fill/evacuation sequence with first-order O3 decay model. Fits V (volume), k_d (decay rate), V_dead (dead volume) — parameters generalise across flow rates. Stored in `Models/CSTR/cstr_model.json`. Analysis module at `Interfaces/PC/analysis/fill_model.py`.
-- `[PROPOSED]` **Historical data viewer**: Load and plot old CSV files from `Data/Telemetry/`.
-- `[PROPOSED]` **Sterilization batch**: Three-phase batch (Fill→Hold→Evac) with real-time dosimetry. Documented in interface_contract.md, implementation deferred.
-- `[IMPLEMENTED]` **Validation certificate**: PASS/FAIL suffix on CSV filename; `_find_valid_cert()` scans for valid certs; CSTR calibration requires a 100% PASS cert within 24h before starting.
-- `[PROPOSED]` **Migrate power curve to ECharts**: Last remaining Plotly chart.
+- `[PROPOSED]` **Historical data viewer**: Load and plot old CSV files from `Data/Telemetry/`
+- `[PROPOSED]` **Sterilization batch**: Fill→Hold→Evac with real-time dosimetry
+- `[PROPOSED]` **Migrate power curve to ECharts**: Last remaining Plotly chart
 
 ## Data Management  `[IMPLEMENTED]`
 
@@ -326,36 +121,25 @@ val_result: dict          # PC-computed: mean_o3, std_o3, deviation_pct, cv_pct,
 Data/
   Telemetry/       — Per-connection stream CSVs
   Calibration/     — Power-O3 calibration CSVs
-  Validation/      — Validation run CSVs
-  CSTR/            — CSTR calibration CSVs (combined baseline+fill+evac)
+  Validation/      — Validation run CSVs (suffix _PASS or _FAIL)
+  CSTR/            — CSTR calibration CSVs (combined, phase column)
   Sterilization/   — Future
-Models/            — Git-tracked fitted models
+Models/
   O3Power/         — Power→O3 sigmoid models (JSON, per LPM)
   CSTR/            — Universal CSTR model (single cstr_model.json)
 ```
 
 ### File Naming Convention
 - Calibration: `{YYYY-MM-DD}_{HHMMSS}_PowerO3Cal_{LPM}Lpm_{O2}O2.csv`
-- Telemetry: `{YYYY-MM-DD}_{HHMMSS}_Stream.csv` (per-connection session, not daily)
+- Telemetry: `{YYYY-MM-DD}_{HHMMSS}_Stream.csv`
 - Validation: `{YYYY-MM-DD}_{HHMMSS}_Validation_{pwr}pct_{LPM}Lpm_PASS.csv` / `_FAIL.csv`
-- CSTR: `{YYYY-MM-DD}_{HHMMSS}_CSTR_{LPM}Lpm.csv` (single file with `phase` column)
-- CSTR model: `cstr_model.json` (universal — one file, all conditions)
-- O2% = weighted average: `(F_conc × 95 + F_air × 21) / (F_conc + F_air)`, rounded to int
-
-### O2% Calculation
-```python
-O2_CONC_PCT = 95       # O2 concentrator purity
-AIR_COMP_O2_PCT = 21   # Atmospheric O2
-AIR_COMP_LPM = 10.0    # Air compressor flow
-compute_effective_o2_pct(flow_lpm, air_comp_on) → int
-```
+- CSTR: `{YYYY-MM-DD}_{HHMMSS}_CSTR_{LPM}Lpm.csv`
 
 ## Known Caveats
 
-1. **Venv required**: Must use `.venv\Scripts\python.exe`, not system Python
+1. **Venv required**: Must use `.venv\Scripts\python.exe`
 2. **NiceGUI**: `element.visible` toggles sequence banner, skeleton, result card
-3. **Quasar disable pattern**: `.props("disable")` / `.props(remove="disable")`
-4. **Recipe sending speed**: Validation steps still sent via raw TCP (fire-and-forget) with 5ms yields.  Calibration uses single command — no buffering issues.
-5. **ECharts dark mode**: All ECharts have `darkMode: True`
-6. **Plotly retained**: Power curve still uses `ui.plotly` (single Plotly chart remaining)
-7. **Random list length**: With N=50 levels, `random=` arg is ~400 chars.  `RX_LINE_SIZE` on ESP32 is 512 bytes (raised from 128 to accommodate this).
+3. **Recipe sending speed**: Validation steps sent via raw TCP with 5ms yields
+4. **ECharts dark mode**: All ECharts have `darkMode: True`
+5. **Plotly retained**: Power curve still uses `ui.plotly` (single Plotly chart)
+6. **Random list length**: N=50 → ~400 chars; `RX_LINE_SIZE` on ESP32 is 512 bytes

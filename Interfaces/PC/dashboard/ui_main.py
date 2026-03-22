@@ -1022,7 +1022,10 @@ async def index():
                         _substrate_cfg = json.load(_f)
                 except Exception:
                     pass
-                _presets = _substrate_cfg.get("presets", {})
+                _presets = {
+                    k: v for k, v in _substrate_cfg.get("presets", {}).items()
+                    if isinstance(v, (int, float))
+                }
                 if _presets:
                     with ui.card().classes("q-pa-xs q-mb-sm").props("flat bordered"):
                         with ui.row().classes("q-gutter-sm items-center"):

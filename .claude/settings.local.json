@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cp Interfaces/Data/CSTR/* Interfaces/Data/k_d_cal/)",
+      "Bash(rm -rf Interfaces/Data/CSTR)",
+      "Bash(cp Interfaces/Models/CSTR/* Interfaces/Models/cstr_k_d/)",
+      "Bash(rm -rf Interfaces/Models/CSTR)"
+    ]
+  }
+}

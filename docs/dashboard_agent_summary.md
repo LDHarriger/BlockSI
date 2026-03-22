@@ -1,6 +1,6 @@
 # Dashboard Agent Summary
 
-> Last updated: 2026-03-15 (trimmed — session history archived to `docs/archive/dashboard_summary_history.md`)
+> Last updated: 2026-03-22 (trimmed — session history archived to `docs/archive/dashboard_summary_history.md`)
 
 ## Current State
 
@@ -55,7 +55,7 @@ Detailed protocol flows: see `docs/reference/sequences.md`
 | `DATA,...` | `_dispatch` | Parse 17-field telemetry → state → data_buf → CSV |
 | `RSP,...` | `_handle_rsp` | Time sync, relay get, response queue |
 | `STATE,...` | `_handle_state` | Reconnect sync — relay/power/flow state |
-| `SEQ,...` | `_handle_seq` | Routes by action: STARTED, RELAY, STATUS, STEP, SAMPLE, PROMPT, COMPLETE, ABORTED |
+| `SEQ,...` | `_handle_seq` | Routes by action: STARTED, RELAY, STATUS, STEP, SAMPLE, PROMPT, COMPLETE, ABORTED. SAMPLE routes to `cal_samples`, `val_samples`, or `batch_samples` by type. |
 
 ## SystemState Key Fields  `[IMPLEMENTED]`
 
@@ -78,26 +78,46 @@ val_power: float          # Target power from recipe
 val_lpm: float            # Flow from recipe params
 val_samples: list[dict]   # From SEQ,validate,SAMPLE,...
 val_result: dict          # PC-computed pass/fail results
+
+# Batch (process_batch) observer
+batch_samples: list[dict] # From SEQ,process_batch,SAMPLE,...
+batch_dose_running: float # Live dose accumulation (mg/kg)
+batch_dose_target: float  # Target dose (mg/kg)
+batch_schedule: object    # DoseSchedule, if active
 ```
 
 ## Command Helpers  `[IMPLEMENTED]`
 
 | Function | Sends | Notes |
 |----------|-------|-------|
-| `cmd_sequence_start(type, **kwargs)` | Calibrate or validate protocol | |
+| `cmd_sequence_start(type, **kwargs)` | Dispatches: calibrate, validate, cstr_cal, k_abs_cal, process_batch | |
 | `cmd_sequence_stop()` | abort + `_sequence_cleanup` | Full abort with power=0 + relays off |
 | `_safe_standby()` | power=0, all relays OFF | **Unconditional** — no guards |
 | `cmd_emergency_stop()` | abort + `_safe_standby()` | Always active |
 
-## UI Layout (4 tabs)  `[IMPLEMENTED]`
+## UI Layout (7 tabs)  `[IMPLEMENTED]`
 
 ### Sidebar (Left Drawer, 240px)
 - Connection badge, relay toggles, O2 LPM input, 5 sensor readings (compact card)
 
-### Power Tab (3 expansions)
-1. **Power Control**: Slider, presets, Plotly curve, E-STOP
-2. **Calibration**: LPM/Random/Air inputs, phase cards, ECharts scatter, model fitting
-3. **Validation**: Power%/LPM inputs, pass/fail result card, ECharts O3 chart
+### Control Tab
+- Power slider, presets, Plotly curve, E-STOP
+
+### Calibration Tab
+1. **Power-O3 Calibration**: Rotameter prompt flow, random levels, ECharts scatter, model fitting
+2. **k_d Calibration**: Calibrated flow rate selector, fill/evac progress, EChart, CSTR model status
+3. **k_abs Calibration**: Substrate preset, flow rate selector, pre-flight checks, progress bar
+
+### Processing Tab  `[NEW — WP-4/5]`
+- Batch parameter form (flow, kg, dose, time, experiment type, substrate presets)
+- Dosing schedule preview (solve button)
+- Start/E-STOP buttons
+- Live monitoring: phase chip, elapsed time, dose progress bar
+- O3 concentration EChart (measured + C_target line)
+- O3 mass balance stacked EChart (produced/absorbed/decayed/evacuated)
+
+### Validation Tab
+- Power%/LPM inputs (calibrated flow rate dropdown), pass/fail result card, ECharts O3 chart
 
 ### Telemetry Tab
 - ECharts: O3+Room, Power+Temp (with dataZoom), raw data table, CSV export
@@ -108,10 +128,33 @@ val_result: dict          # PC-computed pass/fail results
 ### Settings Tab
 - Notification level selector
 
+## New Features (2026-03-22)
+
+### Dosimetry Solver (`dashboard/dosimetry.py`)
+- `DoseSchedule` — three-phase model (ramp/hold/evac) with solver
+- `DosimetryAccumulator` — float64 real-time per-sample tracking
+- Temperature-corrected K factor, divergence checking
+- `load_substrate_config()` — loads presets from `substrate_config.json`
+
+### Batch Sequence (`dashboard/batch_sequence.py`)
+- Hybrid resilience: loads ESP32 recipe + PC monitoring
+- Uses recipe protocol (`sequence_start` → `seq_step` → `seq_run`)
+- Per-sample dosimetry from DATA telemetry
+- Post-treatment prompts (inoculation, distribution)
+- Output: CSV + schedule JSON + dosimetry JSON + debug log
+
+### k_abs Calibration (`dashboard/k_abs_cal.py`)
+- 30-min fill/hold at 100% power with loaded substrate
+- Operator prompts for mixing screw and L-valve
+- Auto-fits 1-param and biphasic models with AIC/BIC
+
+### Flow Rate Overhaul (WP-7)
+- Power-O3 calibration uses rotameter prompt instead of LPM dropdown
+- All sequence flow selectors populated from `list_calibrated_flow_rates()`
+
 ## Pending Work
 
 - `[PROPOSED]` **Historical data viewer**: Load and plot old CSV files from `Data/Telemetry/`
-- `[PROPOSED]` **Sterilization batch**: Fill→Hold→Evac with real-time dosimetry
 - `[PROPOSED]` **Migrate power curve to ECharts**: Last remaining Plotly chart
 
 ## Data Management  `[IMPLEMENTED]`
@@ -122,11 +165,13 @@ Data/
   Telemetry/       — Per-connection stream CSVs
   Calibration/     — Power-O3 calibration CSVs
   Validation/      — Validation run CSVs (suffix _PASS or _FAIL)
-  CSTR/            — CSTR calibration CSVs (combined, phase column)
-  Sterilization/   — Future
+  k_d_cal/         — k_d calibration CSVs
+  k_abs_cal/       — k_abs calibration CSVs
+  Batch/           — Batch output dirs (ExperimentType/BatchID/)
 Models/
   O3Power/         — Power→O3 sigmoid models (JSON, per LPM)
-  CSTR/            — Universal CSTR model (single cstr_model.json)
+  cstr_k_d/        — k_d model JSONs (timestamped)
+  cstr_k_abs/      — k_abs model JSONs (timestamped)
 ```
 
 ### File Naming Convention

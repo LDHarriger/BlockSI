@@ -12,7 +12,8 @@ import pandas as pd
 
 from dashboard.state import (
     S, log,
-    TELEMETRY_DIR, CALIBRATION_DIR, VALIDATION_DIR,
+    TELEMETRY_DIR, CALIBRATION_DIR, VALIDATION_DIR, MODEL_DIR,
+    CSTR_DATA_DIR, CSTR_MODEL_DIR,
     O2_CONC_PCT,
 )
 
@@ -141,3 +142,112 @@ def _find_valid_cert(power_pct: float, flow_lpm: float,
             if best is None or ts > best[0]:
                 best = (ts, os.path.join(VALIDATION_DIR, name))
     return best[1] if best else None
+
+
+# =============================================================================
+# WP-6: Calibration enforcement helpers
+# =============================================================================
+def _find_valid_calibration(
+    flow_lpm: float,
+    max_age_h: float = 336.0,  # 2 weeks default
+    lpm_tolerance: float = 0.25,
+) -> "str | None":
+    """Return path to the most-recent power-O3 calibration CSV matching flow_lpm.
+
+    Scans Data/Calibration/ for calibration CSVs within ±lpm_tolerance of the
+    requested flow rate, newer than max_age_h.
+    """
+    cutoff = datetime.now().timestamp() - max_age_h * 3600
+    best: tuple[float, str] | None = None
+    try:
+        entries = os.listdir(CALIBRATION_DIR)
+    except FileNotFoundError:
+        return None
+    for name in entries:
+        if not name.endswith(".csv") or "PowerO3Cal" not in name:
+            continue
+        m_lpm = re.search(r"_(\d+(?:\.\d+)?)Lpm", name)
+        if not m_lpm:
+            continue
+        cal_lpm = float(m_lpm.group(1))
+        if abs(cal_lpm - flow_lpm) > lpm_tolerance:
+            continue
+        m_ts = re.match(r"^(\d{4}-\d{2}-\d{2}_\d{6})", name)
+        if not m_ts:
+            continue
+        try:
+            dt = datetime.strptime(m_ts.group(1), "%Y-%m-%d_%H%M%S")
+        except ValueError:
+            continue
+        ts = dt.timestamp()
+        if ts >= cutoff:
+            if best is None or ts > best[0]:
+                best = (ts, os.path.join(CALIBRATION_DIR, name))
+    return best[1] if best else None
+
+
+def _find_valid_calibration_model(
+    flow_lpm: float,
+    max_age_h: float = 336.0,
+    lpm_tolerance: float = 0.25,
+) -> "str | None":
+    """Return path to the most-recent power-O3 model JSON matching flow_lpm.
+
+    Scans Models/O3Power/ for model JSONs within ±lpm_tolerance.
+    """
+    import json as _json
+    cutoff = datetime.now().timestamp() - max_age_h * 3600
+    best: tuple[float, str] | None = None
+    try:
+        entries = os.listdir(MODEL_DIR)
+    except FileNotFoundError:
+        return None
+    for name in sorted(entries, reverse=True):
+        if not name.endswith(".json"):
+            continue
+        fpath = os.path.join(MODEL_DIR, name)
+        try:
+            with open(fpath) as f:
+                data = _json.load(f)
+            model_lpm = data.get("flow_lpm", 0)
+            if abs(model_lpm - flow_lpm) > lpm_tolerance:
+                continue
+            fitted_at = data.get("fitted_at", "")
+            if fitted_at:
+                dt = datetime.fromisoformat(fitted_at)
+                ts = dt.timestamp()
+                if ts >= cutoff:
+                    if best is None or ts > best[0]:
+                        best = (ts, fpath)
+        except Exception:
+            continue
+    return best[1] if best else None
+
+
+# =============================================================================
+# WP-7: Flow rate helpers
+# =============================================================================
+def list_calibrated_flow_rates() -> list[float]:
+    """Return sorted list of flow rates that have valid power-O3 models.
+
+    Scans Models/O3Power/ for model JSONs and extracts their flow rate values.
+    """
+    import json as _json
+    rates: set[float] = set()
+    try:
+        entries = os.listdir(MODEL_DIR)
+    except FileNotFoundError:
+        return []
+    for name in entries:
+        if not name.endswith(".json"):
+            continue
+        fpath = os.path.join(MODEL_DIR, name)
+        try:
+            with open(fpath) as f:
+                data = _json.load(f)
+            lpm = data.get("flow_lpm")
+            if lpm is not None and lpm > 0:
+                rates.add(float(lpm))
+        except Exception:
+            continue
+    return sorted(rates)

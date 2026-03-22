@@ -1,0 +1,26 @@
+{
+  "presets": {
+    "kg_oak": 1.500,
+    "kg_soyhull": 1.500,
+    "kg_water_loading": 3.750,
+    "kg_liquid_culture": 0.750,
+    "_note_liquid_culture": "0.75 kg is preliminary — revisit when finalizing inoculation protocol"
+  },
+  "process_defaults": {
+    "process_time_min": 30,
+    "air_comp_evac": true,
+    "air_comp_lpm": 7.5
+  },
+  "thresholds": {
+    "ramp_switch_fraction": 0.85,
+    "_note_ramp_switch": "Conservative to avoid overshoot. Revisit after collecting real transient data.",
+    "dose_divergence_recal_pct": 15,
+    "evac_threshold_pct": 0.01,
+    "evac_flush_duration_s": 300,
+    "baseline_max_o3_pct": 0.02
+  },
+  "calibration_freshness": {
+    "power_o3_max_age_h": 336,
+    "validation_max_age_h": 24
+  }
+}

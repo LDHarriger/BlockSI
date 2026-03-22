@@ -18,14 +18,14 @@ from dashboard.state import (
 from dashboard.data_io import csv_logger, _save_cal_csv, _save_val_csv
 from dashboard.validation import _analyze_validation
 
-# Forward reference: set by cstr_sequence module after import
+# Forward reference: set by k_d_cal module after import
 _cstr_debug_file_ref = None
 
 
 def _get_cstr_debug_file():
-    """Get the current CSTR debug file path (set by cstr_sequence module)."""
-    from dashboard import cstr_sequence
-    return cstr_sequence._cstr_debug_file
+    """Get the current CSTR debug file path (set by k_d_cal module)."""
+    from dashboard import k_d_cal
+    return k_d_cal._cstr_debug_file
 
 
 class TCPServer:
@@ -344,6 +344,8 @@ class TCPServer:
                         S.cal_samples.append(sample)
                     elif seq_type == "validate":
                         S.val_samples.append(sample)
+                    elif seq_type == "process_batch":
+                        S.batch_samples.append(sample)
                 except (ValueError, IndexError):
                     log(f"Bad SAMPLE: {line[:80]}", "error")
 

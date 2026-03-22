@@ -55,12 +55,16 @@ DATA_DIR = os.path.join(BASE_DIR, "Data")
 TELEMETRY_DIR = os.path.join(DATA_DIR, "Telemetry")
 CALIBRATION_DIR = os.path.join(DATA_DIR, "Calibration")
 VALIDATION_DIR = os.path.join(DATA_DIR, "Validation")
-CSTR_DATA_DIR = os.path.join(DATA_DIR, "CSTR")
+CSTR_DATA_DIR = os.path.join(DATA_DIR, "k_d_cal")
 MODEL_DIR = os.path.join(BASE_DIR, "Models", "O3Power")
-CSTR_MODEL_DIR = os.path.join(BASE_DIR, "Models", "CSTR")
+CSTR_MODEL_DIR = os.path.join(BASE_DIR, "Models", "cstr_k_d")
+K_ABS_DATA_DIR = os.path.join(DATA_DIR, "k_abs_cal")
+K_ABS_MODEL_DIR = os.path.join(BASE_DIR, "Models", "cstr_k_abs")
+BATCH_DATA_DIR = os.path.join(DATA_DIR, "Batch")
 
 for _d in (DATA_DIR, TELEMETRY_DIR, CALIBRATION_DIR, VALIDATION_DIR,
-           CSTR_DATA_DIR, MODEL_DIR, CSTR_MODEL_DIR):
+           CSTR_DATA_DIR, MODEL_DIR, CSTR_MODEL_DIR,
+           K_ABS_DATA_DIR, K_ABS_MODEL_DIR, BATCH_DATA_DIR):
     os.makedirs(_d, exist_ok=True)
 
 # Power model coefficients  (legacy fallback — O3_max = A/F + B)
@@ -119,6 +123,34 @@ PROMPT_CONTENT: dict[str, dict[str, str]] = {
             "Adjust the needle valve until the rotameter matches the vessel "
             "route flow.<br><br>"
             "Press <b>Confirm</b> when ready."
+        ),
+    },
+    "batch_vessel_cool": {
+        "title": "Vessel Cool-Down Check",
+        "icon": "thermostat",
+        "body": (
+            "Sterilization complete. Verify the vessel has cooled to a safe "
+            "temperature and O3 is below 0.01% vol before opening.<br><br>"
+            "Press <b>Confirm</b> when safe to proceed with inoculation."
+        ),
+    },
+    "batch_add_inoculant": {
+        "title": "Add Inoculant",
+        "icon": "science",
+        "body": (
+            "Open the vessel, add the prepared inoculant to the substrate, "
+            "and close the vessel securely.<br><br>"
+            "Press <b>Confirm</b> when done."
+        ),
+    },
+    "batch_distribute": {
+        "title": "Distribute & Label",
+        "icon": "inventory_2",
+        "body": (
+            "Mix the inoculated substrate thoroughly, distribute into bags "
+            "or containers, and label each with the Batch ID shown in the "
+            "dashboard.<br><br>"
+            "Press <b>Confirm</b> when distribution is complete."
         ),
     },
 }
@@ -251,6 +283,11 @@ class SystemState:
         self.cstr_csv_path: str = ""
         self.fill_target_o3: float = 0.0
         self.fill_lpm: float = DEFAULT_FLOW_LPM
+        # Batch (process_batch) sequence state
+        self.batch_samples: list[dict] = []
+        self.batch_dose_running: float = 0.0
+        self.batch_dose_target: float = 0.0
+        self.batch_schedule: object = None   # DoseSchedule, if active
 
     def load_model_for_current_condition(self) -> None:
         o2 = compute_effective_o2_pct(self.flow_lpm, self.relay_air_comp)

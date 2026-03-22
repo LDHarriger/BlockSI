@@ -71,8 +71,16 @@ async def cmd_sequence_start(seq_type: str, **kwargs) -> bool:
     elif seq_type == "validate":
         return await _start_validation(**kwargs)
     elif seq_type == "cstr_cal":
-        from dashboard.cstr_sequence import _start_fill_evac
+        from dashboard.k_d_cal import _start_fill_evac
         asyncio.create_task(_start_fill_evac(**kwargs))
+        return True
+    elif seq_type == "k_abs_cal":
+        from dashboard.k_abs_cal import _start_k_abs_cal
+        asyncio.create_task(_start_k_abs_cal(**kwargs))
+        return True
+    elif seq_type == "process_batch":
+        from dashboard.batch_sequence import _start_process_batch
+        asyncio.create_task(_start_process_batch(**kwargs))
         return True
     else:
         log(f"Unknown sequence type: {seq_type}", "error")
@@ -142,6 +150,7 @@ async def _start_calibration(**kwargs) -> bool:
 
 async def _start_validation(**kwargs) -> bool:
     from nicegui import ui
+    from dashboard.validation import generate_val_recipe
 
     power = int(kwargs.get("power", 75))
     flow = kwargs.get("flow", DEFAULT_FLOW_LPM)
@@ -200,6 +209,10 @@ async def _start_validation(**kwargs) -> bool:
             _notify("Validation cancelled by user", "warning")
             return False
 
+    # Generate the validation recipe on the PC side (Section 14)
+    recipe = generate_val_recipe(power)
+    total_hold = sum(h for _, _, h in recipe)
+
     S.seq_type = "validate"
     S.seq_phase = "starting"
     S.seq_progress = 0.0
@@ -207,21 +220,30 @@ async def _start_validation(**kwargs) -> bool:
     S.seq_start_time = 0.0
     S.seq_confirmed = False
     S.seq_step_idx = 0
-    S.seq_step_total = 5
+    S.seq_step_total = len(recipe)
     S.pending_prompt_id = ""
     S.pending_prompt_text = ""
     S.val_samples = []
     S.val_result = {}
     S.val_file = ""
 
+    # Encode recipe for ESP32: validate,flow=<f>,recipe=<p1>:<phase1>:<hold1>|...
+    recipe_str = "|".join(
+        f"{pwr}:{phase}:{hold}" for pwr, phase, hold in recipe
+    )
     resp = await tcp.send_command(
-        f"validate,power={power},flow={flow}", timeout=5.0
+        f"validate,flow={flow},recipe={recipe_str}", timeout=5.0
     )
     if resp and "OK" in resp:
         S.sequence_active = True
         S.seq_confirmed = True
         S.seq_start_time = time.time()
-        log(f"Validation running: power={power}%, flow={flow} LPM", "seq")
+        recipe_desc = " -> ".join(
+            f"{phase}({pwr}%x{hold})" for pwr, phase, hold in recipe
+        )
+        log(f"Validation running: P_target={power}%, flow={flow} LPM, "
+            f"{len(recipe)} steps / {total_hold} samples", "seq")
+        log(f"  Recipe: {recipe_desc}", "val")
         _notify("Validation started", "positive")
         return True
 

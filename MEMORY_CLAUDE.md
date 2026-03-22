@@ -1,19 +1,37 @@
 # MEMORY_CLAUDE.md — Claude_VSCode Agent Working Memory
 
 > Agent: Claude_VSCode (Claude Code VS Code extension)
-> Last updated: 2026-03-15
+> Last updated: 2026-03-22
 
 ---
 
 ## Active Locks
 
-*(none)*
+*(releasing all locks — handing off to Copilot)*
 
 ---
 
 ## Active Tasks
 
-*(none)*
+### 2026-03-22: process_batch Implementation Plan Execution (IN PROGRESS — HANDOFF)
+
+**Plan source**: `~/Downloads/DRAFT_process_batch_plan.md` (FINAL, approved)
+**Handoff doc**: `docs/cases/process_batch_handoff.md`
+
+**Work packages status**:
+- [x] **WP-1**: k_d Calibration Rewrite — DONE (renames, model rewrite, sequence rewrite)
+- [x] **WP-6**: Calibration Enforcement — DONE (backend functions in data_io.py)
+- [~] **WP-0**: WiFi Disconnect Audit — agent created `docs/cases/wifi_disconnect_audit.md`, NEEDS VERIFICATION
+- [~] **WP-2**: k_abs model file exists (`cstr_k_abs_model.py`), sequence file (`k_abs_cal.py`) NOT created
+- [~] **WP-3**: Dosimetry solver file exists (`dosimetry.py`), NEEDS REVIEW
+- [~] **WP-7**: Backend done (`list_calibrated_flow_rates()`), UI changes NOT done
+- [~] **WP-8**: Tab restructuring agent launched, CHECK if ui_main.py was modified
+- [~] **§14**: Validation update agent launched, CHECK if validation.py was modified
+- [ ] **WP-4**: process_batch Sequence — NOT STARTED (blocked by WP-0)
+- [ ] **WP-5**: Processing Tab UI — NOT STARTED (blocked by WP-4)
+- [ ] **WP-9**: User Documentation — NOT STARTED
+
+**UNCOMMITTED CHANGES**: All work is staged/unstaged, nothing committed yet.
 
 ---
 
@@ -27,42 +45,32 @@
 
 ## Pending (Awaiting User Input)
 
-- **Commit** — context engineering audit changes ready to stage and commit; user should review
+- **Review + Commit** — large changeset from process_batch implementation needs review before commit
+- **Copilot handoff** — see `docs/cases/process_batch_handoff.md` for detailed status
 
 ---
 
 <history_archive>
 
+### 2026-03-22: process_batch Plan Execution (partial)
+
+**Work done (Claude_VSCode)**:
+- WP-1: Renamed fill_model.py → cstr_k_d_model.py, cstr_sequence.py → k_d_cal.py, Data/CSTR → Data/k_d_cal, Models/CSTR → Models/cstr_k_d. Updated all imports. Rewrote model fitting (fixed V=9.27, V_dead=0.020, fit only k_d, multi-file support, timestamped JSON output). Rewrote sequence (computed fill duration, 5-min flush evac, dynamic dt).
+- WP-6: Added `_find_valid_calibration()`, `_find_valid_calibration_model()`, `list_calibrated_flow_rates()` to data_io.py.
+- Created `dashboard/substrate_config.json` with experimental presets and thresholds.
+- Launched background agents for WP-0, WP-2, WP-3, WP-8/§14 — results in codebase but unreviewed.
+
 ### 2026-03-15: Context Engineering Audit
 
 **Work done:**
-- Reviewed Anthropic docs (prompting best practices, context engineering, memory tool, memory cookbook)
-- Compared current implementation against best practices, identified 8 gaps
-- Created `docs/user/best_practices.md` — condensed resource summary
-- Created `docs/user/managing_agents.md` — human operator guide
-- Created `docs/user/audit_plan.md` → implemented → archived to `docs/archive/`
-- Archived stale docs: `collaboration_protocol.md`, `claude_code_agent.md` → `docs/archive/`
-- Extracted reference material from RULES.md → `docs/reference/hardware.md`, `models.md`, `sequences.md`
-- Rewrote RULES.md: tiered startup, XML behavioral blocks, agent identities, motivation for rules, memory hygiene
-- Trimmed `dashboard_agent_summary.md` (362→~150 lines), archived session history
-- Rewrote `CLAUDE.md` and `.github/copilot-instructions.md` as agent-specific entry points
-
-**Key decisions:**
-- Keep project-level MEMORY files (not Anthropic API memory tool — different purpose)
-- Markdown format with XML-tagged instruction blocks (not pure XML)
-- Agent identities: Claude_VSCode, Copilot_VSCode, Claude_Cloud [FALLBACK], Claude_CLI (defer)
-- XML blocks added: do_not_act_before_instructions, verify_before_finishing, reflect_on_results, subagent_guidance, memory_protocol, memory_security, context_awareness
-- Copilot_VSCode gets additional snippets (parallel_tool_calls, reversibility) not needed in Claude Code
+- Rewrote RULES.md with XML behavioral blocks, tiered startup, agent identities
+- Created docs/reference/{hardware,models,sequences}.md
+- Created docs/user/{best_practices,managing_agents}.md
+- Trimmed dashboard_agent_summary.md, archived session history
 
 ### 2026-03-11: Infrastructure Setup Session
 
 **Work done:**
-- Created `RULES.md`, `MEMORY_CLAUDE.md`, `MEMORY_COPILOT.md`, `CLAUDE.md`
-- Updated `.github/copilot-instructions.md` as pointer to `RULES.md`
-
-**Key decisions:**
-- Both local agents push directly to `main`
-- Claude.ai cloud agent = legacy/fallback only
-- Locking protocol: `<FILE_LOCK path="..."/>` in memory file
+- Created RULES.md, MEMORY_CLAUDE.md, MEMORY_COPILOT.md, CLAUDE.md
 
 </history_archive>

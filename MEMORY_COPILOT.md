@@ -1,7 +1,7 @@
 # MEMORY_COPILOT.md — Copilot Chat Agent Working Memory
 
 > Agent: GitHub Copilot Chat (local VS Code plugin)
-> Last updated: 2026-03-11
+> Last updated: 2026-03-22
 
 ---
 
@@ -13,37 +13,56 @@
 
 ## Active Tasks
 
-*(none — see `CLEANUP_PLAN.md` awaiting user approval for codebase cleanup)*
+*(none)*
 
 ---
 
 ## Session Context
 
 - Current branch: `main`
-- Dashboard: `Interfaces/PC/blocksi_dashboard.py` (~3350 lines, NiceGUI)
+- Dashboard: `Interfaces/PC/blocksi_dashboard.py` (entry point; modules in `dashboard/`)
 - Python venv: `.venv\Scripts\python.exe`
+- NiceGUI 3.8.0, Python 3.14
 
-### Pending Feature Work (from `dashboard_agent_summary.md`)
+### Recently Completed (2026-03-22 — process_batch implementation)
+
+| WP | Description | Status |
+|----|-------------|--------|
+| WP-0 | WiFi Disconnect Audit | ✅ Complete (audit + stale ref fix) |
+| WP-1 | k_d Calibration Rewrite | ✅ Complete (prior session) |
+| WP-2 | k_abs Model + Sequence | ✅ Complete (model + sequence + wiring) |
+| WP-3 | Dosimetry Solver | ✅ Complete (solver + accumulator + config loader) |
+| WP-4 | Batch Sequence | ✅ `batch_sequence.py` created — recipe protocol + dosimetry |
+| WP-5 | Processing Tab UI | ✅ Full form, solver preview, live monitoring, charts |
+| WP-6 | Calibration Enforcement | ✅ `data_io.py` functions + UI enforcement in click handlers |
+| WP-7 | Flow Rate UI Overhaul | ✅ Rotameter prompt + calibrated rate dropdowns |
+| WP-8 | Tab Restructuring | ✅ 7 tabs: Control/Calibration/Processing/Validation/Telemetry/Debug/Settings |
+| WP-9 | Documentation | ✅ operating_procedures.md + TODO_checklist.md |
+
+### Pending Feature Work
 
 | Item | Status |
 |------|--------|
 | Historical data viewer (load & plot old CSVs) | `[PROPOSED]` |
-| Sterilization batch sequence (Fill→Hold→Evac) | `[PROPOSED]` |
 | Migrate power curve from Plotly to ECharts | `[PROPOSED]` |
+| Firmware changes from WP-0 audit | See `docs/user/TODO_checklist.md` §5 |
 
 ---
 
 ## Notes for Next Session
 
-- CSTR fill stopping criteria updated in Session 15: slope < 0.0003 %vol/sample AND range < 0.08 over 45 samples
-- Validation target O3 now uses direct measurement from 100% PASS cert instead of sigmoid prediction
-- Power watchdog active in CSTR fill loop: if `power_actual_pct` < 80%, auto-resends `power_set(100)` up to 3×
+- Batch sequence uses ESP32 recipe protocol (sequence_start → seq_step → seq_run) for disconnect resilience
+- `S.batch_samples`, `S.batch_dose_running`, `S.batch_dose_target`, `S.batch_schedule` added to SystemState
+- tcp_server.py: `process_batch` type routes SEQ SAMPLE messages to `S.batch_samples`
+- Prompt content for batch phases (vessel_cool, add_inoculant, distribute) added to `PROMPT_CONTENT`
+- `BATCH_DATA_DIR = Data/Batch/` added to state.py with auto-mkdir
 - `_notify_queue` pattern is in place — never call `ui.*` directly from background tasks
+- Pre-flight checks that need UI dialogs MUST be in click handlers (slot context), not background tasks
 
 ---
 
 <history_archive>
 
-*(no archived sessions yet — file initialized 2026-03-11 by Claude Code during infrastructure setup)*
+*(Previously: CSTR fill stopping criteria, validation target O3 from PASS cert, power watchdog in fill loop)*
 
 </history_archive>

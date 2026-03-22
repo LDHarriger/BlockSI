@@ -14,7 +14,7 @@ from .power_o3_model import (
     generate_curve,
 )
 
-from .fill_model import (
+from .cstr_k_d_model import (
     # Primary names (CSTR with decay)
     CSTRModel,
     fit_cstr_model,
@@ -33,6 +33,16 @@ from .fill_model import (
     load_fill_model_for_condition,
     save_fill_model,
     list_fill_models,
+)
+
+from .cstr_k_abs_model import (
+    KAbsModel,
+    fit_k_abs_model,
+    save_k_abs_model,
+    load_k_abs_model,
+    load_k_abs_model_from_dir,
+    load_k_abs_csv,
+    list_k_abs_models,
 )
 
 # Re-export list_calibration_files as utility
@@ -69,4 +79,12 @@ __all__ = [
     "load_fill_model_for_condition",
     "save_fill_model",
     "list_fill_models",
+    # k_abs model (loaded-vessel absorption)
+    "KAbsModel",
+    "fit_k_abs_model",
+    "save_k_abs_model",
+    "load_k_abs_model",
+    "load_k_abs_model_from_dir",
+    "load_k_abs_csv",
+    "list_k_abs_models",
 ]

@@ -45,6 +45,8 @@ from analysis import (
     predict_power,
 )
 from dashboard.state import compute_effective_o2_pct
+from dashboard.data_io import _find_valid_cert
+from dashboard.verification import TRANSIENT_SKIP, VAL_MIN_STABLE
 
 # =============================================================================
 # Constants
@@ -352,6 +354,40 @@ async def _start_process_batch(**kwargs) -> bool:
             f"Batch schedule error: {exc}\n{traceback.format_exc()}", "error"
         )
         return False
+
+    # ── Verification gate (after schedule solve, before ramp-up) ────
+    import pandas as pd
+
+    val_cert = _find_valid_cert(flow)
+    if val_cert is None:
+        _notify(
+            "No valid verification certificate — run verification at "
+            f"{flow} LPM before starting a batch",
+            "negative",
+        )
+        return False
+
+    # Compare measured C_in with model prediction
+    try:
+        vdf = pd.read_csv(val_cert)
+        vdf.columns = [c.strip() for c in vdf.columns]
+        vt = vdf[vdf["phase"].isin(["full_power", "target"])].iloc[TRANSIENT_SKIP:]
+        if len(vt) >= VAL_MIN_STABLE:
+            measured_c_in = float(vt["o3_pct"].mean())
+            if c_in_100pct > 0.01:
+                divergence = abs(measured_c_in - c_in_100pct) / c_in_100pct
+                log(f"Batch C_in check: measured={measured_c_in:.4f}% "
+                    f"model={c_in_100pct:.4f}% divergence={divergence:.1%} "
+                    f"({os.path.basename(val_cert)})", "info")
+                if divergence > 0.15:
+                    _notify(
+                        f"Verification C_in ({measured_c_in:.3f}%) diverges "
+                        f"{divergence:.0%} from model ({c_in_100pct:.3f}%). "
+                        f"Consider re-running Power-O3 calibration.",
+                        "warning",
+                    )
+    except Exception as exc:
+        log(f"Could not read verification cert for C_in check: {exc}", "warning")
 
     # ── Generate recipe ─────────────────────────────────────────────
     recipe = _generate_recipe(schedule, config)

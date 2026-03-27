@@ -95,6 +95,19 @@ float sensor_aggregator_get_room_o3(void);
  */
 float sensor_aggregator_get_vessel_temp(void);
 
+/**
+ * @brief Pause room O3 sampling (for diagnostic bus access)
+ *
+ * Blocks until any in-flight sample completes, then prevents the
+ * aggregator from issuing further I2C reads to the DFRobot sensor.
+ */
+void sensor_aggregator_pause_room_o3(void);
+
+/**
+ * @brief Resume room O3 sampling after diagnostics
+ */
+void sensor_aggregator_resume_room_o3(void);
+
 #ifdef __cplusplus
 }
 #endif

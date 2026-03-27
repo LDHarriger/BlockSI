@@ -30,6 +30,7 @@ static struct {
     uint16_t room_o3_count;
     float room_o3_last;
     bool room_o3_connected;
+    bool room_o3_paused;          // True = skip room O3 sampling (for diagnostics)
     
     // Vessel temperature accumulator
     float vessel_temp_sum;
@@ -132,8 +133,8 @@ static void sample_task(void *arg)
     ESP_LOGI(TAG, "  Thermocouple: %s", status.thermocouple_initialized ? "available" : "not available");
     
     while (1) {
-        // Sample room O3 if available
-        if (status.lab_o3_initialized) {
+        // Sample room O3 if available (skip when paused for diagnostics)
+        if (status.lab_o3_initialized && !s_agg.room_o3_paused) {
             sample_room_o3();
         }
         
@@ -175,6 +176,7 @@ esp_err_t sensor_aggregator_init(uint32_t sample_interval_ms)
     s_agg.room_o3_max = 0;
     s_agg.room_o3_last = -1;
     s_agg.room_o3_connected = false;
+    s_agg.room_o3_paused = false;
     
     s_agg.vessel_temp_sum = 0;
     s_agg.vessel_temp_count = 0;
@@ -334,4 +336,18 @@ float sensor_aggregator_get_vessel_temp(void)
     float val = s_agg.vessel_temp_connected ? s_agg.vessel_temp_last : NAN;
     xSemaphoreGive(s_agg.mutex);
     return val;
+}
+
+void sensor_aggregator_pause_room_o3(void)
+{
+    s_agg.room_o3_paused = true;
+    // Wait for any in-flight sample to finish (one full sample cycle)
+    vTaskDelay(pdMS_TO_TICKS(s_agg.sample_interval_ms + 50));
+    ESP_LOGI(TAG, "Room O3 sampling paused for diagnostics");
+}
+
+void sensor_aggregator_resume_room_o3(void)
+{
+    s_agg.room_o3_paused = false;
+    ESP_LOGI(TAG, "Room O3 sampling resumed");
 }

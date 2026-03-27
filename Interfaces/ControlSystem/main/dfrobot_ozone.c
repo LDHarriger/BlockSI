@@ -400,6 +400,71 @@ esp_err_t dfrobot_o3_read_raw(uint16_t *raw)
     return ESP_OK;
 }
 
+esp_err_t dfrobot_o3_read_raw_bytes(uint8_t *byte0, uint8_t *byte1,
+                                    uint16_t *ppb_out)
+{
+    if (!byte0 || !byte1 || !ppb_out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Trigger passive read
+    esp_err_t ret = sensor_write_reg(REG_SET_PASSIVE, TRIGGER_PASSIVE_READ);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Read from passive data register
+    uint8_t data[2];
+    ret = sensor_read_reg(REG_PASSIVE_DATA_HIGH, data, 2);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    *byte0 = data[0];
+    *byte1 = data[1];
+    *ppb_out = ((uint16_t)data[0] << 8) | data[1];
+    return ESP_OK;
+}
+
+esp_err_t dfrobot_o3_read_with_delay(uint32_t delay_ms, uint8_t *byte0,
+                                     uint8_t *byte1, uint16_t *ppb_out)
+{
+    if (!byte0 || !byte1 || !ppb_out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Trigger passive read
+    esp_err_t ret = sensor_write_reg(REG_SET_PASSIVE, TRIGGER_PASSIVE_READ);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // User-specified conversion delay
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+
+    // Read from passive data register
+    uint8_t data[2];
+    ret = sensor_read_reg(REG_PASSIVE_DATA_HIGH, data, 2);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    *byte0 = data[0];
+    *byte1 = data[1];
+    *ppb_out = ((uint16_t)data[0] << 8) | data[1];
+    return ESP_OK;
+}
+
+esp_err_t dfrobot_o3_read_register(uint8_t reg, uint8_t *data, size_t len)
+{
+    if (!data || len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return sensor_read_reg(reg, data, len);
+}
+
 float dfrobot_o3_get_last(void)
 {
     if (s_sensor.reading_count == 0) {

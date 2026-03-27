@@ -1130,6 +1130,135 @@ static bool lan_command_handler(const char *cmd, const char *args,
         return false;
     
     // =========================================================================
+    // Room O3 sensor diagnostics (DFRobot SEN0321)
+    // =========================================================================
+    } else if (strcmp(cmd, "diag_room_o3_raw") == 0) {
+        // CMD,diag_room_o3_raw,<count>
+        // Reads N raw samples, sends each as a DIAG message with byte-level detail
+        int count = 10;
+        if (args) {
+            count = atoi(args);
+            if (count < 1) count = 1;
+            if (count > 200) count = 200;
+        }
+        snprintf(response, response_size, "diag_room_o3_raw=started,count=%d", count);
+
+        sensor_aggregator_pause_room_o3();
+        for (int i = 0; i < count; i++) {
+            uint8_t b0 = 0, b1 = 0;
+            uint16_t ppb = 0;
+            esp_err_t ret = dfrobot_o3_read_raw_bytes(&b0, &b1, &ppb);
+            char diag[160];
+            if (ret == ESP_OK) {
+                snprintf(diag, sizeof(diag),
+                         "DIAG,room_o3_raw,n=%d,byte0=0x%02X,byte1=0x%02X,"
+                         "ppb=%u,ppm=%.3f\n",
+                         i, b0, b1, ppb, ppb / 1000.0f);
+            } else {
+                snprintf(diag, sizeof(diag),
+                         "DIAG,room_o3_raw,n=%d,error=%s\n",
+                         i, esp_err_to_name(ret));
+            }
+            lan_client_send_message(diag);
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        char done[64];
+        snprintf(done, sizeof(done), "DIAG,room_o3_raw,done,count=%d\n", count);
+        lan_client_send_message(done);
+        sensor_aggregator_resume_room_o3();
+        return true;
+
+    } else if (strcmp(cmd, "diag_room_o3_delay") == 0) {
+        // CMD,diag_room_o3_delay,<delay_ms>,<count>
+        // Reads with configurable conversion delay to probe timing sensitivity
+        if (!args) {
+            snprintf(response, response_size, "missing_args:delay_ms,count");
+            return false;
+        }
+        uint32_t delay_ms = 100;
+        int count = 5;
+        if (sscanf(args, "%lu,%d", (unsigned long *)&delay_ms, &count) < 1) {
+            snprintf(response, response_size, "parse_error");
+            return false;
+        }
+        if (delay_ms > 5000) delay_ms = 5000;
+        if (count < 1) count = 1;
+        if (count > 100) count = 100;
+
+        snprintf(response, response_size,
+                 "diag_room_o3_delay=started,delay=%lu,count=%d",
+                 (unsigned long)delay_ms, count);
+
+        sensor_aggregator_pause_room_o3();
+        for (int i = 0; i < count; i++) {
+            uint8_t b0 = 0, b1 = 0;
+            uint16_t ppb = 0;
+            esp_err_t ret = dfrobot_o3_read_with_delay(delay_ms, &b0, &b1, &ppb);
+            char diag[160];
+            if (ret == ESP_OK) {
+                snprintf(diag, sizeof(diag),
+                         "DIAG,room_o3_delay,n=%d,delay=%lu,byte0=0x%02X,"
+                         "byte1=0x%02X,ppb=%u,ppm=%.3f\n",
+                         i, (unsigned long)delay_ms, b0, b1, ppb,
+                         ppb / 1000.0f);
+            } else {
+                snprintf(diag, sizeof(diag),
+                         "DIAG,room_o3_delay,n=%d,delay=%lu,error=%s\n",
+                         i, (unsigned long)delay_ms, esp_err_to_name(ret));
+            }
+            lan_client_send_message(diag);
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        char done[80];
+        snprintf(done, sizeof(done),
+                 "DIAG,room_o3_delay,done,delay=%lu,count=%d\n",
+                 (unsigned long)delay_ms, count);
+        lan_client_send_message(done);
+        sensor_aggregator_resume_room_o3();
+        return true;
+
+    } else if (strcmp(cmd, "diag_room_o3_regs") == 0) {
+        // CMD,diag_room_o3_regs
+        // Dumps registers 0x03 through 0x0A for diagnostics
+        sensor_aggregator_pause_room_o3();
+        char diag[200];
+        char *p = diag;
+        int rem = sizeof(diag);
+        int n = snprintf(p, rem, "DIAG,room_o3_regs");
+        p += n; rem -= n;
+
+        for (uint8_t reg = 0x03; reg <= 0x0A; reg++) {
+            uint8_t val[2] = {0, 0};
+            esp_err_t ret = dfrobot_o3_read_register(reg, val, 2);
+            if (ret == ESP_OK) {
+                n = snprintf(p, rem, ",0x%02X=%02X%02X", reg, val[0], val[1]);
+            } else {
+                n = snprintf(p, rem, ",0x%02X=ERR", reg);
+            }
+            p += n; rem -= n;
+        }
+        n = snprintf(p, rem, "\n");
+        p += n;
+        lan_client_send_message(diag);
+        sensor_aggregator_resume_room_o3();
+        snprintf(response, response_size, "diag_room_o3_regs=done");
+        return true;
+
+    } else if (strcmp(cmd, "diag_room_o3_pause") == 0) {
+        // CMD,diag_room_o3_pause
+        // Manually pause aggregator room O3 sampling for extended diagnostics
+        sensor_aggregator_pause_room_o3();
+        snprintf(response, response_size, "diag_room_o3_pause=ok");
+        return true;
+
+    } else if (strcmp(cmd, "diag_room_o3_resume") == 0) {
+        // CMD,diag_room_o3_resume
+        // Resume aggregator room O3 sampling
+        sensor_aggregator_resume_room_o3();
+        snprintf(response, response_size, "diag_room_o3_resume=ok");
+        return true;
+
+    // =========================================================================
     // Unknown command
     // =========================================================================
     } else {

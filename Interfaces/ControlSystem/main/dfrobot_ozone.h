@@ -118,8 +118,32 @@ esp_err_t dfrobot_o3_read(float *ppm);
 esp_err_t dfrobot_o3_read_raw(uint16_t *raw);
 
 /**
+ * @brief Read raw bytes from passive data register (for diagnostics)
+ *
+ * Returns both individual I2C bytes and the combined ppb value so
+ * the caller can detect byte-level corruption.
+ */
+esp_err_t dfrobot_o3_read_raw_bytes(uint8_t *byte0, uint8_t *byte1,
+                                    uint16_t *ppb_out);
+
+/**
+ * @brief Read with a caller-specified conversion delay (for diagnostics)
+ *
+ * Same as read_raw_bytes but uses delay_ms instead of the hardcoded 100ms.
+ */
+esp_err_t dfrobot_o3_read_with_delay(uint32_t delay_ms, uint8_t *byte0,
+                                     uint8_t *byte1, uint16_t *ppb_out);
+
+/**
+ * @brief Read arbitrary sensor register (for diagnostics)
+ *
+ * Writes the register pointer then reads len bytes.
+ */
+esp_err_t dfrobot_o3_read_register(uint8_t reg, uint8_t *data, size_t len);
+
+/**
  * @brief Get last reading without I2C communication
- * 
+ *
  * @return Last O3 reading in ppm, or -1 if no reading available
  */
 float dfrobot_o3_get_last(void);

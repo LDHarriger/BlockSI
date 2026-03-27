@@ -1345,45 +1345,6 @@ async def index():
                 with ui.row().classes("q-gutter-sm items-center q-mb-sm"):
                     async def _start_batch():
                         _flow = float(proc_flow_select.value)
-                        # Verification gate — require a recent PASS cert
-                        cert = _find_valid_cert(_flow)
-                        if cert is None:
-                            with ui.dialog() as _bcert_dlg, ui.card().classes(
-                                "q-pa-md"
-                            ):
-                                ui.label(
-                                    "No valid verification certificate"
-                                ).classes("text-subtitle1 text-bold q-mb-sm")
-                                ui.label(
-                                    "A verification at the selected flow rate "
-                                    "must pass within the last 24 hours "
-                                    "before running a batch process."
-                                ).classes("text-body2 q-mb-md")
-                                with ui.row().classes("q-gutter-sm justify-end"):
-                                    ui.button(
-                                        "Cancel",
-                                        on_click=_bcert_dlg.close,
-                                    ).props("flat")
-
-                                    async def _run_ver_from_batch_dlg():
-                                        _bcert_dlg.close()
-                                        _ver.hold_input.value = 50
-                                        _ver.lpm_input.value = _flow
-                                        tabs.value = tab_verification
-                                        await cmd_sequence_start(
-                                            "verify",
-                                            power_hold=50,
-                                            flow=_flow,
-                                        )
-
-                                    ui.button(
-                                        "Run Verification",
-                                        icon="verified",
-                                        on_click=_run_ver_from_batch_dlg,
-                                        color="blue",
-                                    )
-                            _bcert_dlg.open()
-                            return
                         await cmd_sequence_start(
                             "process_batch",
                             flow=_flow,

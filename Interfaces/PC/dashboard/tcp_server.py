@@ -238,7 +238,8 @@ class TCPServer:
 
     # -- DIAG handler -----------------------------------------------------
     _diag_log_file: Optional[str] = None
-    _DIAG_SUBTYPES = {"drift_sample", "drift_summary", "noise_stats", "power_mismatch", "power_resolved"}
+    _DIAG_SUBTYPES = {"drift_sample", "drift_summary", "noise_stats", "power_mismatch", "power_resolved",
+                       "room_o3_raw", "room_o3_delay", "room_o3_regs"}
 
     def _handle_diag(self, line: str) -> None:
         log(f"DIAG: {line}", "warn")

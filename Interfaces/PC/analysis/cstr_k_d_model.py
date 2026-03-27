@@ -541,7 +541,7 @@ def fit_cstr_model(
         notes=(
             f"Fixed V={V_VESSEL_L}L, V_dead={V_DEAD_L}L. "
             f"Fitted k_d from {len(csv_paths)} file(s) at flow(s) "
-            f"{', '.join(f'{f:.1f}' for f in flows)} LPM. "
+            f"{', '.join(f'{f:.2f}' for f in flows)} LPM. "
             f"k_d(combined)={k_d:.2e}/s, k_d(evac only)={k_d_evac:.2e}/s."
         ),
     )

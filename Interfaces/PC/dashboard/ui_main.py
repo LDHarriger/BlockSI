@@ -44,6 +44,9 @@ from dashboard.k_d_cal import (
     FILL_STEADY_RANGE, FILL_STEADY_COUNT,
 )
 from dashboard.tcp_server import tcp
+from dashboard.ui_tab_verification import (
+    build_verification_tab, update_verification_tab,
+)
 
 
 # =============================================================================
@@ -370,8 +373,8 @@ async def index():
 
         ui.label("O2 LPM").classes("text-caption")
         inp_lpm_sb = ui.number(
-            value=S.flow_lpm, min=1.0, max=15.0, step=0.5,
-            format="%.1f", on_change=_on_lpm_change,
+            value=S.flow_lpm, min=1.0, max=15.0, step=0.25,
+            format="%.2f", on_change=_on_lpm_change,
         ).classes("q-mb-sm")
 
         ui.separator().classes("q-my-sm")
@@ -380,7 +383,7 @@ async def index():
         with ui.card().classes("w-full q-pa-sm").props("flat bordered"):
             with ui.row().classes("w-full items-center justify-between no-wrap"):
                 ui.label("O2 Flow").classes("text-caption text-grey")
-                card_flow_val = ui.label(f"{S.flow_lpm:.1f}").classes("text-subtitle1 text-weight-medium text-purple")
+                card_flow_val = ui.label(f"{S.flow_lpm:.2f}").classes("text-subtitle1 text-weight-medium text-purple")
                 ui.label("LPM").classes("text-caption text-grey")
             ui.separator().classes("q-my-xs")
             with ui.row().classes("w-full items-center justify-between no-wrap"):
@@ -466,7 +469,7 @@ async def index():
             tab_control = ui.tab("Control", icon="gamepad")
             tab_calibration = ui.tab("Calibration", icon="tune")
             tab_processing = ui.tab("Processing", icon="science")
-            tab_validation = ui.tab("Validation", icon="verified")
+            tab_verification = ui.tab("Verification", icon="verified")
             tab_telem = ui.tab("Telemetry", icon="show_chart")
             tab_debug = ui.tab("Debug", icon="bug_report")
             tab_settings = ui.tab("Settings", icon="settings")
@@ -514,7 +517,7 @@ async def index():
                         ui.label("LPM").classes("text-caption")
                         inp_lpm_settings = ui.number(
                             value=S.flow_lpm, min=1.0, max=15.0,
-                            step=0.5, format="%.1f",
+                            step=0.25, format="%.2f",
                             on_change=_on_lpm_change,
                         )
                         ui.label("% Power").classes("text-caption q-mt-sm")
@@ -554,566 +557,582 @@ async def index():
             with ui.tab_panel(tab_calibration):
 
                 # ---- Power-O3 Calibration section -----------------------
-                ui.label("Power-O3 Calibration").classes(
-                    "text-h6 q-mb-sm"
-                )
-                ui.markdown(
-                    "Calibration: Baseline → Sweep Up (0→100%) → "
-                    "Sweep Down (100→0%) → Random hold (~20 samples each). "
-                    "ESP32 runs sweep autonomously."
-                ).classes("text-caption text-grey q-mb-sm")
+                with ui.expansion(
+                    "Power-O3 Calibration", icon="tune",
+                ).classes("w-full").props("default-opened"):
+                    ui.markdown(
+                        "Calibration: Baseline → Sweep Up (0→100%) → "
+                        "Sweep Down (100→0%) → Random hold (~20 samples each). "
+                        "ESP32 runs sweep autonomously."
+                    ).classes("text-caption text-grey q-mb-sm")
 
-                with ui.row().classes("q-gutter-sm items-end q-mb-sm"):
-                    cal_rnd_input = ui.number(
-                        label="# Rnd Lvls", value=15,
-                        min=0, max=50, step=1, format="%.0f",
-                    ).classes("w-24")
+                    with ui.row().classes("q-gutter-sm items-end q-mb-sm"):
+                        cal_rnd_input = ui.number(
+                            label="# Rnd Lvls", value=15,
+                            min=0, max=50, step=1, format="%.0f",
+                        ).classes("w-24")
 
-                    # Hidden value — set by rotameter prompt
-                    cal_lpm_input = ui.number(
-                        value=DEFAULT_FLOW_LPM,
-                    )
-                    cal_lpm_input.visible = False
-                    # Air compressor removed from calibration (relocated
-                    # downstream, used only for evacuation)
-                    cal_air_toggle = ui.switch("Air ON")
-                    cal_air_toggle.visible = False
+                        # Hidden value — set by rotameter prompt
+                        cal_lpm_input = ui.number(
+                            value=DEFAULT_FLOW_LPM,
+                        )
+                        cal_lpm_input.visible = False
+                        # Air compressor removed from calibration (relocated
+                        # downstream, used only for evacuation)
+                        cal_air_toggle = ui.switch("Air ON")
+                        cal_air_toggle.visible = False
 
-                    async def _start_cal():
-                        num_rnd = int(cal_rnd_input.value or 0)
-                        # Turn on O2 concentrator first
-                        if not S.relay_o2_conc:
-                            await cmd_set_relay("o2_conc", True)
+                        async def _start_cal():
+                            num_rnd = int(cal_rnd_input.value or 0)
+                            # Turn on O2 concentrator first
+                            if not S.relay_o2_conc:
+                                await cmd_set_relay("o2_conc", True)
 
-                        # Prompt operator for rotameter reading
-                        _flow_event = asyncio.Event()
-                        _flow_val = [0.0]
+                            # Prompt operator for rotameter reading
+                            _flow_event = asyncio.Event()
+                            _flow_val = [0.0]
 
-                        with ui.dialog().props("persistent") as _flow_dlg, \
-                             ui.card().classes("q-pa-lg").style("min-width: 400px"):
-                            ui.icon("speed").classes("text-h3 text-blue q-mb-sm")
-                            ui.label("Read Rotameter").classes("text-h5 q-mb-sm")
-                            ui.label(
-                                "The O2 concentrator is now ON. Read the "
-                                "rotameter and enter the actual flow rate "
-                                "to the nearest 0.25 LPM."
-                            ).classes("text-body1 q-mb-md")
-                            _lpm_in = ui.number(
-                                label="Actual Flow Rate (LPM)",
-                                value=DEFAULT_FLOW_LPM,
-                                min=0.25, max=10.0, step=0.25,
-                                format="%.2f",
-                            ).classes("w-full q-mb-md")
-                            with ui.row().classes("justify-end w-full q-gutter-sm"):
-                                def _cancel_flow():
-                                    _flow_dlg.close()
-                                    _flow_event.set()
+                            with ui.dialog().props("persistent") as _flow_dlg, \
+                                 ui.card().classes("q-pa-lg").style("min-width: 400px"):
+                                ui.icon("speed").classes("text-h3 text-blue q-mb-sm")
+                                ui.label("Read Rotameter").classes("text-h5 q-mb-sm")
+                                ui.label(
+                                    "The O2 concentrator is now ON. Read the "
+                                    "rotameter and enter the actual flow rate "
+                                    "to the nearest 0.25 LPM."
+                                ).classes("text-body1 q-mb-md")
+                                _lpm_in = ui.number(
+                                    label="Actual Flow Rate (LPM)",
+                                    value=DEFAULT_FLOW_LPM,
+                                    min=0.25, max=10.0, step=0.25,
+                                    format="%.2f",
+                                ).classes("w-full q-mb-md")
+                                with ui.row().classes("justify-end w-full q-gutter-sm"):
+                                    def _cancel_flow():
+                                        _flow_dlg.close()
+                                        _flow_event.set()
 
-                                def _confirm_flow():
-                                    _flow_val[0] = float(_lpm_in.value or 0)
-                                    _flow_dlg.close()
-                                    _flow_event.set()
+                                    def _confirm_flow():
+                                        _flow_val[0] = float(_lpm_in.value or 0)
+                                        _flow_dlg.close()
+                                        _flow_event.set()
 
-                                ui.button(
-                                    "Cancel", on_click=_cancel_flow,
-                                ).props("flat color=red")
-                                ui.button(
-                                    "Start Calibration", on_click=_confirm_flow,
-                                    color="primary",
-                                ).props("unelevated")
-                        _flow_dlg.open()
-                        await _flow_event.wait()
+                                    ui.button(
+                                        "Cancel", on_click=_cancel_flow,
+                                    ).props("flat color=red")
+                                    ui.button(
+                                        "Start Calibration", on_click=_confirm_flow,
+                                        color="primary",
+                                    ).props("unelevated")
+                            _flow_dlg.open()
+                            await _flow_event.wait()
 
-                        lpm = _flow_val[0]
-                        if lpm < 0.25:
-                            _notify("Calibration cancelled", "warning")
-                            return
-                        cal_lpm_input.value = lpm
-                        await cmd_sequence_start(
-                            "calibrate", flow=lpm,
-                            num_random=num_rnd, air_comp=False,
+                            lpm = _flow_val[0]
+                            if lpm < 0.25:
+                                _notify("Calibration cancelled", "warning")
+                                return
+                            cal_lpm_input.value = lpm
+                            await cmd_sequence_start(
+                                "calibrate", flow=lpm,
+                                num_random=num_rnd, air_comp=False,
+                            )
+
+                        cal_start_btn = ui.button(
+                            "Start", icon="play_arrow",
+                            on_click=_start_cal, color="primary",
+                        )
+                        cal_stop_btn = ui.button(
+                            "Stop", icon="stop",
+                            on_click=lambda: asyncio.create_task(
+                                cmd_sequence_stop()
+                            ),
+                            color="grey",
                         )
 
-                    cal_start_btn = ui.button(
-                        "Start", icon="play_arrow",
-                        on_click=_start_cal, color="primary",
-                    )
-                    cal_stop_btn = ui.button(
-                        "Stop", icon="stop",
-                        on_click=lambda: asyncio.create_task(
-                            cmd_sequence_stop()
-                        ),
-                        color="grey",
-                    )
+                    CAL_PHASES_DEF = [
+                        ("baseline", "Baseline", "~37s @ 0%"),
+                        ("sweep_up", "Sweep Up", "0 → 100%"),
+                        ("sweep_down", "Sweep Down", "100 → 0%"),
+                        ("random", "Random", "Hold ~20 samp"),
+                    ]
+                    cal_step_cards: dict[str, Any] = {}
+                    with ui.row().classes("w-full q-gutter-xs q-mb-sm"):
+                        for phase_key, name, desc in CAL_PHASES_DEF:
+                            with ui.card().classes("col q-pa-xs text-center").style(
+                                "opacity: 0.4; border: 1px solid #555"
+                            ) as sc:
+                                ui.label(name).classes("text-caption text-weight-bold")
+                                ui.label(desc).classes("text-caption text-grey")
+                            cal_step_cards[phase_key] = sc
 
-                CAL_PHASES_DEF = [
-                    ("baseline", "Baseline", "~37s @ 0%"),
-                    ("sweep_up", "Sweep Up", "0 → 100%"),
-                    ("sweep_down", "Sweep Down", "100 → 0%"),
-                    ("random", "Random", "Hold ~20 samp"),
-                ]
-                cal_step_cards: dict[str, Any] = {}
-                with ui.row().classes("w-full q-gutter-xs q-mb-sm"):
-                    for phase_key, name, desc in CAL_PHASES_DEF:
-                        with ui.card().classes("col q-pa-xs text-center").style(
-                            "opacity: 0.4; border: 1px solid #555"
-                        ) as sc:
-                            ui.label(name).classes("text-caption text-weight-bold")
-                            ui.label(desc).classes("text-caption text-grey")
-                        cal_step_cards[phase_key] = sc
+                    cal_phase_lbl = ui.label("Phase: --").classes("text-body2")
+                    cal_progress = ui.linear_progress(
+                        value=0, show_value=False
+                    ).classes("q-mb-xs")
+                    cal_info_lbl = ui.label("").classes("text-caption")
 
-                cal_phase_lbl = ui.label("Phase: --").classes("text-body2")
-                cal_progress = ui.linear_progress(
-                    value=0, show_value=False
-                ).classes("q-mb-xs")
-                cal_info_lbl = ui.label("").classes("text-caption")
+                    cal_chart = ui.echart({
+                        "darkMode": True,
+                        "tooltip": {"trigger": "item"},
+                        "legend": {"data": ["Sweep Up", "Sweep Down", "Random"]},
+                        "xAxis": {"type": "value", "name": "Power %",
+                                  "min": 0, "max": 100},
+                        "yAxis": {"type": "value", "name": "O3 %vol"},
+                        "series": [
+                            {"name": "Sweep Up", "type": "scatter", "data": [],
+                             "itemStyle": {"color": "#42A5F5"}},
+                            {"name": "Sweep Down", "type": "scatter", "data": [],
+                             "itemStyle": {"color": "#FFA726"}},
+                            {"name": "Random", "type": "scatter", "data": [],
+                             "itemStyle": {"color": "#66BB6A"}},
+                        ],
+                    }).classes("w-full").style("height: 280px")
 
-                cal_chart = ui.echart({
-                    "darkMode": True,
-                    "tooltip": {"trigger": "item"},
-                    "legend": {"data": ["Sweep Up", "Sweep Down", "Random"]},
-                    "xAxis": {"type": "value", "name": "Power %",
-                              "min": 0, "max": 100},
-                    "yAxis": {"type": "value", "name": "O3 %vol"},
-                    "series": [
-                        {"name": "Sweep Up", "type": "scatter", "data": [],
-                         "itemStyle": {"color": "#42A5F5"}},
-                        {"name": "Sweep Down", "type": "scatter", "data": [],
-                         "itemStyle": {"color": "#FFA726"}},
-                        {"name": "Random", "type": "scatter", "data": [],
-                         "itemStyle": {"color": "#66BB6A"}},
-                    ],
-                }).classes("w-full").style("height: 280px")
+                    ui.separator().classes("q-my-sm")
+                    ui.label("Calibration Files").classes("text-subtitle2")
+                    cal_files_container = ui.column().classes("w-full")
 
-                ui.separator().classes("q-my-sm")
-                ui.label("Calibration Files").classes("text-subtitle2")
-                cal_files_container = ui.column().classes("w-full")
+                    def _render_cal_files() -> None:
+                        cal_files_container.clear()
+                        files = list_calibration_files()
+                        with cal_files_container:
+                            if not files:
+                                ui.label("No calibration files found").classes(
+                                    "text-caption"
+                                )
+                            else:
+                                for (lpm, o2) in sorted(files):
+                                    flist = files[(lpm, o2)]
+                                    with ui.expansion(
+                                        f"{lpm} LPM / {o2}% O2 ({len(flist)} files)"
+                                    ):
+                                        for fp in sorted(flist):
+                                            ui.label(os.path.basename(fp)).classes(
+                                                "text-caption"
+                                            )
 
-                def _render_cal_files() -> None:
-                    cal_files_container.clear()
-                    files = list_calibration_files()
-                    with cal_files_container:
-                        if not files:
-                            ui.label("No calibration files found").classes(
-                                "text-caption"
+                    _render_cal_files()
+
+                    ui.separator().classes("q-my-sm")
+
+                    ui.label("Model Fitting").classes("text-subtitle2")
+                    ui.markdown(
+                        "Fit a 4-parameter sigmoid model to calibration data. "
+                        "All files for the selected condition are auto-aggregated."
+                    ).classes("text-caption text-grey q-mb-sm")
+
+                    model_status_card = ui.card().classes(
+                        "w-full q-pa-sm q-mb-sm"
+                    ).props("flat bordered")
+                    with model_status_card:
+                        with ui.row().classes("items-center q-gutter-sm"):
+                            model_icon = ui.icon("model_training", size="sm")
+                            model_status_lbl = ui.label(S.model_status).classes(
+                                "text-body2"
                             )
-                        else:
+
+                    model_fit_container = ui.column().classes("w-full")
+
+                    def _render_model_fitting() -> None:
+                        model_fit_container.clear()
+                        files = list_calibration_files()
+                        existing_models = list_saved_models(MODEL_DIR)
+                        model_map = {
+                            (m.flow_lpm, m.o2_pct): m for m in existing_models
+                        }
+                        with model_fit_container:
+                            if not files:
+                                ui.label(
+                                    "Run a calibration first"
+                                ).classes("text-caption text-grey")
+                                return
                             for (lpm, o2) in sorted(files):
                                 flist = files[(lpm, o2)]
-                                with ui.expansion(
-                                    f"{lpm} LPM / {o2}% O2 ({len(flist)} files)"
-                                ):
-                                    for fp in sorted(flist):
-                                        ui.label(os.path.basename(fp)).classes(
-                                            "text-caption"
-                                        )
-
-                _render_cal_files()
-
-                ui.separator().classes("q-my-sm")
-
-                ui.label("Model Fitting").classes("text-subtitle2")
-                ui.markdown(
-                    "Fit a 4-parameter sigmoid model to calibration data. "
-                    "All files for the selected condition are auto-aggregated."
-                ).classes("text-caption text-grey q-mb-sm")
-
-                model_status_card = ui.card().classes(
-                    "w-full q-pa-sm q-mb-sm"
-                ).props("flat bordered")
-                with model_status_card:
-                    with ui.row().classes("items-center q-gutter-sm"):
-                        model_icon = ui.icon("model_training", size="sm")
-                        model_status_lbl = ui.label(S.model_status).classes(
-                            "text-body2"
-                        )
-
-                model_fit_container = ui.column().classes("w-full")
-
-                def _render_model_fitting() -> None:
-                    model_fit_container.clear()
-                    files = list_calibration_files()
-                    existing_models = list_saved_models(MODEL_DIR)
-                    model_map = {
-                        (m.flow_lpm, m.o2_pct): m for m in existing_models
-                    }
-                    with model_fit_container:
-                        if not files:
-                            ui.label(
-                                "Run a calibration first"
-                            ).classes("text-caption text-grey")
-                            return
-                        for (lpm, o2) in sorted(files):
-                            flist = files[(lpm, o2)]
-                            existing = model_map.get((lpm, o2))
-                            with ui.card().classes(
-                                "w-full q-pa-sm q-mb-xs"
-                            ).props("flat bordered"):
-                                with ui.row().classes(
-                                    "items-center q-gutter-sm"
-                                ):
-                                    ui.label(
-                                        f"{lpm} LPM / {o2}% O2"
-                                    ).classes("text-weight-bold")
-                                    ui.label(
-                                        f"({len(flist)} file{'s' if len(flist) != 1 else ''})"
-                                    ).classes("text-caption text-grey")
-                                    if existing and existing.is_valid:
-                                        ui.badge(
-                                            f"R²={existing.r_squared:.3f}",
-                                            color="green",
-                                        )
-                                    else:
-                                        ui.badge(
-                                            "No model",
-                                            color="grey",
-                                        )
-                                    ui.space()
-
-                                    async def _do_fit(
-                                        _lpm=lpm, _o2=o2, _files=flist,
+                                existing = model_map.get((lpm, o2))
+                                with ui.card().classes(
+                                    "w-full q-pa-sm q-mb-xs"
+                                ).props("flat bordered"):
+                                    with ui.row().classes(
+                                        "items-center q-gutter-sm"
                                     ):
-                                        await _fit_model_for_condition(
-                                            _files, _lpm, _o2,
+                                        ui.label(
+                                            f"{lpm} LPM / {o2}% O2"
+                                        ).classes("text-weight-bold")
+                                        ui.label(
+                                            f"({len(flist)} file{'s' if len(flist) != 1 else ''})"
+                                        ).classes("text-caption text-grey")
+                                        if existing and existing.is_valid:
+                                            ui.badge(
+                                                f"R²={existing.r_squared:.3f}",
+                                                color="green",
+                                            )
+                                        else:
+                                            ui.badge(
+                                                "No model",
+                                                color="grey",
+                                            )
+                                        ui.space()
+
+                                        async def _do_fit(
+                                            _lpm=lpm, _o2=o2, _files=flist,
+                                        ):
+                                            await _fit_model_for_condition(
+                                                _files, _lpm, _o2,
+                                            )
+
+                                        ui.button(
+                                            "Fit Model",
+                                            icon="analytics",
+                                            on_click=_do_fit,
+                                            color="primary",
+                                        ).props("dense size=sm")
+
+                                    if existing and existing.is_valid:
+                                        ui.label(
+                                            f"L={existing.L:.3f}  k={existing.k:.3f}  "
+                                            f"P0={existing.P0:.1f}  b={existing.b:.3f}  "
+                                            f"RMSE={existing.rmse:.4f}  n={existing.n_points}"
+                                        ).classes(
+                                            "text-caption text-grey q-ml-md"
                                         )
 
-                                    ui.button(
-                                        "Fit Model",
-                                        icon="analytics",
-                                        on_click=_do_fit,
-                                        color="primary",
-                                    ).props("dense size=sm")
+                    _render_model_fitting()
 
-                                if existing and existing.is_valid:
-                                    ui.label(
-                                        f"L={existing.L:.3f}  k={existing.k:.3f}  "
-                                        f"P0={existing.P0:.1f}  b={existing.b:.3f}  "
-                                        f"RMSE={existing.rmse:.4f}  n={existing.n_points}"
-                                    ).classes(
-                                        "text-caption text-grey q-ml-md"
-                                    )
+                    fit_result_container = ui.column().classes("w-full")
 
-                _render_model_fitting()
+                    async def _fit_model_for_condition(
+                        filepaths: list[str],
+                        lpm: float,
+                        o2: int,
+                    ) -> None:
+                        try:
+                            model = fit_sigmoid_model(
+                                filepaths, flow_lpm=lpm, o2_pct=o2,
+                            )
+                            path = save_model_json(model, MODEL_DIR)
+                            log(
+                                f"Model fitted: {model.summary()} -> "
+                                f"{os.path.basename(path)}",
+                                "cal",
+                            )
+                            _notify(
+                                f"Model fitted: R²={model.r_squared:.4f}, "
+                                f"RMSE={model.rmse:.4f}",
+                                "positive",
+                            )
+                            S.load_model_for_current_condition()
+                            _update_model_status()
+                            _render_model_fitting()
+                            _update_power_curve()
+                            _sync_derived_to_ui()
+                        except Exception as exc:
+                            log(f"Model fit failed: {exc}", "error")
+                            _notify(f"Model fit failed: {exc}", "negative")
 
-                fit_result_container = ui.column().classes("w-full")
+                    def _update_model_status() -> None:
+                        if S.active_model and S.active_model.is_valid:
+                            model_icon.name = "check_circle"
+                            model_icon.classes("text-green")
+                            model_status_lbl.text = (
+                                f"Active: {S.active_model.flow_lpm} LPM / "
+                                f"{S.active_model.o2_pct}% O2 — "
+                                f"{S.model_status}"
+                            )
+                        else:
+                            model_icon.name = "info"
+                            model_icon.classes("text-orange")
+                            model_status_lbl.text = S.model_status
 
-                async def _fit_model_for_condition(
-                    filepaths: list[str],
-                    lpm: float,
-                    o2: int,
-                ) -> None:
-                    try:
-                        model = fit_sigmoid_model(
-                            filepaths, flow_lpm=lpm, o2_pct=o2,
-                        )
-                        path = save_model_json(model, MODEL_DIR)
-                        log(
-                            f"Model fitted: {model.summary()} -> "
-                            f"{os.path.basename(path)}",
-                            "cal",
-                        )
-                        _notify(
-                            f"Model fitted: R²={model.r_squared:.4f}, "
-                            f"RMSE={model.rmse:.4f}",
-                            "positive",
-                        )
-                        S.load_model_for_current_condition()
-                        _update_model_status()
-                        _render_model_fitting()
-                        _update_power_curve()
-                        _sync_derived_to_ui()
-                    except Exception as exc:
-                        log(f"Model fit failed: {exc}", "error")
-                        _notify(f"Model fit failed: {exc}", "negative")
-
-                def _update_model_status() -> None:
-                    if S.active_model and S.active_model.is_valid:
-                        model_icon.name = "check_circle"
-                        model_icon.classes("text-green")
-                        model_status_lbl.text = (
-                            f"Active: {S.active_model.flow_lpm} LPM / "
-                            f"{S.active_model.o2_pct}% O2 — "
-                            f"{S.model_status}"
-                        )
-                    else:
-                        model_icon.name = "info"
-                        model_icon.classes("text-orange")
-                        model_status_lbl.text = S.model_status
-
-                _update_model_status()
+                    _update_model_status()
 
                 # ---- k_d Calibration section ----------------------------
-                ui.separator().classes("q-my-md")
-                ui.label("k_d Calibration").classes("text-h6 q-mb-sm")
-                ui.markdown(
-                    "Fill the vessel at 100% power until steady-state, "
-                    "then evacuate at 0% power until O3 clears. "
-                    "Fits a decay-aware CSTR model to extract system volume, "
-                    "O3 decay rate, and dead volume. Air compressor is OFF "
-                    "during calibration for best decay sensitivity. "
-                    "Parameters generalise to any flow rate and air config."
-                ).classes("text-caption text-grey q-mb-sm")
+                with ui.expansion(
+                    "k_d Calibration", icon="science",
+                ).classes("w-full"):
+                    ui.markdown(
+                        "Fill the vessel at 100% power until steady-state, "
+                        "then evacuate at 0% power until O3 clears. "
+                        "Fits a decay-aware CSTR model to extract system volume, "
+                        "O3 decay rate, and dead volume. Air compressor is OFF "
+                        "during calibration for best decay sensitivity. "
+                        "Parameters generalise to any flow rate and air config."
+                    ).classes("text-caption text-grey q-mb-sm")
+                    _kd_flow_rates = list_calibrated_flow_rates()
+                    with ui.row().classes("q-gutter-sm items-end q-mb-sm"):
+                        fill_lpm_input = ui.select(
+                            label="Flow Rate (LPM)",
+                            options={r: f"{r:.2f} LPM" for r in _kd_flow_rates}
+                                if _kd_flow_rates
+                                else {0: "No calibrated rates"},
+                            value=_kd_flow_rates[0] if _kd_flow_rates else 0,
+                        ).classes("w-24")
 
-                _kd_flow_rates = list_calibrated_flow_rates()
-                with ui.row().classes("q-gutter-sm items-end q-mb-sm"):
-                    fill_lpm_input = ui.select(
-                        label="Flow Rate (LPM)",
-                        options={r: f"{r:.2f} LPM" for r in _kd_flow_rates}
-                            if _kd_flow_rates
-                            else {0: "No calibrated rates"},
-                        value=_kd_flow_rates[0] if _kd_flow_rates else 0,
-                    ).classes("w-24")
-
-                fill_target_lbl = ui.label("").classes(
-                    "text-caption text-grey q-mb-xs"
-                )
-
-                def _update_fill_target_label() -> None:
-                    lpm_val = fill_lpm_input.value
-                    lpm = float(lpm_val) if lpm_val else DEFAULT_FLOW_LPM
-                    tgt = predict_o3_from_power(100, lpm)
-                    if tgt > 0.01:
-                        fill_target_lbl.text = (
-                            f"C_in at 100% power: {tgt:.3f} %vol "
-                            f"(steady-state: range < {FILL_STEADY_RANGE}% "
-                            f"over {FILL_STEADY_COUNT} samples)"
-                        )
-                    else:
-                        fill_target_lbl.text = (
-                            "No power model — fit a model first"
-                        )
-
-                _update_fill_target_label()
-                fill_lpm_input.on("update:model-value", lambda _: _update_fill_target_label())
-
-                with ui.row().classes("q-gutter-sm items-center q-mb-sm"):
-                    async def _start_fill_seq():
-                        lpm_val = fill_lpm_input.value
-                        if not lpm_val or float(lpm_val) <= 0:
-                            _notify(
-                                "No calibrated flow rate selected — run "
-                                "Power-O3 calibration first",
-                                "negative",
-                            )
-                            return
-                        lpm = float(lpm_val)
-                        cert = _find_valid_cert(100, lpm)
-                        if cert is None:
-                            with ui.dialog() as _cert_dlg, ui.card().classes("q-pa-md"):
-                                ui.label(
-                                    "No valid validation certificate found"
-                                ).classes("text-subtitle1 text-bold q-mb-sm")
-                                ui.label(
-                                    "A 100% power validation at the selected flow rate "
-                                    "must pass within the last 24 hours before running "
-                                    "CSTR calibration. This ensures the C_in used for "
-                                    "model fitting is accurate."
-                                ).classes("text-body2 q-mb-md")
-                                with ui.row().classes("q-gutter-sm justify-end"):
-                                    ui.button(
-                                        "Cancel", on_click=_cert_dlg.close,
-                                    ).props("flat")
-
-                                    async def _run_val_from_dlg():
-                                        _cert_dlg.close()
-                                        val_pwr_input.value = 100
-                                        val_lpm_input.value = lpm
-                                        await cmd_sequence_start(
-                                            "validate", power=100, flow=lpm,
-                                        )
-
-                                    ui.button(
-                                        "Run Validation", icon="verified",
-                                        on_click=_run_val_from_dlg,
-                                        color="blue",
-                                    )
-                            _cert_dlg.open()
-                            return
-                        await cmd_sequence_start(
-                            "cstr_cal",
-                            flow=lpm,
-                        )
-
-                    fill_start_btn = ui.button(
-                        "Start k_d Calibration", icon="play_arrow",
-                        on_click=_start_fill_seq, color="teal",
+                    fill_target_lbl = ui.label("").classes(
+                        "text-caption text-grey q-mb-xs"
                     )
 
-                    async def _stop_fill_seq():
-                        S.fill_active = False
-                        await cmd_sequence_stop()
+                    def _update_fill_target_label() -> None:
+                        lpm_val = fill_lpm_input.value
+                        lpm = float(lpm_val) if lpm_val else DEFAULT_FLOW_LPM
+                        tgt = predict_o3_from_power(100, lpm)
+                        if tgt > 0.01:
+                            fill_target_lbl.text = (
+                                f"C_in at 100% power: {tgt:.3f} %vol "
+                                f"(steady-state: range < {FILL_STEADY_RANGE}% "
+                                f"over {FILL_STEADY_COUNT} samples)"
+                            )
+                        else:
+                            fill_target_lbl.text = (
+                                "No power model — fit a model first"
+                            )
 
-                    fill_stop_btn = ui.button(
-                        "Stop", icon="stop",
-                        on_click=_stop_fill_seq, color="red",
+                    _update_fill_target_label()
+                    fill_lpm_input.on("update:model-value", lambda _: _update_fill_target_label())
+
+                    with ui.row().classes("q-gutter-sm items-center q-mb-sm"):
+                        async def _start_fill_seq():
+                            lpm_val = fill_lpm_input.value
+                            if not lpm_val or float(lpm_val) <= 0:
+                                _notify(
+                                    "No calibrated flow rate selected — run "
+                                    "Power-O3 calibration first",
+                                    "negative",
+                                )
+                                return
+                            lpm = float(lpm_val)
+                            cert = _find_valid_cert(lpm)
+                            if cert is None:
+                                with ui.dialog() as _cert_dlg, ui.card().classes("q-pa-md"):
+                                    ui.label(
+                                        "No valid verification certificate found"
+                                    ).classes("text-subtitle1 text-bold q-mb-sm")
+                                    ui.label(
+                                        "A verification at the selected flow rate "
+                                        "must pass within the last 24 hours before running "
+                                        "CSTR calibration. This ensures the C_in used for "
+                                        "model fitting is accurate."
+                                    ).classes("text-body2 q-mb-md")
+                                    with ui.row().classes("q-gutter-sm justify-end"):
+                                        ui.button(
+                                            "Cancel", on_click=_cert_dlg.close,
+                                        ).props("flat")
+
+                                        async def _run_ver_from_dlg():
+                                            _cert_dlg.close()
+                                            _ver.hold_input.value = 50
+                                            _ver.lpm_input.value = lpm
+                                            tabs.value = tab_verification
+                                            await cmd_sequence_start(
+                                                "verify", power_hold=50, flow=lpm,
+                                            )
+
+                                        ui.button(
+                                            "Run Verification", icon="verified",
+                                            on_click=_run_ver_from_dlg,
+                                            color="blue",
+                                        )
+                                _cert_dlg.open()
+                                return
+                            await cmd_sequence_start(
+                                "cstr_cal",
+                                flow=lpm,
+                            )
+
+                        fill_start_btn = ui.button(
+                            "Start k_d Calibration", icon="play_arrow",
+                            on_click=_start_fill_seq, color="teal",
+                        )
+
+                        async def _stop_fill_seq():
+                            S.fill_active = False
+                            await cmd_sequence_stop()
+
+                        fill_stop_btn = ui.button(
+                            "Stop", icon="stop",
+                            on_click=_stop_fill_seq, color="red",
+                        ).props("flat")
+
+                    fill_progress = ui.linear_progress(
+                        value=0, show_value=False,
+                    ).classes("w-full q-mb-xs")
+                    fill_phase_lbl = ui.label("").classes(
+                        "text-caption text-grey"
+                    )
+
+                    with ui.row().classes("items-center q-gutter-xs q-mt-sm"):
+                        cstr_model_icon = ui.icon("info").classes("text-orange")
+                        cstr_model_lbl = ui.label(
+                            S.cstr_model_status
+                        ).classes("text-caption")
+
+                    def _update_cstr_model_status() -> None:
+                        if S.active_cstr_model and S.active_cstr_model.is_valid:
+                            cstr_model_icon.name = "check_circle"
+                            cstr_model_icon.classes("text-green", remove="text-orange")
+                            cstr_model_lbl.text = (
+                                f"Active: {S.cstr_model_status}"
+                            )
+                        else:
+                            cstr_model_icon.name = "info"
+                            cstr_model_icon.classes("text-orange", remove="text-green")
+                            cstr_model_lbl.text = S.cstr_model_status
+
+                    _update_cstr_model_status()
+
+                    async def _fit_cstr_model_click():
+                        model = await _fit_and_save_cstr_model()
+                        if model:
+                            _update_cstr_model_status()
+
+                    fill_fit_btn = ui.button(
+                        "Fit CSTR Model", icon="show_chart",
+                        on_click=_fit_cstr_model_click, color="purple",
                     ).props("flat")
 
-                fill_progress = ui.linear_progress(
-                    value=0, show_value=False,
-                ).classes("w-full q-mb-xs")
-                fill_phase_lbl = ui.label("").classes(
-                    "text-caption text-grey"
-                )
-
-                with ui.row().classes("items-center q-gutter-xs q-mt-sm"):
-                    cstr_model_icon = ui.icon("info").classes("text-orange")
-                    cstr_model_lbl = ui.label(
-                        S.cstr_model_status
-                    ).classes("text-caption")
-
-                def _update_cstr_model_status() -> None:
-                    if S.active_cstr_model and S.active_cstr_model.is_valid:
-                        cstr_model_icon.name = "check_circle"
-                        cstr_model_icon.classes("text-green", remove="text-orange")
-                        cstr_model_lbl.text = (
-                            f"Active: {S.cstr_model_status}"
-                        )
-                    else:
-                        cstr_model_icon.name = "info"
-                        cstr_model_icon.classes("text-orange", remove="text-green")
-                        cstr_model_lbl.text = S.cstr_model_status
-
-                _update_cstr_model_status()
-
-                async def _fit_cstr_model_click():
-                    model = await _fit_and_save_cstr_model()
-                    if model:
-                        _update_cstr_model_status()
-
-                fill_fit_btn = ui.button(
-                    "Fit CSTR Model", icon="show_chart",
-                    on_click=_fit_cstr_model_click, color="purple",
-                ).props("flat")
-
-                fill_chart = ui.echart({
-                    "darkMode": True,
-                    "tooltip": {"trigger": "axis"},
-                    "xAxis": {"type": "category", "name": "Sample",
-                              "data": []},
-                    "yAxis": {"type": "value", "name": "O3 (%vol)"},
-                    "series": [
-                        {"name": "O3", "type": "line", "smooth": True,
-                         "data": [], "showSymbol": False,
-                         "lineStyle": {"color": "#26A69A"},
-                         "areaStyle": {"opacity": 0.1, "color": "#26A69A"}},
-                    ],
-                }).classes("w-full").style("height: 220px")
+                    fill_chart = ui.echart({
+                        "darkMode": True,
+                        "tooltip": {"trigger": "axis"},
+                        "xAxis": {"type": "category", "name": "Sample",
+                                  "data": []},
+                        "yAxis": {"type": "value", "name": "O3 (%vol)"},
+                        "series": [
+                            {"name": "O3", "type": "line", "smooth": True,
+                             "data": [], "showSymbol": False,
+                             "lineStyle": {"color": "#26A69A"},
+                             "areaStyle": {"opacity": 0.1, "color": "#26A69A"}},
+                        ],
+                    }).classes("w-full").style("height: 220px")
 
                 # ---- k_abs Calibration section ---------------------------
-                ui.separator().classes("q-my-md")
-                ui.label("k_abs Calibration (Loaded Vessel)").classes(
-                    "text-h6 q-mb-sm"
-                )
-                ui.markdown(
-                    "Fill a substrate-loaded vessel at 100% power for 30 min, "
-                    "then evacuate. Fits k_abs (substrate absorption rate) and "
-                    "V_residual (free gas volume) from the transient response. "
-                    "Requires a valid k_d model and power-O3 calibration."
-                ).classes("text-caption text-grey q-mb-sm")
+                with ui.expansion(
+                    "k_abs Calibration (Loaded Vessel)", icon="biotech",
+                ).classes("w-full"):
+                    ui.markdown(
+                        "Fill a substrate-loaded vessel at 100% power for 30 min, "
+                        "then evacuate. Fits k_abs (substrate absorption rate) and "
+                        "V_residual (free gas volume) from the transient response. "
+                        "Requires a valid k_d model and power-O3 calibration."
+                    ).classes("text-caption text-grey q-mb-sm")
 
-                # Substrate preset display
-                _cfg_path = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)),
-                    "substrate_config.json",
-                )
-                _substrate_cfg: dict = {}
-                try:
-                    with open(_cfg_path) as _f:
-                        _substrate_cfg = json.load(_f)
-                except Exception:
-                    pass
-                _presets = {
-                    k: v for k, v in _substrate_cfg.get("presets", {}).items()
-                    if isinstance(v, (int, float))
-                }
-                if _presets:
-                    with ui.card().classes("q-pa-xs q-mb-sm").props("flat bordered"):
-                        with ui.row().classes("q-gutter-sm items-center"):
-                            ui.icon("science", size="xs").classes("text-grey")
-                            ui.label("Substrate Presets:").classes("text-caption text-weight-bold")
-                            for _k, _v in _presets.items():
-                                ui.label(f"{_k}: {_v} kg").classes("text-caption text-grey")
-                            _kg_total = sum(_presets.values())
-                            ui.label(f"| Total: {_kg_total:.3f} kg").classes(
-                                "text-caption text-weight-bold"
-                            )
 
-                # Flow rate selector (calibrated rates only)
-                _kabs_flow_rates = list_calibrated_flow_rates()
-                with ui.row().classes("q-gutter-sm items-end q-mb-sm"):
-                    kabs_flow_select = ui.select(
-                        label="Flow Rate (LPM)",
-                        options={r: f"{r:.2f} LPM" for r in _kabs_flow_rates}
-                            if _kabs_flow_rates
-                            else {0: "No calibrated rates"},
-                        value=_kabs_flow_rates[0] if _kabs_flow_rates else 0,
-                    ).classes("w-40")
-
-                    async def _start_kabs_seq():
-                        flow_val = kabs_flow_select.value
-                        if not flow_val or flow_val <= 0:
-                            _notify(
-                                "No calibrated flow rate selected — run "
-                                "Power-O3 calibration first",
-                                "negative",
-                            )
-                            return
-                        flow = float(flow_val)
-                        # Check power-O3 calibration freshness
-                        cal_model = _find_valid_calibration_model(flow)
-                        if cal_model is None:
-                            _notify(
-                                f"No valid power-O3 model for {flow:.1f} LPM "
-                                f"(max 2 weeks old). Run calibration first.",
-                                "negative",
-                            )
-                            return
-                        # Check k_d model exists
-                        if not S.active_cstr_model or not S.active_cstr_model.is_valid:
-                            _notify(
-                                "No valid k_d model. Run k_d calibration first.",
-                                "negative",
-                            )
-                            return
-                        # Check 100% validation
-                        cert = _find_valid_cert(100, flow)
-                        if cert is None:
-                            with ui.dialog() as _cert_dlg, ui.card().classes("q-pa-md"):
-                                ui.label(
-                                    "No valid 100% validation certificate"
-                                ).classes("text-subtitle1 text-bold q-mb-sm")
-                                ui.label(
-                                    "A 100% power validation at the selected flow "
-                                    "rate must pass within the last 24 hours."
-                                ).classes("text-body2 q-mb-md")
-                                with ui.row().classes("q-gutter-sm justify-end"):
-                                    ui.button(
-                                        "Cancel", on_click=_cert_dlg.close,
-                                    ).props("flat")
-                            _cert_dlg.open()
-                            return
-                        await cmd_sequence_start("k_abs_cal", flow=flow)
-
-                    kabs_start_btn = ui.button(
-                        "Start k_abs Calibration", icon="play_arrow",
-                        on_click=_start_kabs_seq, color="deep-purple",
+                    # Substrate preset display
+                    _cfg_path = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        "substrate_config.json",
                     )
-                    if not _kabs_flow_rates:
-                        kabs_start_btn.props("disable")
+                    _substrate_cfg: dict = {}
+                    try:
+                        with open(_cfg_path) as _f:
+                            _substrate_cfg = json.load(_f)
+                    except Exception:
+                        pass
+                    _presets = {
+                        k: v for k, v in _substrate_cfg.get("presets", {}).items()
+                        if isinstance(v, (int, float))
+                    }
+                    if _presets:
+                        with ui.card().classes("q-pa-xs q-mb-sm").props("flat bordered"):
+                            with ui.row().classes("q-gutter-sm items-center"):
+                                ui.icon("science", size="xs").classes("text-grey")
+                                ui.label("Substrate Presets:").classes("text-caption text-weight-bold")
+                                for _k, _v in _presets.items():
+                                    ui.label(f"{_k}: {_v} kg").classes("text-caption text-grey")
+                                _kg_total = sum(_presets.values())
+                                ui.label(f"| Total: {_kg_total:.3f} kg").classes(
+                                    "text-caption text-weight-bold"
+                                )
 
-                    async def _stop_kabs_seq():
-                        S.fill_active = False
-                        await cmd_sequence_stop()
+                    # Flow rate selector (calibrated rates only)
+                    _kabs_flow_rates = list_calibrated_flow_rates()
+                    with ui.row().classes("q-gutter-sm items-end q-mb-sm"):
+                        kabs_flow_select = ui.select(
+                            label="Flow Rate (LPM)",
+                            options={r: f"{r:.2f} LPM" for r in _kabs_flow_rates}
+                                if _kabs_flow_rates
+                                else {0: "No calibrated rates"},
+                            value=_kabs_flow_rates[0] if _kabs_flow_rates else 0,
+                        ).classes("w-40")
 
-                    kabs_stop_btn = ui.button(
-                        "Stop", icon="stop",
-                        on_click=_stop_kabs_seq, color="red",
-                    ).props("flat")
+                        async def _start_kabs_seq():
+                            flow_val = kabs_flow_select.value
+                            if not flow_val or flow_val <= 0:
+                                _notify(
+                                    "No calibrated flow rate selected — run "
+                                    "Power-O3 calibration first",
+                                    "negative",
+                                )
+                                return
+                            flow = float(flow_val)
+                            # Check power-O3 calibration freshness
+                            cal_model = _find_valid_calibration_model(flow)
+                            if cal_model is None:
+                                _notify(
+                                    f"No valid power-O3 model for {flow:.2f} LPM "
+                                    f"(max 2 weeks old). Run calibration first.",
+                                    "negative",
+                                )
+                                return
+                            # Check k_d model exists
+                            if not S.active_cstr_model or not S.active_cstr_model.is_valid:
+                                _notify(
+                                    "No valid k_d model. Run k_d calibration first.",
+                                    "negative",
+                                )
+                                return
+                            # Check verification cert
+                            cert = _find_valid_cert(flow)
+                            if cert is None:
+                                with ui.dialog() as _cert_dlg, ui.card().classes("q-pa-md"):
+                                    ui.label(
+                                        "No valid verification certificate"
+                                    ).classes("text-subtitle1 text-bold q-mb-sm")
+                                    ui.label(
+                                        "A verification at the selected flow "
+                                        "rate must pass within the last 24 hours."
+                                    ).classes("text-body2 q-mb-md")
+                                    with ui.row().classes("q-gutter-sm justify-end"):
+                                        ui.button(
+                                            "Cancel", on_click=_cert_dlg.close,
+                                        ).props("flat")
 
-                kabs_progress = ui.linear_progress(
-                    value=0, show_value=False,
-                ).classes("w-full q-mb-xs")
-                kabs_phase_lbl = ui.label("").classes("text-caption text-grey")
+                                        async def _run_ver_from_kabs_dlg():
+                                            _cert_dlg.close()
+                                            _ver.hold_input.value = 50
+                                            _ver.lpm_input.value = flow
+                                            tabs.value = tab_verification
+                                            await cmd_sequence_start(
+                                                "verify", power_hold=50, flow=flow,
+                                            )
+
+                                        ui.button(
+                                            "Run Verification", icon="verified",
+                                            on_click=_run_ver_from_kabs_dlg,
+                                            color="blue",
+                                        )
+                                _cert_dlg.open()
+                                return
+                            await cmd_sequence_start("k_abs_cal", flow=flow)
+
+                        kabs_start_btn = ui.button(
+                            "Start k_abs Calibration", icon="play_arrow",
+                            on_click=_start_kabs_seq, color="deep-purple",
+                        )
+                        if not _kabs_flow_rates:
+                            kabs_start_btn.props("disable")
+
+                        async def _stop_kabs_seq():
+                            S.fill_active = False
+                            await cmd_sequence_stop()
+
+                        kabs_stop_btn = ui.button(
+                            "Stop", icon="stop",
+                            on_click=_stop_kabs_seq, color="red",
+                        ).props("flat")
+
+                    kabs_progress = ui.linear_progress(
+                        value=0, show_value=False,
+                    ).classes("w-full q-mb-xs")
+                    kabs_phase_lbl = ui.label("").classes("text-caption text-grey")
 
             # =============================================================
             # PROCESSING TAB
@@ -1326,6 +1345,45 @@ async def index():
                 with ui.row().classes("q-gutter-sm items-center q-mb-sm"):
                     async def _start_batch():
                         _flow = float(proc_flow_select.value)
+                        # Verification gate — require a recent PASS cert
+                        cert = _find_valid_cert(_flow)
+                        if cert is None:
+                            with ui.dialog() as _bcert_dlg, ui.card().classes(
+                                "q-pa-md"
+                            ):
+                                ui.label(
+                                    "No valid verification certificate"
+                                ).classes("text-subtitle1 text-bold q-mb-sm")
+                                ui.label(
+                                    "A verification at the selected flow rate "
+                                    "must pass within the last 24 hours "
+                                    "before running a batch process."
+                                ).classes("text-body2 q-mb-md")
+                                with ui.row().classes("q-gutter-sm justify-end"):
+                                    ui.button(
+                                        "Cancel",
+                                        on_click=_bcert_dlg.close,
+                                    ).props("flat")
+
+                                    async def _run_ver_from_batch_dlg():
+                                        _bcert_dlg.close()
+                                        _ver.hold_input.value = 50
+                                        _ver.lpm_input.value = _flow
+                                        tabs.value = tab_verification
+                                        await cmd_sequence_start(
+                                            "verify",
+                                            power_hold=50,
+                                            flow=_flow,
+                                        )
+
+                                    ui.button(
+                                        "Run Verification",
+                                        icon="verified",
+                                        on_click=_run_ver_from_batch_dlg,
+                                        color="blue",
+                                    )
+                            _bcert_dlg.open()
+                            return
                         await cmd_sequence_start(
                             "process_batch",
                             flow=_flow,
@@ -1446,95 +1504,10 @@ async def index():
                 }).classes("w-full").style("height: 220px")
 
             # =============================================================
-            # VALIDATION TAB
+            # VERIFICATION TAB  (extracted to ui_tab_verification.py)
             # =============================================================
-            with ui.tab_panel(tab_validation):
-                ui.label("Validation").classes("text-h6 q-mb-sm")
-                ui.markdown(
-                    "Pre-flight check: PC generates a recipe with baseline, "
-                    "spot checks, and target power hold. Compares measured "
-                    "O3 to model prediction. Air compressor must be OFF."
-                ).classes("text-caption text-grey q-mb-sm")
-
-                _val_flow_rates = list_calibrated_flow_rates()
-                with ui.row().classes("q-gutter-sm items-end q-mb-sm"):
-                    val_pwr_input = ui.number(
-                        label="Power %", value=75.0,
-                        min=10, max=100, step=5, format="%.0f",
-                    ).classes("w-24")
-                    val_lpm_input = ui.select(
-                        label="Flow Rate (LPM)",
-                        options={r: f"{r:.2f} LPM" for r in _val_flow_rates}
-                            if _val_flow_rates
-                            else {0: "No calibrated rates"},
-                        value=_val_flow_rates[0] if _val_flow_rates else 0,
-                    ).classes("w-40")
-
-                    async def _start_val():
-                        pwr = float(val_pwr_input.value or 75)
-                        lpm_val = val_lpm_input.value
-                        if not lpm_val or float(lpm_val) <= 0:
-                            _notify(
-                                "No calibrated flow rate selected",
-                                "negative",
-                            )
-                            return
-                        lpm = float(lpm_val)
-                        await cmd_sequence_start(
-                            "validate", power=pwr, flow=lpm,
-                        )
-
-                    val_start_btn = ui.button(
-                        "Validate", icon="play_arrow",
-                        on_click=_start_val, color="blue",
-                    )
-
-                val_result_card = ui.card().classes(
-                    "w-full q-pa-md q-mt-sm"
-                )
-                val_result_card.visible = False
-                with val_result_card:
-                    with ui.row().classes(
-                        "w-full items-center justify-between"
-                    ):
-                        with ui.row().classes("items-center q-gutter-sm"):
-                            val_result_icon = ui.icon(
-                                "check_circle"
-                            ).classes("text-h3")
-                            val_result_title = ui.label("").classes(
-                                "text-h6"
-                            )
-
-                        def _dismiss_val_result():
-                            S.val_result = {}
-                            val_result_card.visible = False
-
-                        ui.button(
-                            icon="close",
-                            on_click=_dismiss_val_result,
-                            color="grey",
-                        ).props("flat dense round size=sm")
-                    with ui.row().classes("q-gutter-md q-mt-sm"):
-                        val_mean_lbl = ui.label("")
-                        val_expected_lbl = ui.label("")
-                        val_dev_lbl = ui.label("")
-                        val_std_lbl = ui.label("")
-                    val_file_lbl = ui.label("").classes(
-                        "text-caption text-grey q-mt-xs"
-                    )
-
-                val_chart = ui.echart({
-                    "darkMode": True,
-                    "tooltip": {"trigger": "axis"},
-                    "xAxis": {"type": "category", "name": "Sample",
-                              "data": []},
-                    "yAxis": {"type": "value", "name": "O3 (%vol)"},
-                    "series": [
-                        {"name": "O3", "type": "line", "smooth": True,
-                         "data": [], "showSymbol": False,
-                         "areaStyle": {"opacity": 0.1}},
-                    ],
-                }).classes("w-full").style("height: 220px")
+            _ver = build_verification_tab(tab_verification, cmd_sequence_start)
+            ver_start_btn = _ver.start_btn
 
             # =============================================================
             # TELEMETRY TAB
@@ -1560,48 +1533,116 @@ async def index():
                         ).style("height: 200px")
                 telem_skeleton.visible = True
 
-                echart_o3 = ui.echart({
-                    "darkMode": True,
-                    "tooltip": {"trigger": "axis"},
-                    "legend": {"data": ["Vessel O3 (%vol)", "Room O3 (ppm)"]},
-                    "xAxis": {"type": "time", "name": "Time"},
-                    "yAxis": [
-                        {"type": "value", "name": "O3 %vol", "position": "left"},
-                        {"type": "value", "name": "Room ppm", "position": "right"},
-                    ],
-                    "series": [
-                        {"name": "Vessel O3 (%vol)", "type": "line", "smooth": True,
-                         "yAxisIndex": 0, "data": [], "showSymbol": False,
-                         "lineStyle": {"width": 2, "color": "#42A5F5"},
-                         "areaStyle": {"opacity": 0.08}},
-                        {"name": "Room O3 (ppm)", "type": "line", "smooth": True,
-                         "yAxisIndex": 1, "data": [], "showSymbol": False,
-                         "lineStyle": {"width": 2, "color": "#66BB6A"}},
-                    ],
-                    "dataZoom": [{"type": "inside"}, {"type": "slider"}],
-                }).classes("w-full").style("height: 260px")
-                echart_o3.visible = False
+                # -- O3 Concentration chart (expandable) ------------------
+                with ui.expansion(
+                    "O3 Concentration", icon="bubble_chart",
+                ).classes("w-full").props("default-opened"):
+                    echart_o3 = ui.echart({
+                        "darkMode": True,
+                        "tooltip": {"trigger": "axis"},
+                        "legend": {"data": ["Vessel O3 (%vol)", "Room O3 (ppm)"]},
+                        "xAxis": {"type": "time", "name": "Time"},
+                        "yAxis": [
+                            {"type": "value", "name": "O3 %vol", "position": "left"},
+                            {"type": "value", "name": "Room ppm", "position": "right"},
+                        ],
+                        "series": [
+                            {"name": "Vessel O3 (%vol)", "type": "line", "smooth": True,
+                             "yAxisIndex": 0, "data": [], "showSymbol": False,
+                             "lineStyle": {"width": 2, "color": "#42A5F5"},
+                             "areaStyle": {"opacity": 0.08}},
+                            {"name": "Room O3 (ppm)", "type": "line", "smooth": True,
+                             "yAxisIndex": 1, "data": [], "showSymbol": False,
+                             "lineStyle": {"width": 2, "color": "#66BB6A"}},
+                        ],
+                        "dataZoom": [{"type": "inside"}, {"type": "slider"}],
+                    }).classes("w-full").style("height: 260px")
+                    echart_o3.visible = False
 
-                echart_pwr = ui.echart({
-                    "darkMode": True,
-                    "tooltip": {"trigger": "axis"},
-                    "legend": {"data": ["Power (%)", "Cell Temp (\u00b0C)"]},
-                    "xAxis": {"type": "time", "name": "Time"},
-                    "yAxis": [
-                        {"type": "value", "name": "Power %", "position": "left", "max": 105},
-                        {"type": "value", "name": "\u00b0C", "position": "right"},
-                    ],
-                    "series": [
-                        {"name": "Power (%)", "type": "line", "smooth": True,
-                         "yAxisIndex": 0, "data": [], "showSymbol": False,
-                         "lineStyle": {"width": 2, "color": "#FFA726"}},
-                        {"name": "Cell Temp (\u00b0C)", "type": "line", "smooth": True,
-                         "yAxisIndex": 1, "data": [], "showSymbol": False,
-                         "lineStyle": {"width": 2, "color": "#EF5350"}},
-                    ],
-                    "dataZoom": [{"type": "inside"}, {"type": "slider"}],
-                }).classes("w-full").style("height: 260px")
-                echart_pwr.visible = False
+                # -- Power chart (expandable) -----------------------------
+                with ui.expansion(
+                    "Power", icon="bolt",
+                ).classes("w-full").props("default-opened"):
+                    echart_pwr = ui.echart({
+                        "darkMode": True,
+                        "tooltip": {"trigger": "axis"},
+                        "legend": {"data": ["Power Target (%)", "Power Actual (%)"]},
+                        "xAxis": {"type": "time", "name": "Time"},
+                        "yAxis": [
+                            {"type": "value", "name": "Power %", "position": "left",
+                             "max": 105},
+                        ],
+                        "series": [
+                            {"name": "Power Target (%)", "type": "line", "smooth": True,
+                             "data": [], "showSymbol": False,
+                             "lineStyle": {"width": 2, "color": "#FFA726",
+                                           "type": "dashed"}},
+                            {"name": "Power Actual (%)", "type": "line", "smooth": True,
+                             "data": [], "showSymbol": False,
+                             "lineStyle": {"width": 2, "color": "#FF7043"}},
+                        ],
+                        "dataZoom": [{"type": "inside"}, {"type": "slider"}],
+                    }).classes("w-full").style("height: 260px")
+                    echart_pwr.visible = False
+
+                # -- Temperature chart (expandable) -----------------------
+                with ui.expansion(
+                    "Temperature", icon="thermostat",
+                ).classes("w-full"):
+                    echart_temp = ui.echart({
+                        "darkMode": True,
+                        "tooltip": {"trigger": "axis"},
+                        "legend": {"data": [
+                            "Cell Temp (\u00b0C)", "Vessel Temp (\u00b0C)",
+                        ]},
+                        "xAxis": {"type": "time", "name": "Time"},
+                        "yAxis": [
+                            {"type": "value", "name": "\u00b0C", "position": "left"},
+                        ],
+                        "series": [
+                            {"name": "Cell Temp (\u00b0C)", "type": "line",
+                             "smooth": True, "data": [], "showSymbol": False,
+                             "lineStyle": {"width": 2, "color": "#EF5350"}},
+                            {"name": "Vessel Temp (\u00b0C)", "type": "line",
+                             "smooth": True, "data": [], "showSymbol": False,
+                             "lineStyle": {"width": 2, "color": "#FF8A65"}},
+                        ],
+                        "dataZoom": [{"type": "inside"}, {"type": "slider"}],
+                    }).classes("w-full").style("height: 260px")
+                    echart_temp.visible = False
+
+                # -- Pressure / Sensor chart (expandable) -----------------
+                with ui.expansion(
+                    "Pressure / Sensor", icon="speed",
+                ).classes("w-full"):
+                    echart_sensor = ui.echart({
+                        "darkMode": True,
+                        "tooltip": {"trigger": "axis"},
+                        "legend": {"data": [
+                            "Pressure (mbar)", "Sample V", "Ref V",
+                        ]},
+                        "xAxis": {"type": "time", "name": "Time"},
+                        "yAxis": [
+                            {"type": "value", "name": "mbar", "position": "left"},
+                            {"type": "value", "name": "V", "position": "right"},
+                        ],
+                        "series": [
+                            {"name": "Pressure (mbar)", "type": "line",
+                             "smooth": True, "yAxisIndex": 0,
+                             "data": [], "showSymbol": False,
+                             "lineStyle": {"width": 2, "color": "#AB47BC"}},
+                            {"name": "Sample V", "type": "line",
+                             "smooth": True, "yAxisIndex": 1,
+                             "data": [], "showSymbol": False,
+                             "lineStyle": {"width": 2, "color": "#26C6DA"}},
+                            {"name": "Ref V", "type": "line",
+                             "smooth": True, "yAxisIndex": 1,
+                             "data": [], "showSymbol": False,
+                             "lineStyle": {"width": 2, "color": "#9CCC65"}},
+                        ],
+                        "dataZoom": [{"type": "inside"}, {"type": "slider"}],
+                    }).classes("w-full").style("height: 260px")
+                    echart_sensor.visible = False
 
                 with ui.expansion("Raw data", icon="table_chart").classes(
                     "w-full q-mt-sm"
@@ -1625,14 +1666,28 @@ async def index():
                         columns=[
                             {"name": "timestamp", "label": "Time",
                              "field": "timestamp", "align": "left", "sortable": True},
-                            {"name": "vessel_o3_pct", "label": "O3 %",
+                            {"name": "vessel_o3_pct", "label": "O3 %vol",
                              "field": "vessel_o3_pct", "sortable": True},
-                            {"name": "room_o3_ppm", "label": "Room ppm",
-                             "field": "room_o3_ppm", "sortable": True},
-                            {"name": "power_actual_pct", "label": "Power %",
-                             "field": "power_actual_pct", "sortable": True},
                             {"name": "cell_temp_c", "label": "Cell \u00b0C",
                              "field": "cell_temp_c", "sortable": True},
+                            {"name": "pressure_mbar", "label": "Press mbar",
+                             "field": "pressure_mbar", "sortable": True},
+                            {"name": "sample_v", "label": "Sample V",
+                             "field": "sample_v", "sortable": True},
+                            {"name": "ref_v", "label": "Ref V",
+                             "field": "ref_v", "sortable": True},
+                            {"name": "room_o3_ppm", "label": "Room ppm",
+                             "field": "room_o3_ppm", "sortable": True},
+                            {"name": "vessel_temp_c", "label": "Vessel \u00b0C",
+                             "field": "vessel_temp_c", "sortable": True},
+                            {"name": "power_target_pct", "label": "Pwr Tgt %",
+                             "field": "power_target_pct", "sortable": True},
+                            {"name": "power_actual_pct", "label": "Pwr Act %",
+                             "field": "power_actual_pct", "sortable": True},
+                            {"name": "wiper_voltage", "label": "Wiper V",
+                             "field": "wiper_voltage", "sortable": True},
+                            {"name": "esp_ts_ms", "label": "ESP ts",
+                             "field": "esp_ts_ms", "sortable": True},
                         ],
                         rows=[],
                         pagination={"rowsPerPage": 15},
@@ -1690,11 +1745,28 @@ async def index():
     _relay_ts: float = 0.0
     _echart_has_data: bool = False
     _last_prompt_id: str = ""
+    _last_cal_active: bool = False
+    _last_seq_active: bool = False
     _tick_running: bool = False
+
+    def _refresh_flow_rate_selects() -> None:
+        """Re-scan Models/O3Power/ and update all flow-rate select widgets."""
+        fresh = list_calibrated_flow_rates()
+        if not fresh:
+            return
+        # k_d flow select
+        fill_lpm_input.options = {r: f"{r:.2f} LPM" for r in fresh}
+        fill_lpm_input.update()
+        # k_abs flow select
+        kabs_flow_select.options = {r: f"{r:.2f} LPM" for r in fresh}
+        kabs_flow_select.update()
+        # processing flow select
+        proc_flow_select.options = fresh
+        proc_flow_select.update()
 
     async def _tick() -> None:
         nonlocal _updating, _relay_ts, _echart_has_data, _last_prompt_id, _tick_running
-
+        nonlocal _last_seq_active
         if _tick_running:
             return
         _tick_running = True
@@ -1705,6 +1777,7 @@ async def index():
 
     async def _tick_inner() -> None:
         nonlocal _updating, _relay_ts, _echart_has_data, _last_prompt_id
+        nonlocal _last_cal_active, _last_seq_active
 
         while _notify_queue:
             _msg, _lvl = _notify_queue.popleft()
@@ -1742,7 +1815,7 @@ async def index():
         btn_o2.props(f'color={"green" if S.relay_o2_conc else "grey"}')
         btn_o3.props(f'color={"green" if S.relay_o3_gen else "grey"}')
 
-        card_flow_val.text = f"{S.flow_lpm:.1f}"
+        card_flow_val.text = f"{S.flow_lpm:.2f}"
         card_o3_val.text = f"{S.vessel_o3_pct:.3f}"
         card_room_val.text = f"{S.room_o3_ppm:.3f}"
         card_vtemp_val.text = (
@@ -1763,7 +1836,7 @@ async def index():
         if S.sequence_active:
             type_names = {
                 "calibrate": "CALIBRATE",
-                "validate": "VALIDATE",
+                "verify": "VERIFY",
                 "cstr_cal": "CSTR CAL",
                 "k_abs_cal": "k_abs CAL",
                 "process_batch": "BATCH",
@@ -1773,7 +1846,7 @@ async def index():
             phase = S.seq_phase
             _PHASE_DESCS = {
                 "loading": "Preparing...",
-                "starting": f"Starting @ {S.cal_lpm:.1f} LPM",
+                "starting": f"Starting @ {S.cal_lpm:.2f} LPM",
                 "started": "Initializing...",
                 "relay_setup": "Enabling relays",
                 "stabilizing": "Equipment warm-up (~3s)",
@@ -1828,9 +1901,9 @@ async def index():
             seq_elapsed_lbl.text = f"{mins}:{secs:02d}"
 
         lockable = [slider, inp_pwr, inp_o3, inp_mg, inp_g30,
-                     btn_air, btn_o2, btn_o3, inp_lpm_sb,
+                     btn_air, btn_o2, btn_o3, inp_lpm_sb, inp_lpm_settings,
                      cal_start_btn, cal_lpm_input, cal_rnd_input,
-                     cal_air_toggle, val_start_btn, fill_start_btn,
+                     cal_air_toggle, ver_start_btn, fill_start_btn,
                      kabs_start_btn, kabs_flow_select,
                      proc_start_btn, proc_flow_select, proc_kg_input,
                      proc_dose_input, proc_time_input]
@@ -1876,40 +1949,68 @@ async def index():
                 telem_skeleton.visible = False
                 echart_o3.visible = True
                 echart_pwr.visible = True
+                echart_temp.visible = True
+                echart_sensor.visible = True
                 _echart_has_data = True
 
-            o3_data, room_data, pwr_data, temp_data = [], [], [], []
+            o3_data, room_data = [], []
+            pwr_tgt_data, pwr_act_data = [], []
+            cell_temp_data, vessel_temp_data = [], []
+            pressure_data, sample_v_data, ref_v_data = [], [], []
             for s in data_buf:
                 ts_ms = int(s["timestamp"].timestamp() * 1000)
                 o3_data.append([ts_ms, s["vessel_o3_pct"]])
                 room_data.append([ts_ms, s["room_o3_ppm"]])
-                pwr_data.append([ts_ms, s.get("power_actual_pct", 0)])
-                temp_data.append([ts_ms, s.get("cell_temp_c", 0)])
+                pwr_tgt_data.append([ts_ms, s.get("power_target_pct", 0)])
+                pwr_act_data.append([ts_ms, s.get("power_actual_pct", 0)])
+                cell_temp_data.append([ts_ms, s.get("cell_temp_c", 0)])
+                vt = s.get("vessel_temp_c", -999)
+                if vt > -900:
+                    vessel_temp_data.append([ts_ms, vt])
+                pressure_data.append([ts_ms, s.get("pressure_mbar", 0)])
+                sample_v_data.append([ts_ms, s.get("sample_v", 0)])
+                ref_v_data.append([ts_ms, s.get("ref_v", 0)])
 
             echart_o3.options["series"][0]["data"] = o3_data
             echart_o3.options["series"][1]["data"] = room_data
             echart_o3.update()
-            echart_pwr.options["series"][0]["data"] = pwr_data
-            echart_pwr.options["series"][1]["data"] = temp_data
+            echart_pwr.options["series"][0]["data"] = pwr_tgt_data
+            echart_pwr.options["series"][1]["data"] = pwr_act_data
             echart_pwr.update()
+            echart_temp.options["series"][0]["data"] = cell_temp_data
+            echart_temp.options["series"][1]["data"] = vessel_temp_data
+            echart_temp.update()
+            echart_sensor.options["series"][0]["data"] = pressure_data
+            echart_sensor.options["series"][1]["data"] = sample_v_data
+            echart_sensor.options["series"][2]["data"] = ref_v_data
+            echart_sensor.update()
 
             rows = []
             for s in list(data_buf)[-20:]:
+                vt = s.get("vessel_temp_c", -999)
                 rows.append({
                     "timestamp": str(s["timestamp"].strftime("%H:%M:%S")),
                     "vessel_o3_pct": f"{s['vessel_o3_pct']:.4f}",
-                    "room_o3_ppm": f"{s['room_o3_ppm']:.3f}",
-                    "power_actual_pct": f"{s.get('power_actual_pct', 0):.1f}",
                     "cell_temp_c": f"{s.get('cell_temp_c', 0):.1f}",
+                    "pressure_mbar": f"{s.get('pressure_mbar', 0):.1f}",
+                    "sample_v": f"{s.get('sample_v', 0):.4f}",
+                    "ref_v": f"{s.get('ref_v', 0):.4f}",
+                    "room_o3_ppm": f"{s['room_o3_ppm']:.3f}",
+                    "vessel_temp_c": f"{vt:.1f}" if vt > -900 else "N/A",
+                    "power_target_pct": f"{s.get('power_target_pct', 0)}",
+                    "power_actual_pct": f"{s.get('power_actual_pct', 0):.1f}",
+                    "wiper_voltage": f"{s.get('wiper_voltage', 0):.3f}",
+                    "esp_ts_ms": str(s.get("esp_ts_ms", "")),
                 })
             raw_table.rows = rows
             raw_table.update()
 
         # -- calibration observer UI --------------------------------------
-        if S.sequence_active and S.seq_type == "calibrate":
+        _cal_is_active = S.sequence_active and S.seq_type == "calibrate"
+        if _cal_is_active:
             _CAL_TAB_LABELS = {
                 "loading": "Preparing calibration",
-                "starting": f"Starting calibration @ {S.cal_lpm:.1f} LPM",
+                "starting": f"Starting calibration @ {S.cal_lpm:.2f} LPM",
                 "started": "Initializing",
                 "relay_setup": "Enabling relays",
                 "stabilizing": "Equipment warm-up",
@@ -1956,11 +2057,24 @@ async def index():
                 else:
                     card.style("opacity: 0.4; border: 1px solid #555")
         elif not S.sequence_active:
+            # Detect calibration just completed → prompt for verification
+            if _last_cal_active:
+                _notify(
+                    "Calibration complete — fit a model, then run "
+                    "Verification before processing.",
+                    "info",
+                )
             cal_phase_lbl.text = "Phase: --"
             cal_progress.value = 0
             cal_info_lbl.text = ""
             for card in cal_step_cards.values():
                 card.style("opacity: 0.4; border: 1px solid #555")
+        _last_cal_active = _cal_is_active
+
+        # Detect any sequence just completed → refresh flow rate selects
+        if _last_seq_active and not S.sequence_active:
+            _refresh_flow_rate_selects()
+        _last_seq_active = S.sequence_active
 
         if S.cal_samples:
             sweep_up = [
@@ -1980,38 +2094,8 @@ async def index():
             cal_chart.options["series"][2]["data"] = random_pts
             cal_chart.update()
 
-        # -- validation observer UI ---------------------------------------
-        if S.val_samples:
-            val_chart.options["xAxis"]["data"] = list(range(len(S.val_samples)))
-            val_chart.options["series"][0]["data"] = [
-                s["o3_pct"] for s in S.val_samples
-            ]
-            val_chart.update()
-
-        if S.val_result:
-            val_result_card.visible = True
-            r = S.val_result
-            passed = r.get("passed", False)
-            dev = r.get("deviation_pct", 0.0)
-            cv = r.get("cv_pct", 0.0)
-            if passed:
-                color, icon_name = "green", "check_circle"
-            elif isinstance(dev, (int, float)) and dev < 20:
-                color, icon_name = "amber", "warning"
-            else:
-                color, icon_name = "red", "error"
-            val_result_icon.name = icon_name
-            val_result_icon._classes = [f"text-h3 text-{color}"]
-            val_result_icon.update()
-            status = "PASSED" if passed else "FAILED"
-            val_result_title.text = f"{status} — {dev:.1f}% deviation"
-            val_mean_lbl.text = f"Mean O3: {r.get('mean_o3', 0):.3f}%"
-            val_expected_lbl.text = f"Expected: {r.get('expected_o3', 0):.3f}%"
-            val_dev_lbl.text = f"CV: {cv:.1f}%"
-            val_std_lbl.text = f"Std: {r.get('std_o3', 0):.4f}%"
-            val_file_lbl.text = (
-                f"Saved: {S.val_file}" if S.val_file else ""
-            )
+        # -- verification observer UI (extracted) -------------------------
+        update_verification_tab(_ver)
 
         # -- fill/evac observer UI ----------------------------------------
         if S.fill_active or S.fill_phase in ("complete", "error"):
@@ -2135,6 +2219,17 @@ async def index():
                     [round(_ct, 4)] * len(_bsamp) if _ct > 0 else []
                 )
                 proc_conc_chart.update()
+                # ── Mass balance chart ──
+                proc_mass_chart.options["xAxis"]["data"] = _bx
+                proc_mass_chart.options["series"][0]["data"] = [
+                    s.get("mg_produced", 0.0) for s in _bsamp]
+                proc_mass_chart.options["series"][1]["data"] = [
+                    s.get("mg_absorbed", 0.0) for s in _bsamp]
+                proc_mass_chart.options["series"][2]["data"] = [
+                    s.get("mg_decayed", 0.0) for s in _bsamp]
+                proc_mass_chart.options["series"][3]["data"] = [
+                    s.get("mg_evacuated", 0.0) for s in _bsamp]
+                proc_mass_chart.update()
 
         elif S.seq_type != "process_batch":
             proc_phase_chip.text = "Idle"
@@ -2168,8 +2263,8 @@ async def index():
             "seq_progress": round(S.seq_progress, 1),
             "pending_prompt": S.pending_prompt_id,
             "cal_samples": len(S.cal_samples),
-            "val_samples": len(S.val_samples),
-            "val_passed": S.val_result.get("passed", None),
+            "verify_samples": len(S.verify_samples),
+            "verify_passed": getattr(S.verify_result, "passed", None),
             "fill_active": S.fill_active,
             "fill_phase": S.fill_phase,
             "cstr_samples": len(S.cstr_samples),

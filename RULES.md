@@ -300,6 +300,8 @@ See `docs/pitfalls.md` for detailed NiceGUI/asyncio gotchas. Summary:
 4. **`asyncio.Event` dialogs must run in button-click handlers** — not inside `asyncio.create_task()` coroutines
 5. **`ui.run_javascript()` crashes on dead client** → wrap in `try/except RuntimeError`
 6. **`ui.plotly` DOM access**: use `el.$el` — `el.$refs.qRef` is `undefined` on `ui.plotly`
+7. **Unused functions = missing capabilities**: If a module defines a function that is never called (e.g. `motor_pot_brake()` existed but `motor_pot_stop()` used coast mode), flag it — the function's existence indicates an intended capability not being used. See `docs/cases/power_mismatch_audit.md`.
+8. **Hypothesis-driven debugging**: Instrument → form testable hypotheses → collect discriminating data → targeted fix. Do not make speculative changes. Do not close issues that "self-resolve" without understanding the mechanism. See pitfalls.md §7.
 
 ---
 

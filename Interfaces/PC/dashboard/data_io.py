@@ -89,7 +89,7 @@ def list_calibration_files() -> dict[tuple[float, int], list[str]]:
 def _save_cal_csv(samples: list[dict], lpm: float, o2_pct: int) -> str:
     """Save calibration samples to CSV, return filename."""
     now = datetime.now()
-    lpm_s = f"{lpm:.0f}" if lpm == int(lpm) else f"{lpm:.1f}"
+    lpm_s = f"{lpm:.2f}"
     fname = f"{now:%Y-%m-%d_%H%M%S}_PowerO3Cal_{lpm_s}Lpm_{o2_pct}O2.csv"
     fpath = os.path.join(CALIBRATION_DIR, fname)
     if samples:
@@ -102,7 +102,7 @@ def _save_val_csv(samples: list[dict], power: float, lpm: float,
                   passed: bool) -> str:
     """Save validation samples to CSV, return filename."""
     now = datetime.now()
-    lpm_s = f"{lpm:.0f}" if lpm == int(lpm) else f"{lpm:.1f}"
+    lpm_s = f"{lpm:.2f}"
     result_tag = "PASS" if passed else "FAIL"
     fname = (
         f"{now:%Y-%m-%d_%H%M%S}_Validation_"
@@ -115,13 +115,25 @@ def _save_val_csv(samples: list[dict], power: float, lpm: float,
     return fname
 
 
-def _find_valid_cert(power_pct: float, flow_lpm: float,
+def _find_valid_cert(flow_lpm: float,
                      max_age_h: float = 24.0) -> "str | None":
-    """Return path to the most-recent PASS cert for (power_pct, flow_lpm)."""
-    lpm_s = f"{flow_lpm:.0f}" if flow_lpm == int(flow_lpm) else f"{flow_lpm:.1f}"
+    """Return path to the most-recent PASS verification cert for *flow_lpm*.
+
+    All verification runs include a 100% full_power phase (Step 1), so any
+    PASS cert at the correct flow rate confirms C_in at 100%.  The hold-power
+    level encoded in the filename is irrelevant for this check.
+
+    Matches both legacy Validation and new Verification filenames:
+      - *_Validation_<pwr>pct_<lpm>Lpm_PASS.csv
+      - *_Verification_<hold>hold_<lpm>Lpm_PASS.csv
+
+    Flow rate is compared numerically (tolerance 0.05 LPM) so both old
+    formats (``4Lpm``) and new (``3.50Lpm``) match correctly.
+    """
     pattern = re.compile(
-        rf"^(\d{{4}}-\d{{2}}-\d{{2}}_\d{{6}})_Validation_"
-        rf"{int(power_pct)}pct_{re.escape(lpm_s)}Lpm_PASS\.csv$"
+        r"^(\d{4}-\d{2}-\d{2}_\d{6})_"
+        r"(?:Validation_\d+pct|Verification_\d+hold)_"
+        r"([\d.]+)Lpm_PASS\.csv$"
     )
     cutoff = datetime.now().timestamp() - max_age_h * 3600
     best: tuple[float, str] | None = None
@@ -132,6 +144,13 @@ def _find_valid_cert(power_pct: float, flow_lpm: float,
     for name in entries:
         m = pattern.match(name)
         if not m:
+            continue
+        # Numeric flow-rate filter (handles 4, 4.0, 4.00 formats)
+        try:
+            file_lpm = float(m.group(2))
+        except ValueError:
+            continue
+        if abs(file_lpm - flow_lpm) > 0.05:
             continue
         try:
             dt = datetime.strptime(m.group(1), "%Y-%m-%d_%H%M%S")
@@ -154,7 +173,7 @@ def _find_valid_calibration(
 ) -> "str | None":
     """Return path to the most-recent power-O3 calibration CSV matching flow_lpm.
 
-    Scans Data/Calibration/ for calibration CSVs within ±lpm_tolerance of the
+    Scans Data/Power-O3_cal/ for calibration CSVs within ±lpm_tolerance of the
     requested flow rate, newer than max_age_h.
     """
     cutoff = datetime.now().timestamp() - max_age_h * 3600

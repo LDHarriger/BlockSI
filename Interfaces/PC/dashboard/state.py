@@ -53,7 +53,7 @@ MAX_DATA_POINTS = 500
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA_DIR = os.path.join(BASE_DIR, "Data")
 TELEMETRY_DIR = os.path.join(DATA_DIR, "Telemetry")
-CALIBRATION_DIR = os.path.join(DATA_DIR, "Calibration")
+CALIBRATION_DIR = os.path.join(DATA_DIR, "Power-O3_cal")
 VALIDATION_DIR = os.path.join(DATA_DIR, "Validation")
 CSTR_DATA_DIR = os.path.join(DATA_DIR, "k_d_cal")
 MODEL_DIR = os.path.join(BASE_DIR, "Models", "O3Power")
@@ -61,10 +61,11 @@ CSTR_MODEL_DIR = os.path.join(BASE_DIR, "Models", "cstr_k_d")
 K_ABS_DATA_DIR = os.path.join(DATA_DIR, "k_abs_cal")
 K_ABS_MODEL_DIR = os.path.join(BASE_DIR, "Models", "cstr_k_abs")
 BATCH_DATA_DIR = os.path.join(DATA_DIR, "Batch")
+DIAGNOSTICS_DIR = os.path.join(DATA_DIR, "Diagnostics")
 
 for _d in (DATA_DIR, TELEMETRY_DIR, CALIBRATION_DIR, VALIDATION_DIR,
            CSTR_DATA_DIR, MODEL_DIR, CSTR_MODEL_DIR,
-           K_ABS_DATA_DIR, K_ABS_MODEL_DIR, BATCH_DATA_DIR):
+           K_ABS_DATA_DIR, K_ABS_MODEL_DIR, BATCH_DATA_DIR, DIAGNOSTICS_DIR):
     os.makedirs(_d, exist_ok=True)
 
 # Power model coefficients  (legacy fallback — O3_max = A/F + B)
@@ -253,12 +254,10 @@ class SystemState:
         self.cal_samples: list[dict] = []
         self.cal_lpm: float = DEFAULT_FLOW_LPM
         self.cal_file: str = ""
-        # Validation observer
-        self.val_power: float = 75.0
-        self.val_lpm: float = DEFAULT_FLOW_LPM
-        self.val_samples: list[dict] = []
-        self.val_result: dict = {}
-        self.val_file: str = ""
+        # Verification observer (measurement of C_in)
+        self.verify_samples: list[dict] = []
+        self.verify_result: Optional[object] = None  # VerificationResult
+        self.verify_file: str = ""
         # Settings
         self.notify_level: str = "all"
         # Backfill state

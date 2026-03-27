@@ -73,11 +73,14 @@ seq_step_total: int       # Total steps in recipe
 cal_samples: list[dict]   # From SEQ,calibrate,SAMPLE,...
 cal_lpm: float            # Flow from recipe params
 
-# Validation observer
-val_power: float          # Target power from recipe
-val_lpm: float            # Flow from recipe params
+# Validation observer  (legacy — still in state for backward compat)
 val_samples: list[dict]   # From SEQ,validate,SAMPLE,...
 val_result: dict          # PC-computed pass/fail results
+
+# Verification observer
+verify_samples: list[dict]  # From SEQ,verify,SAMPLE,...
+verify_result: object       # VerificationResult dataclass
+verify_file: str            # Output filename
 
 # Batch (process_batch) observer
 batch_samples: list[dict] # From SEQ,process_batch,SAMPLE,...
@@ -90,7 +93,7 @@ batch_schedule: object    # DoseSchedule, if active
 
 | Function | Sends | Notes |
 |----------|-------|-------|
-| `cmd_sequence_start(type, **kwargs)` | Dispatches: calibrate, validate, cstr_cal, k_abs_cal, process_batch | |
+| `cmd_sequence_start(type, **kwargs)` | Dispatches: calibrate, validate, verify, cstr_cal, k_abs_cal, process_batch | |
 | `cmd_sequence_stop()` | abort + `_sequence_cleanup` | Full abort with power=0 + relays off |
 | `_safe_standby()` | power=0, all relays OFF | **Unconditional** — no guards |
 | `cmd_emergency_stop()` | abort + `_safe_standby()` | Always active |
@@ -103,10 +106,10 @@ batch_schedule: object    # DoseSchedule, if active
 ### Control Tab
 - Power slider, presets, Plotly curve, E-STOP
 
-### Calibration Tab
-1. **Power-O3 Calibration**: Rotameter prompt flow, random levels, ECharts scatter, model fitting
-2. **k_d Calibration**: Calibrated flow rate selector, fill/evac progress, EChart, CSTR model status
-3. **k_abs Calibration**: Substrate preset, flow rate selector, pre-flight checks, progress bar
+### Calibration Tab (collapsible sections)
+1. **Power-O3 Calibration** (`ui.expansion`, default-opened): Rotameter prompt flow, random levels, ECharts scatter, model fitting
+2. **k_d Calibration** (`ui.expansion`): Calibrated flow rate selector, fill/evac progress, EChart, CSTR model status
+3. **k_abs Calibration** (`ui.expansion`): Substrate preset, flow rate selector, pre-flight checks, progress bar
 
 ### Processing Tab  `[NEW — WP-4/5]`
 - Batch parameter form (flow, kg, dose, time, experiment type, substrate presets)
@@ -116,8 +119,13 @@ batch_schedule: object    # DoseSchedule, if active
 - O3 concentration EChart (measured + C_target line)
 - O3 mass balance stacked EChart (produced/absorbed/decayed/evacuated)
 
-### Validation Tab
-- Power%/LPM inputs (calibrated flow rate dropdown), pass/fail result card, ECharts O3 chart
+### Verification Tab  `[NEW — replaces Validation]`
+- Hold Power% input + calibrated flow rate selector
+- Phase progress cards (Baseline / Full Power / Hold Power / Cooldown)
+- Progress bar + phase label, samples counter
+- Result card with VerificationResult fields (C_in@100%, C_in@hold, stability flags, slopes)
+- ECharts O3 concentration chart
+- Post-calibration notification prompts verification run
 
 ### Telemetry Tab
 - ECharts: O3+Room, Power+Temp (with dataZoom), raw data table, CSV export
@@ -156,6 +164,8 @@ batch_schedule: object    # DoseSchedule, if active
 
 - `[PROPOSED]` **Historical data viewer**: Load and plot old CSV files from `Data/Telemetry/`
 - `[PROPOSED]` **Migrate power curve to ECharts**: Last remaining Plotly chart
+- `[DONE]` ~~**Verification UI tab**: Replace validation tab with verification UI (Task 4)~~
+- `[PENDING]` **Archive validation.py**: Still imported by tcp_server.py for legacy validate handling
 
 ## Data Management  `[IMPLEMENTED]`
 
@@ -163,8 +173,9 @@ batch_schedule: object    # DoseSchedule, if active
 ```
 Data/
   Telemetry/       — Per-connection stream CSVs
-  Calibration/     — Power-O3 calibration CSVs
-  Validation/      — Validation run CSVs (suffix _PASS or _FAIL)
+  Power-O3_cal/    — Power-O3 calibration CSVs (renamed from Calibration/)
+  Validation/      — Validation + Verification run CSVs
+  Diagnostics/     — Power drift/noise DIAG logs (auto-created)
   k_d_cal/         — k_d calibration CSVs
   k_abs_cal/       — k_abs calibration CSVs
   Batch/           — Batch output dirs (ExperimentType/BatchID/)
@@ -178,6 +189,8 @@ Models/
 - Calibration: `{YYYY-MM-DD}_{HHMMSS}_PowerO3Cal_{LPM}Lpm_{O2}O2.csv`
 - Telemetry: `{YYYY-MM-DD}_{HHMMSS}_Stream.csv`
 - Validation: `{YYYY-MM-DD}_{HHMMSS}_Validation_{pwr}pct_{LPM}Lpm_PASS.csv` / `_FAIL.csv`
+- Verification: `{YYYY-MM-DD}_{HHMMSS}_Verification_{hold}hold_{LPM}Lpm_PASS.csv` / `_FAIL.csv`
+- Diagnostics: `{YYYY-MM-DD}_{HHMMSS}_diag.log`
 - CSTR: `{YYYY-MM-DD}_{HHMMSS}_CSTR_{LPM}Lpm.csv`
 
 ## Known Caveats

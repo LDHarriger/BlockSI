@@ -4,7 +4,20 @@
       "Bash(cp Interfaces/Data/CSTR/* Interfaces/Data/k_d_cal/)",
       "Bash(rm -rf Interfaces/Data/CSTR)",
       "Bash(cp Interfaces/Models/CSTR/* Interfaces/Models/cstr_k_d/)",
-      "Bash(rm -rf Interfaces/Models/CSTR)"
+      "Bash(rm -rf Interfaces/Models/CSTR)",
+      "Bash(ls Interfaces/PC/.venv/Scripts/python*)",
+      "Bash(ls Interfaces/PC/.venv/bin/python*)",
+      "Bash(/c/Users/ldhar/Documents/Shroom-E_Co/BlockSI/.venv/Scripts/python -c \":*)",
+      "Bash(wc -l /c/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/PC/dashboard/*.py /c/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/PC/analysis/*.py /c/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/PC/blocksi_dashboard.py)",
+      "Bash(wc -l /c/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/*.c /c/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/*.h)",
+      "Bash(wc -l /c/Users/ldhar/Documents/Shroom-E_Co/BlockSI/docs/*.md /c/Users/ldhar/Documents/Shroom-E_Co/BlockSI/docs/reference/*.md /c/Users/ldhar/Documents/Shroom-E_Co/BlockSI/docs/user/*.md)",
+      "Bash(grep -E \"\\\\.c$|\\\\.h$\")",
+      "Bash(grep -r \"seq_power_cal\\\\|seq_airflow_val\\\\|power_calibration_v2\" /c/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/ControlSystem/main/ --include=*.c --include=*.h)",
+      "Bash(grep -E \"^\\(class |async def |def \\)\" /c/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/PC/dashboard/*.py)",
+      "Bash(grep -l \"seq_power_cal\\\\|seq_airflow_val\\\\|power_calibration_v2\\\\|validation.py\" /c/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/PC/dashboard/*.py)",
+      "Bash(grep -E \"^\\(class |async def |def \\)\" /c/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/PC/analysis/*.py)",
+      "Bash(grep -n \"import validation\\\\|from.*validation\" /c/Users/ldhar/Documents/Shroom-E_Co/BlockSI/Interfaces/PC/dashboard/*.py)",
+      "Bash(echo \"EXIT:$?\")"
     ]
   }
 }

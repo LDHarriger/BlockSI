@@ -375,7 +375,15 @@ esp_err_t motor_pot_set_motor(motor_direction_t direction, uint8_t pwm_duty,
 
 void motor_pot_stop(void)
 {
-    motor_pot_set_motor(MOTOR_DIR_STOP, 0, MOTOR_DECAY_FAST);
+    // Use brake mode (both outputs HIGH → low-side FET short) instead of coast
+    // (both LOW → Hi-Z).  Coast mode allows the wiper to drift downward under
+    // mechanical force because the motor windings are disconnected.  Brake mode
+    // shorts the windings via the DRV8833 low-side FETs, providing electromagnetic
+    // braking torque that holds the wiper in position.
+    //
+    // See power_mismatch_audit.md — confirmed sawtooth drift in coast mode:
+    // wiper consistently drifts 5–12% below target within seconds of stop.
+    motor_pot_set_motor(MOTOR_DIR_BRAKE, 0, MOTOR_DECAY_FAST);
 }
 
 void motor_pot_brake(void)

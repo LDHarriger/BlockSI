@@ -264,3 +264,52 @@ line=dict(color="rgba(65,105,225,0.5)", width=1)  # was: line=dict(width=0)
 ```
 Do not inflate σ or switch to ±2σ/3σ — a well-fitted model (R²≈0.998) *should*
 have narrow CI. The boundary just needs to be visible as a line.
+
+---
+
+## 7. Unused Functions Indicate Missing Capabilities (motor_pot brake-mode)
+
+| Detail | Value |
+|--------|-------|
+| First hit | 2026-03-26 |
+| Symptom | Motorized potentiometer drifts 5–12% below target after positioning; validator catches and corrects but cannot hold — produces sawtooth cycling (134 mismatch events in one session) |
+| Root cause | `motor_pot_stop()` used coast mode (`MOTOR_DIR_STOP` → both GPIOs LOW → DRV8833 Hi-Z), allowing wiper drift. `motor_pot_brake()` and `MOTOR_DIR_BRAKE` already existed in the codebase but were never called |
+| Fix | One-line change: `motor_pot_stop()` now uses `MOTOR_DIR_BRAKE` instead of `MOTOR_DIR_STOP`. Brake mode shorts motor windings through low-side FETs, providing electromagnetic holding torque |
+| Case file | `docs/cases/power_mismatch_audit.md` |
+
+### The Lesson: Unused Functions as Red Flags
+
+When auditing code, **unused functions that implement a related capability are a red flag**.
+The existence of `motor_pot_brake()` meant the original developer intended braking to be
+available — but it was never wired into the stop path. Multiple code audits missed this
+because they focused on what the code *does*, not what it *could do but doesn't*.
+
+**Audit rule**: If a module defines a function that is never called, ask:
+1. Was this function meant to be used somewhere?
+2. Does the absence of this call explain a known issue?
+3. Should it be integrated, or is it dead code to remove?
+
+### Debugging Methodology That Worked
+
+This issue was resolved through a structured hypothesis-driven process:
+
+1. **Instrument first** — Added DIAG messages with settle times, ADC values, and
+   directional data to the firmware. This provided the evidence needed to distinguish
+   between hypotheses.
+
+2. **Form specific testable hypotheses** — Three hypotheses were defined:
+   - H1: Coast-mode wiper drift (mechanical/electrical)
+   - H2: ADC noise / measurement error
+   - H3: Timing race in the control loop
+   Each made different predictions about drift direction, timing, and magnitude.
+
+3. **Collect data that discriminates** — The DIAG log showed 96% downward drift,
+   settle times of 3–66 seconds, and a clear sawtooth pattern. This ruled out H2
+   (noise would be bidirectional) and H3 (timing races would be instantaneous).
+
+4. **Targeted fix** — Once H1 was confirmed, the fix was a single line change to an
+   already-implemented capability. No shotgun debugging, no speculative changes.
+
+**Anti-pattern**: The issue initially "self-resolved" in one session (transient
+improvement), tempting the conclusion that it was environmental. It recurred the same
+evening. Never close an issue as resolved without understanding the mechanism.

@@ -13,10 +13,9 @@ from dashboard.state import (
     S, log, _notify,
     parse_data_line, apply_telemetry,
     data_buf, compute_effective_o2_pct,
-    DEFAULT_PORT,
+    DEFAULT_PORT, DIAGNOSTICS_DIR,
 )
-from dashboard.data_io import csv_logger, _save_cal_csv, _save_val_csv
-from dashboard.validation import _analyze_validation
+from dashboard.data_io import csv_logger, _save_cal_csv
 
 # Forward reference: set by k_d_cal module after import
 _cstr_debug_file_ref = None
@@ -238,6 +237,9 @@ class TCPServer:
         log("STATE sync from ESP32", "state")
 
     # -- DIAG handler -----------------------------------------------------
+    _diag_log_file: Optional[str] = None
+    _DIAG_SUBTYPES = {"drift_sample", "drift_summary", "noise_stats", "power_mismatch", "power_resolved"}
+
     def _handle_diag(self, line: str) -> None:
         log(f"DIAG: {line}", "warn")
         _notify(f"FW DIAG: {line}", "warning")
@@ -249,6 +251,25 @@ class TCPServer:
                     _f.write(f"[{ts}] {line}\n")
             except OSError:
                 pass
+        # Persist power-diagnostic subtypes to Data/Diagnostics/
+        parts = line.split(",")
+        if len(parts) >= 2:
+            subtype = parts[1]
+            if subtype in self._DIAG_SUBTYPES:
+                self._write_diag_log(line)
+
+    def _write_diag_log(self, line: str) -> None:
+        """Append a DIAG line to a timestamped file in Data/Diagnostics/."""
+        import os
+        if self._diag_log_file is None:
+            ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            self._diag_log_file = os.path.join(DIAGNOSTICS_DIR, f"{ts}_diag.log")
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        try:
+            with open(self._diag_log_file, "a") as f:
+                f.write(f"[{ts}] {line}\n")
+        except OSError:
+            pass
 
     # -- SEQ handler ------------------------------------------------------
     async def _handle_seq(self, line: str) -> None:
@@ -277,8 +298,6 @@ class TCPServer:
                     elif k.strip() == "flow":
                         if seq_type == "calibrate":
                             S.cal_lpm = float(v)
-                        elif seq_type == "validate":
-                            S.val_lpm = float(v)
                 except ValueError:
                     pass
             log(f"Sequence '{seq_type}' started ({S.seq_step_total} steps)", "seq")
@@ -342,8 +361,8 @@ class TCPServer:
                     }
                     if seq_type == "calibrate":
                         S.cal_samples.append(sample)
-                    elif seq_type == "validate":
-                        S.val_samples.append(sample)
+                    elif seq_type == "verify":
+                        S.verify_samples.append(sample)
                     elif seq_type == "process_batch":
                         S.batch_samples.append(sample)
                 except (ValueError, IndexError):
@@ -382,34 +401,6 @@ class TCPServer:
                     else:
                         _notify(
                             "Calibration complete (no samples)", "warning"
-                        )
-                elif seq_type == "validate":
-                    S.val_result = _analyze_validation(
-                        S.val_samples, S.val_power, S.val_lpm
-                    )
-                    S.val_file = _save_val_csv(
-                        S.val_samples, S.val_power, S.val_lpm,
-                        passed=S.val_result.get("passed", False),
-                    )
-                    dev = S.val_result.get("deviation_pct", 0.0)
-                    n = len(S.val_samples)
-                    if S.val_result.get("passed"):
-                        _notify(
-                            f"Validation PASSED — {dev:.1f}% deviation"
-                            f" ({n} samples saved)",
-                            "positive",
-                        )
-                    elif dev < 20:
-                        _notify(
-                            f"Validation marginal — {dev:.1f}% deviation"
-                            f" ({n} samples saved)",
-                            "warning",
-                        )
-                    else:
-                        _notify(
-                            f"Validation FAILED — {dev:.1f}% deviation"
-                            f" ({n} samples saved)",
-                            "negative",
                         )
                 else:
                     _notify(
@@ -482,5 +473,7 @@ class TCPServer:
                 self._pending_responses.pop(cmd_name, None)
 
 
-# Module-level singleton — assigned during startup
-tcp: TCPServer = None  # type: ignore[assignment]
+# Module-level singleton — imported by commands.py, ui_main.py, etc.
+# Created eagerly so `from dashboard.tcp_server import tcp` captures the
+# real instance (not None).  Port is set and .start() called in _startup().
+tcp = TCPServer()

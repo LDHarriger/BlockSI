@@ -44,6 +44,16 @@ From `main/CMakeLists.txt` SRCS:
 | `seq_sensor_adapter.c` / `.h` | 106-H sample counter for executor's sample-counted holds |
 | `blocksi_pins.h` | **All GPIO pin assignments** — check before adding hardware |
 
+**Diagnostic commands** (added to `main.c` command handler):
+| Command | Description |
+|---------|-------------|
+| `CMD,diag_power_drift,<target_pct>` | Move to target, sample ADC at 0/100/500/1000/2000/5000ms, report drift |
+| `CMD,diag_power_noise,<num_samples>` | Take N ADC readings at current position, report min/max/mean/std |
+
+**Enhanced DIAG messages** (from `blocksi_state.c`):
+- `DIAG,power_mismatch,target=%u,actual=%.1f,retry=%u,adc=%u,settle=%lld`
+- `DIAG,power_resolved,target=%u,actual=%.1f`
+
 **Removed from build** (kept on disk for reference):
 | `seq_power_cal.c` / `.h` | Old: Power-O3 calibration (4-phase, type: `cal`) |
 | `seq_airflow_val.c` / `.h` | Old: Airflow validation (5-phase, type: `validate`) |

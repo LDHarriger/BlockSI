@@ -584,7 +584,7 @@ def solve_dosing_schedule(
         notes_list.append(
             f"power_hold={power_hold:.1f}% exceeds 100% — target concentration "
             f"C_target={C_target_solved:.4f}%vol is not achievable at "
-            f"{flow_lpm:.1f} LPM."
+            f"{flow_lpm:.2f} LPM."
         )
 
     # --- Re-compute final schedule with solved C_target ---------------------

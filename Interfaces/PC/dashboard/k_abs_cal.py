@@ -83,7 +83,7 @@ _POLL_INTERVAL_S = 2.0
 # =============================================================================
 def _make_k_abs_csv_path(lpm: float) -> str:
     now = datetime.now()
-    lpm_s = f"{lpm:.0f}" if lpm == int(lpm) else f"{lpm:.1f}"
+    lpm_s = f"{lpm:.2f}"
     fname = f"{now:%Y%m%d_%H%M%S}_k_abs_cal_{lpm_s}Lpm.csv"
     return os.path.join(K_ABS_DATA_DIR, fname)
 
@@ -801,7 +801,7 @@ async def _fit_and_save_k_abs_model() -> Optional[object]:
 
     _kabs_flog(
         f"k_abs fitting: {len(csv_paths)} CSV(s), "
-        f"flows={[f'{f:.1f}' for f in csv_flows]} LPM, "
+        f"flows={[f'{f:.2f}' for f in csv_flows]} LPM, "
         f"k_d={k_d:.2e}/s"
     )
 

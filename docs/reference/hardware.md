@@ -25,7 +25,7 @@ L-valve switchable for direct-to-sensor bypass (used during validation).
 | I2C | 21, 22 | DFRobot O3 sensor (100kHz) |
 | SPI | 18, 19, 5 | MAX31855 thermocouple |
 | UART2 | 16, 17 | 106-H RS232 (via level shifter) |
-| Relays | 12, 13, 27 | SSR control (3 relays) |
+| Relays | 12, 13, 14 | SSR control (3 relays) |
 | Motor Pot | 25, 26, 34 | DRV8833 H-bridge + ADC feedback |
 
 ---

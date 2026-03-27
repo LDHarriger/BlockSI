@@ -21,7 +21,6 @@ import asyncio
 from nicegui import ui, app
 
 from dashboard.state import S, DEFAULT_PORT
-from dashboard.tcp_server import TCPServer
 import dashboard.tcp_server as _tcp_mod
 import dashboard.ui_main  # noqa: F401 — registers @ui.page("/")
 
@@ -32,9 +31,8 @@ async def _startup() -> None:
     args, _ = parser.parse_known_args()
     S.load_model_for_current_condition()
     S.load_cstr_model()
-    tcp = TCPServer(args.port)
-    _tcp_mod.tcp = tcp
-    await tcp.start()
+    _tcp_mod.tcp.port = args.port
+    await _tcp_mod.tcp.start()
 
 
 app.on_startup(_startup)

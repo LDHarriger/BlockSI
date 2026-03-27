@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-import os
 import re as _re
 import time
 import traceback
@@ -30,7 +29,7 @@ from dashboard.state import (
     CSTRModel, fit_cstr_model, save_cstr_model_json, load_cstr_model_from_dir,
 )
 from dashboard.data_io import _find_valid_cert
-from dashboard.validation import VAL_TRANSIENT_SKIP, VAL_MIN_STABLE
+from dashboard.verification import TRANSIENT_SKIP, VAL_MIN_STABLE
 from analysis.cstr_k_d_model import V_VESSEL_L, V_DEAD_L
 
 # =============================================================================
@@ -74,7 +73,7 @@ def _compute_fill_t99(flow_lpm: float) -> float:
 # ---------------------------------------------------------------------------
 def _make_k_d_csv_path(lpm: float) -> str:
     now = datetime.now()
-    lpm_s = f"{lpm:.0f}" if lpm == int(lpm) else f"{lpm:.1f}"
+    lpm_s = f"{lpm:.2f}"
     fname = f"{now:%Y%m%d_%H%M%S}_k_d_cal_{lpm_s}Lpm.csv"
     return os.path.join(CSTR_DATA_DIR, fname)
 
@@ -200,22 +199,23 @@ async def _start_fill_evac(**kwargs) -> bool:
 
     # Determine target O3 from validation cert or model
     target_o3 = 0.0
-    val_cert = _find_valid_cert(100, flow, max_age_h=720)
+    val_cert = _find_valid_cert(flow, max_age_h=720)
     if val_cert:
         try:
             vdf = pd.read_csv(val_cert)
             vdf.columns = [c.strip() for c in vdf.columns]
-            vt = vdf[vdf["phase"] == "target"].iloc[VAL_TRANSIENT_SKIP:]
+            # Match new verification ("full_power") and legacy validation ("target")
+            vt = vdf[vdf["phase"].isin(["full_power", "target"])].iloc[TRANSIENT_SKIP:]
             if len(vt) >= VAL_MIN_STABLE:
                 target_o3 = float(vt["o3_pct"].mean())
-                log(f"k_d cal fill target from validation: {target_o3:.4f}% "
+                log(f"k_d cal fill target from verification: {target_o3:.4f}% "
                     f"({os.path.basename(val_cert)})", "info")
         except Exception as exc:
-            log(f"Failed to read validation cert: {exc}", "warning")
+            log(f"Failed to read verification cert: {exc}", "warning")
     if target_o3 <= 0.01:
         target_o3 = predict_o3_from_power(100, flow)
         log(f"k_d cal fill target from sigmoid model: {target_o3:.4f}% "
-            f"(no validation cert found)", "info")
+            f"(no verification cert found)", "info")
     if target_o3 <= 0.01:
         _notify(
             "Cannot determine fill target — run a validation first",

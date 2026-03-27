@@ -271,10 +271,12 @@ void blocksi_state_validate(void)
                  attempt, target);
         
         // Send DIAG to PC so dashboard can log it
-        char diag[128];
+        char diag[160];
+        uint16_t adc_raw = motor_pot_read_adc();
+        int64_t settle_ms = now - state->power.last_command_ms;
         snprintf(diag, sizeof(diag),
-                 "DIAG,power_mismatch,target=%u,actual=%.1f,retry=%u\n",
-                 target, fresh_pct, attempt);
+                 "DIAG,power_mismatch,target=%u,actual=%.1f,retry=%u,adc=%u,settle=%lld\n",
+                 target, fresh_pct, attempt, adc_raw, (long long)settle_ms);
         lan_client_send_message(diag);
         
         esp_err_t ret = o3_power_set(target);

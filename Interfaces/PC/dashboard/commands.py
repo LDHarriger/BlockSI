@@ -68,8 +68,10 @@ async def cmd_sequence_start(seq_type: str, **kwargs) -> bool:
 
     if seq_type == "calibrate":
         return await _start_calibration(**kwargs)
-    elif seq_type == "validate":
-        return await _start_validation(**kwargs)
+    elif seq_type == "verify":
+        from dashboard.verification_sequence import _start_verification
+        asyncio.create_task(_start_verification(**kwargs))
+        return True
     elif seq_type == "cstr_cal":
         from dashboard.k_d_cal import _start_fill_evac
         asyncio.create_task(_start_fill_evac(**kwargs))
@@ -145,110 +147,6 @@ async def _start_calibration(**kwargs) -> bool:
 
     log(f"Calibration failed: {resp}", "error")
     _notify(f"Calibration failed to start: {resp}", "negative")
-    return False
-
-
-async def _start_validation(**kwargs) -> bool:
-    from nicegui import ui
-    from dashboard.validation import generate_val_recipe
-
-    power = int(kwargs.get("power", 75))
-    flow = kwargs.get("flow", DEFAULT_FLOW_LPM)
-    S.val_power = power
-    S.val_lpm = flow
-
-    log("Pre-flight: setting power to 0%", "seq")
-    if not await cmd_set_power(0):
-        _notify("Validation aborted — failed to set power to 0%", "negative")
-        return False
-
-    if not S.relay_o2_conc:
-        log("Pre-enabling O2 concentrator relay", "seq")
-        await cmd_set_relay("o2_conc", True)
-    if not S.relay_o3_gen:
-        log("Pre-enabling ozone generator relay", "seq")
-        await cmd_set_relay("ozone_gen", True)
-    if S.relay_air_comp:
-        log("Pre-disabling air compressor relay", "seq")
-        await cmd_set_relay("air_comp", False)
-
-    # Pre-flight: warn if baseline O3 reading is elevated
-    if S.vessel_o3_pct > 0.01:
-        proceed = asyncio.Event()
-        cancelled = [False]
-
-        with ui.dialog().props("persistent") as bl_dlg:
-            with ui.card().classes("q-pa-lg").style("min-width: 420px"):
-                ui.icon("warning").classes("text-h3 text-amber q-mb-sm")
-                ui.label("Baseline may not be stable").classes(
-                    "text-h5 q-mb-sm"
-                )
-                ui.label(
-                    f"Current O\u2083 reading: {S.vessel_o3_pct:.3f} %vol. "
-                    "The sensor may not have fully zeroed. "
-                    "Proceeding may affect data accuracy."
-                ).classes("text-body1 q-mb-lg")
-                with ui.row().classes("justify-end w-full q-gutter-sm"):
-                    def _cancel():
-                        cancelled[0] = True
-                        bl_dlg.close()
-                        proceed.set()
-
-                    def _proceed():
-                        bl_dlg.close()
-                        proceed.set()
-
-                    ui.button("Cancel", color="red",
-                              on_click=_cancel).props("flat")
-                    ui.button("Proceed anyway", color="green",
-                              on_click=_proceed).props("unelevated")
-        bl_dlg.open()
-        await proceed.wait()
-        if cancelled[0]:
-            log("Validation cancelled — elevated baseline", "seq")
-            _notify("Validation cancelled by user", "warning")
-            return False
-
-    # Generate the validation recipe on the PC side (Section 14)
-    recipe = generate_val_recipe(power)
-    total_hold = sum(h for _, _, h in recipe)
-
-    S.seq_type = "validate"
-    S.seq_phase = "starting"
-    S.seq_progress = 0.0
-    S.seq_elapsed = 0.0
-    S.seq_start_time = 0.0
-    S.seq_confirmed = False
-    S.seq_step_idx = 0
-    S.seq_step_total = len(recipe)
-    S.pending_prompt_id = ""
-    S.pending_prompt_text = ""
-    S.val_samples = []
-    S.val_result = {}
-    S.val_file = ""
-
-    # Encode recipe for ESP32: validate,flow=<f>,recipe=<p1>:<phase1>:<hold1>|...
-    recipe_str = "|".join(
-        f"{pwr}:{phase}:{hold}" for pwr, phase, hold in recipe
-    )
-    resp = await tcp.send_command(
-        f"validate,flow={flow},recipe={recipe_str}", timeout=5.0
-    )
-    if resp and "OK" in resp:
-        S.sequence_active = True
-        S.seq_confirmed = True
-        S.seq_start_time = time.time()
-        recipe_desc = " -> ".join(
-            f"{phase}({pwr}%x{hold})" for pwr, phase, hold in recipe
-        )
-        log(f"Validation running: P_target={power}%, flow={flow} LPM, "
-            f"{len(recipe)} steps / {total_hold} samples", "seq")
-        log(f"  Recipe: {recipe_desc}", "val")
-        _notify("Validation started", "positive")
-        return True
-
-    log(f"validate failed: {resp}", "error")
-    _notify(f"Validation failed to start: {resp}", "negative")
     return False
 
 

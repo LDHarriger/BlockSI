@@ -5,6 +5,37 @@
 
 ---
 
+### 2026-03-25: Replace validation with measurement verification
+
+**Context**: The legacy validation sequence (spot-checking the power-O3 model at
+random power levels) tests model accuracy but does not directly measure the inlet
+O3 concentration (C_in) that the dosimetry solver needs for dose schedule
+computation. Batch processes used model-predicted C_in, which can diverge from
+reality due to environmental drift, hardware aging, or calibration staleness.
+
+**Decision**: Replace the validation framework with a measurement verification
+system that directly measures C_in at 100% power and at the predicted power_hold
+level. These measured values feed into `solve_dosing_schedule()` for improved
+dose accuracy.
+
+**New files**:
+- `dashboard/verification.py` — stability analysis (45-sample window, slope < 0.0003)
+  and `VerificationResult` dataclass
+- `dashboard/verification_sequence.py` — background task using the generic recipe
+  protocol (sequence_start → seq_step → seq_run)
+
+**Preserved files** (not archived yet — pending UI transition):
+- `dashboard/validation.py` — kept for backward compatibility; the `_analyze_validation`
+  function is still imported by `tcp_server.py` for existing validate sequences
+
+**Safety constraint**: Process time is FIXED (~30 min) and must NEVER be adjusted
+to compensate for concentration discrepancies (Chick-Watson kinetics — log-linear
+not time-linear). Only C_target and power_hold are recomputed.
+
+**Status**: `[DECIDED]`
+
+---
+
 ### 2026-03-10: Reject cherry-pick 435b8e2 — power curve regression
 
 **Context**: Claude Code commit `435b8e2` re-implemented the power curve two-tier update strategy, but:

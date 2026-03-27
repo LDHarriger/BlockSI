@@ -414,7 +414,7 @@ def fit_sigmoid_model(
 # =============================================================================
 def _model_filename(flow_lpm: float, o2_pct: int) -> str:
     """Canonical model filename: ``power_o3_{LPM}lpm_{O2}o2.json``."""
-    lpm_s = f"{flow_lpm:.0f}" if flow_lpm == int(flow_lpm) else f"{flow_lpm:.1f}"
+    lpm_s = f"{flow_lpm:.2f}"
     return f"power_o3_{lpm_s}lpm_{o2_pct}o2.json"
 
 

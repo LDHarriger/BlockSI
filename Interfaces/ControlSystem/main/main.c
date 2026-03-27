@@ -50,7 +50,6 @@
 #include "o3_power_control.h"
 #include "motor_pot.h"
 #include "blocksi_state.h"
-#include "power_calibration.h"
 #include "sequence_runner.h"
 #include "seq_executor.h"
 #include "seq_sensor_adapter.h"
@@ -568,6 +567,86 @@ static bool lan_command_handler(const char *cmd, const char *args,
         snprintf(response, response_size, "calibration_failed");
         return false;
     // End of pot handlers
+
+    // =========================================================================
+    // Diagnostic commands (power drift & noise characterization)
+    // =========================================================================
+    } else if (strcmp(cmd, "diag_power_drift") == 0) {
+        if (!args) {
+            snprintf(response, response_size, "missing_target_pct");
+            return false;
+        }
+        float target_pct = strtof(args, NULL);
+        if (target_pct < 0.0f || target_pct > 100.0f) {
+            snprintf(response, response_size, "invalid_target");
+            return false;
+        }
+        esp_err_t ret = motor_pot_set_power(target_pct);
+        if (ret != ESP_OK) {
+            snprintf(response, response_size, "motor_failed=%s", esp_err_to_name(ret));
+            return false;
+        }
+        // Sample ADC at defined intervals after motor stops (coast mode)
+        static const int drift_delays_ms[] = {0, 100, 500, 1000, 2000, 5000};
+        static const int drift_count = sizeof(drift_delays_ms) / sizeof(drift_delays_ms[0]);
+        float first_pct = 0.0f;
+        float last_pct = 0.0f;
+        int prev_ms = 0;
+        for (int i = 0; i < drift_count; i++) {
+            int wait = drift_delays_ms[i] - prev_ms;
+            if (wait > 0) vTaskDelay(pdMS_TO_TICKS(wait));
+            prev_ms = drift_delays_ms[i];
+            uint16_t adc = motor_pot_read_adc();
+            float pct = motor_pot_get_position_percent();
+            if (i == 0) first_pct = pct;
+            last_pct = pct;
+            char diag[160];
+            snprintf(diag, sizeof(diag),
+                     "DIAG,drift_sample,target=%.1f,t_ms=%d,adc=%u,pct=%.2f\n",
+                     target_pct, drift_delays_ms[i], adc, pct);
+            lan_client_send_message(diag);
+        }
+        char diag[160];
+        snprintf(diag, sizeof(diag),
+                 "DIAG,drift_summary,target=%.1f,initial_pct=%.2f,final_pct=%.2f,drift=%.3f\n",
+                 target_pct, first_pct, last_pct, last_pct - first_pct);
+        lan_client_send_message(diag);
+        snprintf(response, response_size, "drift_test=started,target=%.1f", target_pct);
+        return true;
+
+    } else if (strcmp(cmd, "diag_power_noise") == 0) {
+        if (!args) {
+            snprintf(response, response_size, "missing_num_samples");
+            return false;
+        }
+        int num_samples = atoi(args);
+        if (num_samples < 2 || num_samples > 1000) {
+            snprintf(response, response_size, "invalid_n,range=2-1000");
+            return false;
+        }
+        int32_t sum = 0;
+        int64_t sum_sq = 0;
+        uint16_t adc_min = UINT16_MAX;
+        uint16_t adc_max = 0;
+        for (int i = 0; i < num_samples; i++) {
+            uint16_t adc = motor_pot_read_adc();
+            sum += adc;
+            sum_sq += (int64_t)adc * adc;
+            if (adc < adc_min) adc_min = adc;
+            if (adc > adc_max) adc_max = adc;
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        float mean = (float)sum / num_samples;
+        float variance = ((float)sum_sq / num_samples) - (mean * mean);
+        float std_dev = (variance > 0.0f) ? sqrtf(variance) : 0.0f;
+        float range_pct = ((float)(adc_max - adc_min) / (POSITION_ADC_MAX - POSITION_ADC_MIN)) * 100.0f;
+        char diag[200];
+        snprintf(diag, sizeof(diag),
+                 "DIAG,noise_stats,n=%d,mean=%.1f,std=%.2f,min=%u,max=%u,range_pct=%.3f\n",
+                 num_samples, mean, std_dev, adc_min, adc_max, range_pct);
+        lan_client_send_message(diag);
+        snprintf(response, response_size, "noise_test=complete,n=%d", num_samples);
+        return true;
 
     // =========================================================================
     // Single-command calibration  (replaces recipe protocol for calibration)
@@ -1286,10 +1365,6 @@ void app_main(void)
     if (blocksi_state_init() != ESP_OK) {
         ESP_LOGW(TAG, "State manager initialization failed");
     }
-    
-    // Initialize power calibration module
-    ESP_LOGI(TAG, "Initializing power calibration...");
-    power_calibration_init();
     
     // Initialize sequence runner framework (provides lockout) and recipe executor
     ESP_LOGI(TAG, "Initializing sequence runner...");

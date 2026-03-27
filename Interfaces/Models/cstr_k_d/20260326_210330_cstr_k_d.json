@@ -1,0 +1,38 @@
+{
+  "system_volume_L": 9.27,
+  "decay_rate_per_s": 0.0012503514,
+  "dead_volume_L": 0.02,
+  "c_ss_fitted_pct": 1.571736,
+  "tau_eff_fill_s": 118.455,
+  "tau_physical_fill_s": 139.05,
+  "transport_delay_fill_s": 0.3,
+  "tau_drain_evac_s": 118.455,
+  "transport_delay_evac_s": 0.3,
+  "c_in_pct": 1.845,
+  "decay_rate_evac_per_s": 0.0,
+  "calibration_flow_lpm": 4.0,
+  "calibration_vessel_temp_c": 19.6,
+  "r_squared_fill": 0.908926,
+  "r_squared_evac": 0.889361,
+  "rmse_fill": 0.146962,
+  "rmse_evac": 0.114577,
+  "n_points_fill": 889,
+  "n_points_evac": 1826,
+  "data_files": [
+    "2026-03-10_182238_CSTR_4Lpm.csv",
+    "2026-03-10_221012_CSTR_4Lpm.csv",
+    "2026-03-10_235808_CSTR_4Lpm.csv",
+    "20260326_210305_k_d_cal_3.50Lpm.csv"
+  ],
+  "flow_rates_lpm": [
+    4.0,
+    4.0,
+    4.0,
+    3.5
+  ],
+  "data_file": "2026-03-10_182238_CSTR_4Lpm.csv",
+  "fitted_at": "2026-03-26T21:03:30",
+  "notes": "Fixed V=9.27L, V_dead=0.02L. Fitted k_d from 4 file(s) at flow(s) 4.00, 4.00, 4.00, 3.50 LPM. k_d(combined)=1.25e-03/s, k_d(evac only)=5.75e-13/s.",
+  "type": "cstr_k_d",
+  "version": 3
+}
